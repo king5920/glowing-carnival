@@ -4,8 +4,20 @@
   "private": true,
   "type": "commonjs",
   "main": "src/server.js",
+  "engines": {
+    "node": ">=25.0.0"
+  },
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "check-env": "node scripts/check-env.js",
+    "test": "node scripts/run-tests.js",
+    "test:mind": "node src/jarvis-mind.test.js",
+    "test:tools": "node src/jarvis-tools.test.js",
+    "test:patrol": "node src/jarvis-patrol.test.js",
+    "test:starmap": "node src/jarvis-starmap.test.js",
+    "test:shader": "node src/jarvis-shader.test.js",
+    "test:jiwen": "node src/jiwen.test.js",
+    "rebuild": "npm rebuild better-sqlite3"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0"

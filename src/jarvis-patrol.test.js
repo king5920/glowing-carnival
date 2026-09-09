@@ -589,6 +589,45 @@ test('飞书：getConnectUrl 已导出（分步排查需要）', () => {
 
 /* ══════════ 推送去重（防止你关掉通知）══════════ */
 
+test('推送：测试态绝不真发飞书（用户曾一天收到 100+ 条垃圾）', async () => {
+  /* ══ 这是一个真实事故，不是假想风险 ══
+   *
+   * 2026-09-09 用户截图报告：飞书一天收到 100 多条
+   * 「测试异动-1788947806320」「甲类异动1788947807813」这类消息。
+   *
+   * 根因就是下面那三条去重测试 —— 它们直接调 mind.pushToFeishu()，
+   * 而该函数当时**没有任何测试保护**，一路打到真实飞书 API。
+   * 我那天为验证别的改动跑了十几遍测试，每跑一次用户手机多 4 条。
+   *
+   * 危害等级高于"测试污染数据库"：污染的是**用户的注意力**，
+   * 而且用户唯一的止损手段是关掉整个通知 —— 那样真异动也收不到了。
+   *
+   * 所以闸门必须存在，且必须在**去重之后**才短路，
+   * 否则去重状态不更新，下面三条测试就形同虚设。 */
+  const mind = require('./mind');
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'mind.js'), 'utf8');
+
+  assert(/_isTestMode/.test(src), 'pushToFeishu 缺测试禁投递闸门');
+  assert(/JARVIS_FEISHU_DRYRUN/.test(src), '闸门没有可显式控制的环境变量');
+
+  /* 闸门必须在 feishu.send 之前 */
+  const gatePos = src.indexOf('if (_isTestMode())');
+  const sendPos = src.indexOf('await feishu.send(');
+  assert(gatePos > 0 && sendPos > 0 && gatePos < sendPos,
+    '闸门必须在 feishu.send 之前短路，否则照样会真发');
+
+  /* 闸门必须在去重判断之后（否则去重不可测） */
+  const dedupPos = src.indexOf('同类异动近期已推送');
+  assert(dedupPos > 0 && dedupPos < gatePos,
+    '闸门放在去重之前会让去重状态不更新，三条去重测试会变成假绿');
+
+  /* 运行时验证：当前就是测试态，必须 dryRun 且未投递 */
+  const r = await mind.pushToFeishu('闸门回归测试-' + Date.now(), false);
+  assert(r.dryRun === true, `测试态应 dryRun，实际 ${JSON.stringify(r)}`);
+  assert(r.delivered === false, '测试态不该标记为已投递');
+});
+
 test('推送去重：同内容一小时内只推一次', async () => {
   const mind = require('./mind');
   const uniq = '测试异动-' + Date.now();
