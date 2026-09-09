@@ -91,6 +91,31 @@ function _fingerprint(text) {
   return String(text).replace(/[\d.%+-]/g, '').slice(0, 60);
 }
 
+/* ══════ 测试禁投递闸门 ══════
+ *
+ * 2026-09-09 用户报告：一天收到 100 多条「测试异动-1788947806320」这类垃圾消息。
+ *
+ * 根因：jarvis-patrol.test.js 里三条去重测试直接调 pushToFeishu()，
+ * 而这个函数**没有任何测试保护**，一路打到真实飞书 API。
+ * 我今天为了验证别的改动跑了十几遍测试，每跑一次用户手机上多 4 条。
+ *
+ * 这比"测试污染数据库"更糟 —— 它污染的是**用户的注意力**，
+ * 而且用户只能通过关掉整个通知来止损，那样真异动也收不到了。
+ *
+ * 修法：进程处于测试态时，走完全部去重/上限逻辑但**不投递**，
+ * 返回 delivered:false + dryRun:true。
+ * 这样去重行为仍然可测（测试断言的正是去重），但不会打扰任何人。
+ *
+ * 判定优先用显式环境变量，其次自动识别 test 文件入口 ——
+ * 只依赖环境变量的话，后人跑测试忘了设就又开始发消息。 */
+function _isTestMode() {
+  if (process.env.JARVIS_FEISHU_DRYRUN === '1') return true;
+  if (process.env.JARVIS_FEISHU_DRYRUN === '0') return false;   // 显式允许真发
+  if (process.env.NODE_ENV === 'test') return true;
+  const entry = (process.argv[1] || '');
+  return /\.test\.js$/i.test(entry) || /[\\/]test[\\/]/i.test(entry);
+}
+
 async function pushToFeishu(text, isHigh) {
   const today = new Date().toISOString().slice(0, 10);
   if (today !== _pushDay) { _pushDay = today; _pushCount = 0; }
@@ -100,6 +125,14 @@ async function pushToFeishu(text, isHigh) {
   const last = _pushed.get(fp) || 0;
   const now = Date.now();
   if (now - last < PUSH_DEDUP_MS) return { ok: false, reason: '同类异动近期已推送' };
+
+  /* 测试态：记账但不投递。必须放在去重之后 ——
+   * 否则去重状态不会更新，测试就测不到去重行为了。 */
+  if (_isTestMode()) {
+    _pushed.set(fp, now);
+    _pushCount++;
+    return { ok: true, delivered: false, dryRun: true, reason: '测试态不投递' };
+  }
 
   let feishu;
   try { feishu = require('./feishu'); } catch { return { ok: false, reason: '飞书模块缺失' }; }
@@ -118,7 +151,7 @@ async function pushToFeishu(text, isHigh) {
     }
     _pushed.set(fp, now);
     _pushCount++;
-    return { ok: true };
+    return { ok: true, delivered: true };
   } catch (e) {
     return { ok: false, reason: e.message };
   }
