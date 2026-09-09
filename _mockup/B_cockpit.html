@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 界面方案 B：双栏座舱
+  同样受限于 823 x 521。
+  左栏对话 + 右栏 240px 侧板（记忆/心跳/工具实时状态）。
+  这是最接近"科幻座舱"的可行版本 —— 再多一栏就不可读了。
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>方案B 双栏座舱</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0e14; --panel:#131922; --panel2:#1a212c; --border:#242c38;
+  --text:#e6edf3; --dim:#7d8793; --accent:#4dd0e1; --ok:#2ecc71; --warn:#f1c40f;
+}
+body{background:var(--bg);color:var(--text);font:12.5px/1.55 "Microsoft YaHei",system-ui,sans-serif;
+  height:521px;width:823px;display:flex;flex-direction:column;overflow:hidden}
+.top{height:34px;flex:none;display:flex;align-items:center;gap:9px;padding:0 11px;
+  background:linear-gradient(90deg,#131922,#0f141c);border-bottom:1px solid var(--border)}
+.logo{font-weight:800;letter-spacing:2.5px;font-size:12.5px;
+  background:linear-gradient(90deg,#4dd0e1,#58a6ff);-webkit-background-clip:text;color:transparent}
+.pulse{width:6px;height:6px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 0 0 rgba(46,204,113,.7);animation:pl 2.4s infinite}
+@keyframes pl{70%{box-shadow:0 0 0 6px rgba(46,204,113,0)}100%{box-shadow:0 0 0 0 rgba(46,204,113,0)}}
+.spacer{flex:1}
+.tinfo{font-size:10.5px;color:var(--dim)}
+.tinfo b{color:var(--text)}
+
+.body{flex:1;display:flex;min-height:0}
+
+/* ── 左：对话 ── */
+.left{flex:1;display:flex;flex-direction:column;min-width:0}
+.chat{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.chat::-webkit-scrollbar{width:6px}
+.chat::-webkit-scrollbar-thumb{background:#2a3441;border-radius:3px}
+.msg{display:flex;gap:8px;max-width:92%}
+.msg.me{align-self:flex-end;flex-direction:row-reverse}
+.av{width:22px;height:22px;flex:none;border-radius:6px;display:grid;place-items:center;font-size:10px;font-weight:700}
+.av.j{background:linear-gradient(135deg,#0e7490,#4dd0e1);color:#04212a}
+.av.u{background:var(--panel2);color:var(--dim);border:1px solid var(--border)}
+.bub{background:var(--panel);border:1px solid var(--border);border-radius:9px;padding:7px 10px;font-size:12.5px}
+.msg.me .bub{background:#16323d;border-color:#1f4c5c}
+.bub .t{font-size:9.5px;color:var(--dim);margin-top:3px}
+.tool{display:flex;align-items:center;gap:7px;background:var(--panel2);
+  border:1px solid var(--border);border-radius:7px;padding:5px 9px;font-size:11px}
+.tool .tag{background:rgba(77,208,225,.16);color:var(--accent);border-radius:4px;padding:1px 5px;font-size:9.5px;font-weight:700}
+
+.input{flex:none;border-top:1px solid var(--border);background:var(--panel);padding:8px 11px}
+.ibox{display:flex;gap:7px}
+textarea{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);padding:7px 9px;font:12.5px/1.45 "Microsoft YaHei",sans-serif;resize:none;height:33px;outline:none}
+textarea:focus{border-color:var(--accent)}
+.mic{width:33px;height:33px;flex:none;border-radius:8px;border:1px solid var(--border);
+  background:var(--panel2);color:var(--dim);cursor:pointer;font-size:14px}
+.hint{font-size:9.5px;color:var(--dim);margin-top:4px}
+kbd{background:var(--panel2);border:1px solid var(--border);border-radius:3px;padding:0 3px;font-size:9px}
+
+/* ── 右：侧板 240px ── */
+.right{width:240px;flex:none;border-left:1px solid var(--border);background:var(--panel);
+  display:flex;flex-direction:column;overflow-y:auto}
+.right::-webkit-scrollbar{width:5px}
+.right::-webkit-scrollbar-thumb{background:#2a3441}
+.sec{border-bottom:1px solid var(--border);padding:9px 11px}
+.sh{font-size:9.5px;letter-spacing:1.3px;color:var(--dim);font-weight:700;margin-bottom:7px;
+  display:flex;justify-content:space-between}
+.sh .n{color:var(--accent)}
+/* 心跳环 */
+.hb{display:flex;align-items:center;gap:9px}
+.ring{width:44px;height:44px;flex:none;border-radius:50%;
+  background:conic-gradient(var(--accent) 0% 62%, #232b36 62% 100%);
+  display:grid;place-items:center;position:relative}
+.ring::after{content:'';position:absolute;inset:5px;background:var(--panel);border-radius:50%}
+.ring span{position:relative;z-index:1;font-size:10px;font-weight:700}
+.hbtxt{font-size:10.5px;color:var(--dim);line-height:1.7}
+.hbtxt b{color:var(--text)}
+/* 记忆条目 */
+.mem{font-size:11px;padding:5px 0;border-bottom:1px dashed rgba(255,255,255,.06);color:var(--dim)}
+.mem:last-child{border:0}
+.mem b{color:var(--text);font-weight:600}
+.mem .tag{font-size:9px;background:var(--panel2);border:1px solid var(--border);
+  border-radius:3px;padding:0 4px;color:var(--dim);margin-right:5px}
+/* 配额条 */
+.bar{height:5px;background:var(--panel2);border-radius:3px;overflow:hidden;margin:5px 0 3px}
+.bar i{display:block;height:100%;width:8%;background:linear-gradient(90deg,var(--ok),var(--accent))}
+.qt{font-size:10px;color:var(--dim);display:flex;justify-content:space-between}
+</style></head><body>
+
+<div class="top">
+  <span class="pulse"></span><span class="logo">JARVIS</span>
+  <span class="spacer"></span>
+  <span class="tinfo">本地 · <b>127.0.0.1:3800</b></span>
+</div>
+
+<div class="body">
+  <div class="left">
+    <div class="chat">
+      <div class="msg"><div class="av j">J</div><div class="bub">
+        早。昨天你说今天要看量化能不能开仓，我提前查了。<div class="t">09:02</div></div></div>
+
+      <div class="tool"><span class="tag">TOOL</span><span>gate_check</span>
+        <span style="margin-left:auto;color:var(--ok)">200 · 0.3s</span></div>
+
+      <div class="msg"><div class="av j">J</div><div class="bub">
+        今天周日休市。最近交易日 <b>20260904</b>：NEUTRAL / LOW_VOL，建议仓位 <b>59%</b>。<br>
+        提醒：容量上限约 <b>180 万</b>。<div class="t">09:02</div></div></div>
+
+      <div class="msg me"><div class="av u">我</div><div class="bub">
+        明早开盘前再提醒我<div class="t">09:04</div></div></div>
+
+      <div class="msg"><div class="av j">J</div><div class="bub">
+        已设：<b>周一 09:15</b>。<div class="t">09:04</div></div></div>
+    </div>
+    <div class="input">
+      <div class="ibox">
+        <textarea placeholder="说点什么…"></textarea>
+        <button class="mic">🎙</button>
+      </div>
+      <div class="hint"><kbd>空格</kbd> 说话　<kbd>Enter</kbd> 发送</div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="sec">
+      <div class="sh"><span>HEARTBEAT 心跳</span><span class="n">ON</span></div>
+      <div class="hb">
+        <div class="ring"><span>28′</span></div>
+        <div class="hbtxt">下次唤醒 <b>28 分钟后</b><br>今日已醒 <b>4 次</b><br>其中有行动 <b>1 次</b></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sh"><span>MEMORY 最近记忆</span><span class="n">128</span></div>
+      <div class="mem"><span class="tag">量化</span>容量上限约 <b>180 万</b></div>
+      <div class="mem"><span class="tag">习惯</span>开盘前要看<b>门禁</b></div>
+      <div class="mem"><span class="tag">偏好</span>结论<b>先给数字</b>，别铺垫</div>
+      <div class="mem"><span class="tag">项目</span>导航已精简为 <b>5 个入口</b></div>
+    </div>
+
+    <div class="sec">
+      <div class="sh"><span>QUOTA 今日用量</span><span class="n">16/200</span></div>
+      <div class="bar"><i></i></div>
+      <div class="qt"><span>约 ¥0.4</span><span>上限后自动停</span></div>
+    </div>
+
+    <div class="sec">
+      <div class="sh"><span>TOOLS 可用工具</span><span class="n">6</span></div>
+      <div class="mem">gate_check · daily_pick</div>
+      <div class="mem">remind · memory · file · web</div>
+    </div>
+  </div>
+</div>
+</body></html>

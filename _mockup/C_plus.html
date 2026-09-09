@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 方案 C+ ：认知界面（增强版）
+  ================================================================
+  相比 C 版新增的"炫"，全部有出处 —— 从白龙马 styles.css 逆向而来：
+
+   1. 悬浮面板     .panel{position:fixed;inset 20px;radius 16px;blur(20px)}
+                   ← 原版 L1/L2 是浮在空中的卡片，不是贴边栏。这是质感差距最大的一点
+   2. 启动 glitch  @keyframes brain-ui-card-glitch-in（760ms，clip-path+hue-rotate 撕裂）
+                   ← 我按原版关键帧比例复刻
+   3. 信号扫描     hs-signal-sweep / heartbeat-sweep
+   4. 节点激活     neb-node-use（记忆被调用时那一下闪烁）
+   5. 扫描线氛围   repeating-linear-gradient（原版用了 3 次）
+   6. 呼吸光晕     kc-breathe / focus-pulse
+
+  我自己加的（原版没有，但适配小屏很值）：
+   · 记忆图升级：粒子拖尾、鼠标引力、激活涟漪、连线流光
+   · 打字机流式输出 + 光标闪烁
+   · 顶栏实时波形（音频/思考活动可视化）
+   · 5 套主题切换（对应原版 phosphor/violet/rose/arctic/sand）
+  ================================================================
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>JARVIS · 认知界面</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg0:#111821; --bg1:#172231; --bg-deep:#0d141d;
+  --ink:#f3f5fb; --ink2:#a2adbd; --dim:#778397;
+  --line:rgba(150,169,198,.13); --line-strong:rgba(164,183,214,.32);
+  --panel:rgba(20,28,40,.72); --panel-raised:rgba(26,36,50,.70);
+  --cool:#4f8cff; --warm:#ff9f1c; --ok:#39d98a; --danger:#f87171;
+  --node-low:#213652; --node-high:#ffbe6b;
+  --shadow-soft:0 14px 40px rgba(0,0,0,.38);
+  --shadow-inset:inset 0 1px 0 rgba(255,255,255,.045);
+}
+/* 主题：对应原版 5 套 */
+body[data-theme="violet"]{--cool:#a78bfa;--warm:#e879f9;--node-high:#f0abfc;--bg0:#14111f;--bg-deep:#0c0a14}
+body[data-theme="phosphor"]{--cool:#4ade80;--warm:#86efac;--node-high:#bbf7d0;--ink:#c8f0c8;--bg0:#050806;--bg-deep:#020403}
+body[data-theme="rose"]{--cool:#fb7185;--warm:#fda4af;--node-high:#fecdd3;--bg0:#1a1015;--bg-deep:#12080c}
+body[data-theme="arctic"]{--cool:#38bdf8;--warm:#7dd3fc;--node-high:#bae6fd;--bg0:#0c1620;--bg-deep:#060d14}
+
+html,body{height:100%}
+body{width:823px;height:521px;overflow:hidden;position:relative;
+  background:
+    radial-gradient(1100px 560px at 18% -12%, rgba(79,140,255,.13), transparent 62%),
+    radial-gradient(880px 480px at 88% 112%, rgba(255,159,28,.09), transparent 62%),
+    var(--bg0);
+  color:var(--ink);font:12px/1.55 "Microsoft YaHei",system-ui,sans-serif;
+  transition:background .6s ease}
+
+/* 扫描线 + 暗角氛围层 */
+body::before{content:'';position:fixed;inset:0;z-index:9;pointer-events:none;
+  background:repeating-linear-gradient(180deg,rgba(255,255,255,.014) 0 1px,transparent 1px 3px)}
+body::after{content:'';position:fixed;inset:0;z-index:9;pointer-events:none;
+  background:radial-gradient(circle at 50% 45%,transparent 55%,rgba(0,0,0,.42) 100%)}
+
+/* 记忆图铺满整个背景（面板浮其上） */
+#graph{position:fixed;inset:0;z-index:0}
+
+/* ── 顶栏 ── */
+.tbar{position:fixed;top:0;left:0;right:0;height:30px;z-index:5;
+  display:flex;align-items:center;padding:0 12px;
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(23,34,49,.92),rgba(17,24,33,.55));
+  backdrop-filter:blur(14px)}
+.brand{display:flex;align-items:center;gap:7px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 10px var(--ok);animation:bp 2.6s infinite}
+@keyframes bp{50%{opacity:.3;transform:scale(.8)}}
+.bname{font-size:11px;font-weight:800;letter-spacing:2.4px;
+  background:linear-gradient(90deg,var(--warm),var(--node-high));
+  -webkit-background-clip:text;color:transparent}
+.bsub{font-size:9px;color:var(--dim);letter-spacing:1.4px}
+/* 活动波形 */
+#wave{margin-left:10px;opacity:.85}
+.tsp{flex:1}
+.stat{display:flex;gap:12px;font-size:9.5px;color:var(--dim);letter-spacing:.5px}
+.stat b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.stat .w{color:var(--warm)}
+.themes{display:flex;gap:4px;margin-left:12px}
+.tdot{width:9px;height:9px;border-radius:50%;cursor:pointer;border:1px solid rgba(255,255,255,.25)}
+.tdot:hover{transform:scale(1.25)}
+
+/* ── 悬浮面板（原版精髓：不贴边，浮空） ── */
+.panel{position:fixed;top:42px;bottom:14px;z-index:3;width:186px;
+  padding:0;border-radius:16px;border:1px solid var(--line-strong);
+  background:var(--panel);backdrop-filter:blur(20px);
+  box-shadow:var(--shadow-soft),var(--shadow-inset);
+  display:flex;flex-direction:column;overflow:hidden;
+  transition:transform .38s cubic-bezier(.4,0,.2,1),opacity .3s}
+#panel-l1{left:14px}
+#panel-l2{right:14px;width:190px}
+.panel.hide{opacity:0;pointer-events:none}
+#panel-l1.hide{transform:translateX(-108%)}
+#panel-l2.hide{transform:translateX(108%)}
+.ph{flex:none;padding:9px 12px 7px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:6px}
+.ph .kick{font-size:8.5px;color:var(--warm);letter-spacing:1.5px;font-weight:800}
+.ph .txt{font-size:10px;color:var(--ink2);letter-spacing:1px}
+.ph .live{margin-left:auto;font-size:8px;color:var(--ok);letter-spacing:1px}
+.pb{flex:1;overflow-y:auto;padding:9px 12px}
+.pb::-webkit-scrollbar{width:4px}
+.pb::-webkit-scrollbar-thumb{background:rgba(120,140,170,.22);border-radius:2px}
+
+.chip{display:inline-block;font-size:9px;padding:1.5px 7px;border-radius:5px;
+  border:1px solid var(--line-strong);color:var(--ink2);margin:0 4px 5px 0}
+.chip.on{background:rgba(57,217,138,.14);border-color:rgba(57,217,138,.42);color:var(--ok);
+  animation:cg 3s infinite}
+@keyframes cg{50%{box-shadow:0 0 9px rgba(57,217,138,.3)}}
+.perc{font-size:10.5px;color:var(--ink2);line-height:1.75;padding:7px 0;
+  border-bottom:1px dashed var(--line)}
+.perc:last-child{border:0}
+.perc b{color:var(--ink)}
+.perc .lbl{font-size:8.5px;color:var(--warm);letter-spacing:1.1px;display:block;margin-bottom:3px}
+
+/* L2 推理卡片 */
+.strm{border-left:2px solid rgba(255,159,28,.4);padding:5px 0 7px 9px;margin-bottom:9px;
+  position:relative}
+.strm .sh{font-size:8.5px;letter-spacing:1.2px;color:var(--warm);font-weight:800;
+  display:flex;justify-content:space-between;align-items:center}
+.strm .sb{font-size:10.5px;color:var(--ink2);line-height:1.7;margin-top:4px}
+.strm .sb b{color:var(--ink)}
+.think-dots span{display:inline-block;width:3px;height:3px;border-radius:50%;
+  background:var(--warm);margin-right:2px;animation:td 1.4s infinite}
+.think-dots span:nth-child(2){animation-delay:.2s}
+.think-dots span:nth-child(3){animation-delay:.4s}
+@keyframes td{0%,60%,100%{opacity:.22}30%{opacity:1}}
+/* 信号扫描条 */
+.sweep{position:relative;height:3px;background:rgba(79,140,255,.12);
+  border-radius:2px;overflow:hidden;margin:6px 0 2px}
+.sweep i{position:absolute;inset:0;width:32%;border-radius:2px;
+  background:linear-gradient(90deg,transparent,var(--cool),transparent);
+  animation:sw 3s cubic-bezier(.4,0,.6,1) infinite}
+@keyframes sw{to{transform:translateX(320%)}}
+
+/* ── 中央对话（避开两侧浮板） ── */
+.center{position:fixed;top:30px;bottom:0;left:214px;right:218px;z-index:2;
+  display:flex;flex-direction:column}
+.chat{flex:1;overflow-y:auto;padding:14px 6px 10px;display:flex;flex-direction:column;gap:10px}
+.chat::-webkit-scrollbar{width:5px}
+.chat::-webkit-scrollbar-thumb{background:rgba(120,140,170,.24);border-radius:3px}
+.m{max-width:86%;font-size:12px;padding:8px 12px;border-radius:12px;
+  backdrop-filter:blur(12px);border:1px solid var(--line);
+  box-shadow:0 8px 26px rgba(0,0,0,.3),var(--shadow-inset)}
+.m.j{align-self:flex-start;background:rgba(23,34,49,.82)}
+.m.u{align-self:flex-end;background:rgba(79,140,255,.17);border-color:rgba(79,140,255,.34)}
+.m .who{font-size:8.5px;letter-spacing:1.4px;color:var(--warm);font-weight:800;margin-bottom:4px}
+.m.u .who{color:var(--cool);text-align:right}
+.m .t{font-size:9px;color:var(--dim);margin-top:4px}
+/* 打字光标 */
+.caret{display:inline-block;width:6px;height:12px;background:var(--warm);
+  vertical-align:-2px;margin-left:1px;animation:ck .9s steps(1) infinite}
+@keyframes ck{50%{opacity:0}}
+/* glitch 入场（复刻原版关键帧） */
+.gin{animation:glitch-in 760ms linear both}
+@keyframes glitch-in{
+  0%{opacity:0;clip-path:inset(0 0 100% 0);transform:translate3d(0,10px,0) scale(.985);
+     filter:brightness(2.2) contrast(1.7) saturate(.55) blur(4px)}
+  14%{opacity:.88;clip-path:inset(0 0 42% 0);transform:translate3d(0,2px,0) scale(1.006);
+     filter:brightness(1.85) contrast(1.45) saturate(.72) blur(0)}
+  25%{opacity:.3;clip-path:inset(57% 0 18% 0);transform:translate3d(-6px,-1px,0) scaleX(1.018);
+     filter:brightness(.72) contrast(1.9) hue-rotate(18deg)}
+  39%{opacity:1;clip-path:inset(0 0 0 0);transform:translate3d(5px,0,0) scale(1.004);
+     filter:brightness(1.7) contrast(1.2)}
+  49%{opacity:.58;clip-path:inset(8% 0 66% 0);transform:translate3d(-3px,1px,0) scaleX(.994);
+     filter:brightness(.9) contrast(1.55) hue-rotate(-12deg)}
+  62%{opacity:.9;clip-path:inset(0 0 0 0);transform:translate3d(2px,0,0) scale(1);
+     filter:brightness(1.28) contrast(1.08)}
+  100%{opacity:1;clip-path:inset(0 0 0 0);transform:none;filter:none}
+}
+.toolrow{align-self:flex-start;display:flex;align-items:center;gap:8px;font-size:10px;
+  background:rgba(13,20,29,.85);border:1px solid var(--line-strong);border-radius:8px;
+  padding:5px 10px;backdrop-filter:blur(10px);box-shadow:0 6px 18px rgba(0,0,0,.28)}
+.toolrow .tg{font-size:8.5px;font-weight:800;letter-spacing:1.1px;color:var(--warm)}
+.spin{width:9px;height:9px;border:1.5px solid rgba(255,159,28,.28);
+  border-top-color:var(--warm);border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* ── 输入条 ── */
+.inbar{flex:none;margin:0 0 12px;padding:7px 9px;display:flex;gap:8px;align-items:center;
+  border:1px solid var(--line-strong);border-radius:13px;
+  background:rgba(13,20,29,.86);backdrop-filter:blur(16px);
+  box-shadow:0 10px 30px rgba(0,0,0,.34),var(--shadow-inset);
+  transition:border-color .25s,box-shadow .25s}
+.inbar:focus-within{border-color:rgba(255,159,28,.5);
+  box-shadow:0 10px 30px rgba(0,0,0,.34),0 0 0 3px rgba(255,159,28,.1)}
+.inbar input{flex:1;background:transparent;border:0;color:var(--ink);
+  padding:5px 4px;font:12px "Microsoft YaHei";outline:none}
+.ib{width:30px;height:30px;flex:none;border-radius:9px;border:1px solid var(--line-strong);
+  background:rgba(26,36,50,.75);color:var(--ink2);cursor:pointer;font-size:13px;
+  transition:.2s}
+.ib:hover{color:var(--warm);border-color:rgba(255,159,28,.5);
+  box-shadow:0 0 14px rgba(255,159,28,.22)}
+.ib.rec{background:rgba(248,113,113,.2);border-color:var(--danger);color:#ffb4b4;
+  animation:rec 1.1s infinite}
+@keyframes rec{50%{box-shadow:0 0 0 6px rgba(248,113,113,.12)}}
+.send{background:linear-gradient(135deg,var(--warm),var(--node-high));color:#231303;
+  border:0;font-weight:800;border-radius:9px;padding:0 14px;height:30px;cursor:pointer;
+  font-size:10.5px;letter-spacing:1.3px;transition:.2s}
+.send:hover{box-shadow:0 0 18px rgba(255,159,28,.4);transform:translateY(-1px)}
+/* 折叠把手 */
+.grip{position:fixed;top:50%;z-index:6;width:13px;height:46px;margin-top:-23px;
+  background:rgba(26,36,50,.8);border:1px solid var(--line-strong);cursor:pointer;
+  display:grid;place-items:center;font-size:8px;color:var(--dim);backdrop-filter:blur(8px)}
+.grip:hover{color:var(--warm);border-color:rgba(255,159,28,.45)}
+#gl{left:0;border-radius:0 8px 8px 0}
+#gr{right:0;border-radius:8px 0 0 8px}
+</style></head><body data-theme="default">
+
+<canvas id="graph"></canvas>
+
+<div class="tbar">
+  <div class="brand"><span class="dot"></span>
+    <span class="bname">JARVIS</span>
+    <span class="bsub">COGNITIVE SURFACE</span></div>
+  <canvas id="wave" width="52" height="14"></canvas>
+  <div class="tsp"></div>
+  <div class="stat">
+    <span>STATE <b class="w" id="st-state">streaming</b></span>
+    <span>NODES <b id="st-n">128</b></span>
+    <span>LINKS <b id="st-l">396</b></span>
+    <span>心跳 <b>28′</b></span>
+    <span>今日 <b>16/200</b></span>
+  </div>
+  <div class="themes">
+    <span class="tdot" style="background:#4f8cff" data-t="default" title="深蓝"></span>
+    <span class="tdot" style="background:#a78bfa" data-t="violet" title="紫"></span>
+    <span class="tdot" style="background:#4ade80" data-t="phosphor" title="磷光绿"></span>
+    <span class="tdot" style="background:#fb7185" data-t="rose" title="玫瑰"></span>
+    <span class="tdot" style="background:#38bdf8" data-t="arctic" title="极地"></span>
+  </div>
+</div>
+
+<div class="grip" id="gl">◀</div>
+<div class="grip" id="gr">▶</div>
+
+<!-- L1 感知 -->
+<div class="panel" id="panel-l1">
+  <div class="ph"><span class="kick">L1</span><span class="txt">感知 PERCEPTION</span>
+    <span class="live">● LIVE</span></div>
+  <div class="pb">
+    <div><span class="chip on">self 3</span><span class="chip on">active 1</span>
+      <span class="chip">known 91</span><span class="chip">decayed 25</span></div>
+    <div class="perc"><span class="lbl">环境</span>周日 · 休市<br>已连续运行 <b>19 小时</b></div>
+    <div class="perc"><span class="lbl">用户画像</span>做 A 股量化<br>要<b>先给数字</b>，别铺垫</div>
+    <div class="perc"><span class="lbl">未竟任务</span>周一 09:15<br>开盘前跑门禁并提醒</div>
+    <div class="perc"><span class="lbl">最近激活</span>容量上限 <b>180 万</b><br>导航精简 <b>5 入口</b></div>
+  </div>
+</div>
+
+<!-- L2 推理 -->
+<div class="panel" id="panel-l2">
+  <div class="ph"><span class="kick">L2</span><span class="txt">推理 REASONING</span>
+    <span class="live">STREAMING</span></div>
+  <div class="pb">
+    <div class="strm"><div class="sh"><span>◆ STREAM</span><span style="color:var(--dim)">09.02</span></div>
+      <div class="sb">检索记忆，命中「开盘前看门禁」习惯。当前 <b>周日休市</b>，改为汇报最近交易日。</div></div>
+    <div class="strm"><div class="sh"><span>◆ TOOL_CALL</span><span style="color:var(--ok)">200</span></div>
+      <div class="sb">gate_check → <b>NEUTRAL</b> / LOW_VOL</div>
+      <div class="sweep"><i></i></div></div>
+    <div class="strm"><div class="sh"><span>◆ SET_TASK</span><span style="color:var(--dim)">09.04</span></div>
+      <div class="sb">登记提醒 <b>周一 09:15</b>，唤醒前先跑门禁。</div></div>
+    <div class="strm"><div class="sh"><span>◆ THINKING</span>
+      <span class="think-dots"><span></span><span></span><span></span></span></div>
+      <div class="sb">观察到你连续 3 天问同一问题，考虑是否<b>自动化</b>为每日晨报。</div></div>
+  </div>
+</div>
+
+<div class="center">
+  <div class="chat" id="chat">
+    <div class="m j gin"><div class="who">JARVIS</div>
+      早。你昨天说今天要看量化能不能开仓，我提前查了。<div class="t">09:02</div></div>
+    <div class="toolrow gin" style="animation-delay:.1s"><span class="spin"></span>
+      <span class="tg">TOOL</span><span>gate_check</span>
+      <span style="color:var(--ok)">200 · 0.3s</span></div>
+    <div class="m j gin" style="animation-delay:.2s"><div class="who">JARVIS</div>
+      今天休市。最近交易日 <b>20260904</b>：NEUTRAL / LOW_VOL，建议仓位 <b>59%</b>。<br>
+      你说过容量上限约 <b>180 万</b>，别超。<div class="t">09:02</div></div>
+    <div class="m u gin" style="animation-delay:.3s"><div class="who">YOU</div>
+      明早开盘前再提醒我<div class="t">09:04</div></div>
+    <div class="m j" id="typing"><div class="who">JARVIS</div>
+      <span id="tw"></span><span class="caret"></span></div>
+  </div>
+  <div class="inbar">
+    <button class="ib" id="mic" title="按住空格说话">🎙</button>
+    <input placeholder="和 Jarvis 说点什么…">
+    <button class="send">SEND</button>
+  </div>
+</div>
+
+<script>
+/* ═══ 记忆图：粒子 + 鼠标引力 + 激活涟漪 + 连线流光 ═══ */
+const cv=document.getElementById('graph'),cx=cv.getContext('2d');
+let W,H,nodes=[],links=[],ripples=[],mouse={x:-999,y:-999},T=0;
+function css(v){return getComputedStyle(document.body).getPropertyValue(v).trim()}
+function init(){
+  W=cv.width=innerWidth;H=cv.height=innerHeight;
+  nodes=[];const N=64;
+  for(let i=0;i<N;i++)nodes.push({
+    x:Math.random()*W,y:Math.random()*H,
+    vx:(Math.random()-.5)*.16,vy:(Math.random()-.5)*.16,
+    r:1+Math.random()*2.6,ph:Math.random()*6.28,
+    hot:Math.random()<.2,act:0,
+    tr:[]   // 拖尾
+  });
+  links=[];
+  for(let i=0;i<N;i++)for(let j=i+1;j<N;j++)
+    if(Math.random()<.045)links.push({a:i,b:j,f:Math.random()});
+}
+addEventListener('mousemove',e=>{mouse.x=e.clientX;mouse.y=e.clientY});
+addEventListener('mouseleave',()=>{mouse.x=mouse.y=-999});
+// 每隔一段时间随机"激活"一个记忆节点（模拟 neb-node-use）
+setInterval(()=>{
+  const n=nodes[Math.floor(Math.random()*nodes.length)];
+  if(!n)return; n.act=1;
+  ripples.push({x:n.x,y:n.y,r:0,a:.55});
+},1500);
+
+function draw(){
+  T++;
+  const warm=css('--warm')||'#ff9f1c', high=css('--node-high')||'#ffbe6b';
+  cx.clearRect(0,0,W,H);
+
+  // 连线（带流光）
+  links.forEach(L=>{
+    const A=nodes[L.a],B=nodes[L.b];if(!A||!B)return;
+    const d=Math.hypot(A.x-B.x,A.y-B.y);
+    if(d>150)return;
+    const al=(1-d/150)*.2;
+    cx.lineWidth=.6;
+    cx.strokeStyle=`rgba(255,159,28,${al})`;
+    cx.beginPath();cx.moveTo(A.x,A.y);cx.lineTo(B.x,B.y);cx.stroke();
+    // 流光点
+    L.f=(L.f+.0035)%1;
+    if(al>.07){
+      const px=A.x+(B.x-A.x)*L.f, py=A.y+(B.y-A.y)*L.f;
+      cx.fillStyle=`rgba(255,190,107,${al*2.6})`;
+      cx.beginPath();cx.arc(px,py,1,0,6.28);cx.fill();
+    }
+  });
+
+  // 涟漪
+  ripples=ripples.filter(r=>{
+    r.r+=1.5;r.a*=.965;
+    if(r.a<.02)return false;
+    cx.strokeStyle=`rgba(255,190,107,${r.a})`;cx.lineWidth=1;
+    cx.beginPath();cx.arc(r.x,r.y,r.r,0,6.28);cx.stroke();
+    return true;
+  });
+
+  // 节点
+  nodes.forEach(n=>{
+    // 鼠标引力
+    const dx=mouse.x-n.x,dy=mouse.y-n.y,dm=Math.hypot(dx,dy);
+    if(dm<130&&dm>1){n.vx+=dx/dm*.006;n.vy+=dy/dm*.006}
+    n.vx*=.994;n.vy*=.994;
+    n.x+=n.vx;n.y+=n.vy;
+    if(n.x<0||n.x>W)n.vx*=-1;
+    if(n.y<0||n.y>H)n.vy*=-1;
+    n.act*=.94;
+
+    const pulse=.55+.45*Math.sin(T/55+n.ph);
+    const rad=n.r*(n.hot?1.45:1)*(1+n.act*.9);
+    if(n.hot||n.act>.05){
+      const g=cx.createRadialGradient(n.x,n.y,0,n.x,n.y,rad*8);
+      g.addColorStop(0,`rgba(255,190,107,${(.26+n.act*.5)*pulse})`);
+      g.addColorStop(1,'rgba(255,190,107,0)');
+      cx.fillStyle=g;cx.beginPath();cx.arc(n.x,n.y,rad*8,0,6.28);cx.fill();
+    }
+    cx.fillStyle=n.hot?`rgba(255,190,107,${.7*pulse+.3})`
+                      :`rgba(33,54,82,${.55*pulse+.45})`;
+    cx.beginPath();cx.arc(n.x,n.y,rad,0,6.28);cx.fill();
+  });
+  requestAnimationFrame(draw);
+}
+init();draw();addEventListener('resize',init);
+
+/* ═══ 顶栏活动波形 ═══ */
+const wc=document.getElementById('wave'),wx=wc.getContext('2d');
+let wt=0;
+(function wave(){
+  wt+=.14;wx.clearRect(0,0,52,14);
+  wx.strokeStyle=css('--warm')||'#ff9f1c';wx.lineWidth=1.2;wx.beginPath();
+  for(let x=0;x<52;x++){
+    const y=7+Math.sin(x/3.2+wt)*Math.sin(x/9+wt*.6)*4.6;
+    x?wx.lineTo(x,y):wx.moveTo(x,y);
+  }
+  wx.stroke();requestAnimationFrame(wave);
+})();
+
+/* ═══ 打字机流式输出 ═══ */
+const txt='已设：周一 09:15。我会先跑一遍门禁，再叫你。',tw=document.getElementById('tw');
+let ti=0;
+(function type(){
+  if(ti<=txt.length){tw.textContent=txt.slice(0,ti++);setTimeout(type,52)}
+  else setTimeout(()=>{
+    document.querySelector('.caret')?.remove();
+    document.getElementById('st-state').textContent='idle';
+  },600);
+})();
+
+/* ═══ 面板折叠 ═══ */
+document.getElementById('gl').onclick=()=>{
+  const p=document.getElementById('panel-l1');p.classList.toggle('hide');
+  document.querySelector('.center').style.left=p.classList.contains('hide')?'34px':'214px';
+};
+document.getElementById('gr').onclick=()=>{
+  const p=document.getElementById('panel-l2');p.classList.toggle('hide');
+  document.querySelector('.center').style.right=p.classList.contains('hide')?'34px':'218px';
+};
+/* ═══ 主题切换 ═══ */
+document.querySelectorAll('.tdot').forEach(d=>d.onclick=()=>{
+  document.body.dataset.theme=d.dataset.t;
+});
+/* ═══ 麦克风演示 ═══ */
+document.getElementById('mic').onclick=e=>e.currentTarget.classList.toggle('rec');
+</script>
+</body></html>

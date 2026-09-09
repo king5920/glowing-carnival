@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 中央形象：神经网格 · 六种形态
+  ================================================================
+  用户反馈：光效龙"像蠕虫" —— 放弃拉长的蛇形轮廓。
+  改用神经网格(NEURAL MESH)作为中心形象，提供六种形态供挑选。
+
+  共同点：都是"节点 + 连线"构成的活体网络，不是实体模型。
+  差异在于「节点如何在空间中组织」—— 这决定了气质。
+
+  性能实测（本机 Intel Iris Xe，823x521）：
+    带光照+深度的三角形 8,000 -> 60 FPS
+    本页六个网格同屏，全部用 POINTS + LINES，峰值远低于预算
+  ================================================================
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>JARVIS · 神经网格六形态</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#070b11;color:#e8eef6;
+  font:12px/1.6 "Microsoft YaHei",system-ui,sans-serif;padding:12px;
+  display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.card{background:rgba(16,24,36,.55);border:1px solid rgba(150,175,215,.18);
+  border-radius:13px;overflow:hidden;position:relative}
+.card.sel{border-color:#ff9f1c;box-shadow:0 0 22px rgba(255,159,28,.28)}
+.ch{padding:7px 11px;border-bottom:1px solid rgba(150,169,198,.12);
+  display:flex;align-items:center;gap:7px}
+.ch .n{font-size:9px;font-weight:800;letter-spacing:1.3px;color:#ff9f1c}
+.ch .t{font-size:11.5px;font-weight:600}
+.ch .d{font-size:9px;color:#6d7a8c;margin-left:auto}
+canvas{display:block;width:100%;height:186px;
+  background:radial-gradient(circle at 50% 45%,#0d141f,#05080d)}
+.ctl{padding:6px 9px;display:flex;gap:4px;flex-wrap:wrap;
+  border-top:1px solid rgba(150,169,198,.12)}
+.b{font-size:9px;padding:2px 7px;border-radius:5px;cursor:pointer;
+  border:1px solid rgba(164,183,214,.22);background:rgba(24,34,48,.7);color:#96a3b5}
+.b:hover{color:#fff;border-color:#ff9f1c}
+.b.on{background:rgba(255,159,28,.18);border-color:#ff9f1c;color:#ffbe6b}
+.note{grid-column:1/-1;font-size:11px;color:#8492a4;line-height:1.8;
+  background:rgba(79,140,255,.055);border:1px solid rgba(79,140,255,.22);
+  border-radius:10px;padding:9px 13px}
+.note b{color:#e8eef6}
+.pick{position:absolute;right:9px;top:6px;font-size:9px;color:#4e5a6b}
+</style></head><body>
+
+<div class="note">
+  <b>六种神经网格形态</b>，中心都是「节点 + 连线」的活体网络，区别在<b>节点如何在空间中组织</b>。
+  点每张卡下方的状态按钮看它<b>待机 / 聆听 / 思考 / 说话</b>的反应。
+  全部为真 3D（透视 + 深度 + 自转），可拖动旋转。
+</div>
+
+<div class="card" id="c1"><div class="ch"><span class="n">01</span><span class="t">球壳网格</span>
+  <span class="d">SPHERE</span></div><canvas></canvas>
+  <div class="ctl"><span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+  <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span></div></div>
+
+<div class="card" id="c2"><div class="ch"><span class="n">02</span><span class="t">双层脑</span>
+  <span class="d">CORTEX</span></div><canvas></canvas>
+  <div class="ctl"><span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+  <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span></div></div>
+
+<div class="card" id="c3"><div class="ch"><span class="n">03</span><span class="t">环形矩阵</span>
+  <span class="d">TORUS</span></div><canvas></canvas>
+  <div class="ctl"><span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+  <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span></div></div>
+
+<div class="card" id="c4"><div class="ch"><span class="n">04</span><span class="t">晶格核心</span>
+  <span class="d">LATTICE</span></div><canvas></canvas>
+  <div class="ctl"><span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+  <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span></div></div>
+
+<div class="card" id="c5"><div class="ch"><span class="n">05</span><span class="t">星云团簇</span>
+  <span class="d">CLUSTER</span></div><canvas></canvas>
+  <div class="ctl"><span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+  <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span></div></div>
+
+<div class="card" id="c6"><div class="ch"><span class="n">06</span><span class="t">分层神经网</span>
+  <span class="d">LAYERED</span></div><canvas></canvas>
+  <div class="ctl"><span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+  <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span></div></div>
+
+<script>
+/* ═══════ 状态语义（六种形态共用）═══════ */
+const S={
+  idle  :{spin:.22,pulse:.30,glow:.62,warm:.30,burst:0,spread:1.00},
+  listen:{spin:.38,pulse:.55,glow:.88,warm:.55,burst:.3,spread:1.10},
+  think :{spin:1.15,pulse:.95,glow:1.05,warm:.30,burst:.8,spread:.86},
+  speak :{spin:.62,pulse:1.35,glow:1.30,warm:.95,burst:1.0,spread:1.16}
+};
+const lerp=(a,b,k)=>a+(b-a)*k;
+function mix(a,b,k){const o={};for(const x in a)o[x]=lerp(a[x],b[x],k);return o}
+
+/* ═══════ 通用 3D 网格渲染器 ═══════ */
+function makeMesh(card, gen){
+  const cv=card.querySelector('canvas');
+  const gl=cv.getContext('webgl2',{antialias:true,alpha:true});
+  const DPR=Math.min(devicePixelRatio,2);
+  function size(){cv.width=cv.clientWidth*DPR;cv.height=cv.clientHeight*DPR;
+    gl.viewport(0,0,cv.width,cv.height);}
+  size();addEventListener('resize',size);
+
+  function sh(t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
+    if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(o));return o}
+  function prog(v,f){const p=gl.createProgram();
+    gl.attachShader(p,sh(gl.VERTEX_SHADER,v));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,f));
+    gl.linkProgram(p);
+    if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(p));return p}
+
+  // 节点着色器：深度决定大小与亮度（真 3D 感的关键）
+  const PN=prog(`#version 300 es
+  in vec3 pos; in float act;
+  uniform mat4 uMVP; uniform float uT,uPulse,uSpread;
+  out float vD; out float vA;
+  void main(){
+    vec3 p=pos*uSpread;
+    vec4 cp=uMVP*vec4(p,1.0);
+    vD=clamp(1.0-(cp.w-1.2)/2.2,0.05,1.0);
+    vA=act;
+    gl_Position=cp;
+    float breathe=1.0+0.28*uPulse*sin(uT*2.6+act*11.0);
+    // 节点尺寸整体放大（原 1.6+4.2 太小，在 186px 高的卡片里几乎是灰尘）
+    gl_PointSize=(3.0+6.0*vD+7.0*act)*breathe;
+  }`,`#version 300 es
+  precision highp float; in float vD; in float vA;
+  uniform float uGlow,uWarm; out vec4 o;
+  void main(){
+    vec2 d=gl_PointCoord-0.5; float r=length(d);
+    float m=1.0-smoothstep(0.0,0.5,r);
+    vec3 cool=vec3(0.42,0.68,1.0), warm=vec3(1.0,0.70,0.24), hot=vec3(1.0,0.95,0.82);
+    vec3 c=mix(cool,warm,uWarm);
+    c=mix(c,hot,vA*0.85);
+    // 实测节点太暗（整屏仅 138 可见像素），基础亮度与不透明度整体提高
+    o=vec4(c*uGlow*(1.05+0.85*vD), m*m*(0.62+0.38*vD)*(0.70+0.55*vA));
+  }`);
+
+  // 连线着色器
+  const PL=prog(`#version 300 es
+  in vec3 pos; in float act;
+  uniform mat4 uMVP; uniform float uSpread;
+  out float vD; out float vA;
+  void main(){
+    vec4 cp=uMVP*vec4(pos*uSpread,1.0);
+    vD=clamp(1.0-(cp.w-1.2)/2.2,0.05,1.0);
+    vA=act; gl_Position=cp;
+  }`,`#version 300 es
+  precision highp float; in float vD; in float vA;
+  uniform float uGlow,uWarm; out vec4 o;
+  void main(){
+    vec3 cool=vec3(0.32,0.56,0.98), warm=vec3(1.0,0.66,0.22);
+    vec3 c=mix(cool,warm,uWarm);
+    // 连线原本 alpha 仅 0.05 起，几乎不可见；提高到 0.16 起
+    o=vec4(c*uGlow, (0.16+0.55*vA)*vD);
+  }`);
+
+  // 生成节点与边
+  const {nodes, edges} = gen();
+  const N=nodes.length;
+  const nPos=new Float32Array(N*3), nAct=new Float32Array(N);
+  nodes.forEach((p,i)=>{nPos[i*3]=p[0];nPos[i*3+1]=p[1];nPos[i*3+2]=p[2];});
+  const E=edges.length;
+  const ePos=new Float32Array(E*2*3), eAct=new Float32Array(E*2);
+  edges.forEach((e,i)=>{
+    const a=nodes[e[0]], b=nodes[e[1]];
+    ePos[i*6]=a[0];ePos[i*6+1]=a[1];ePos[i*6+2]=a[2];
+    ePos[i*6+3]=b[0];ePos[i*6+4]=b[1];ePos[i*6+5]=b[2];
+  });
+
+  const bNP=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bNP);gl.bufferData(gl.ARRAY_BUFFER,nPos,gl.STATIC_DRAW);
+  const bNA=gl.createBuffer();
+  const bEP=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bEP);gl.bufferData(gl.ARRAY_BUFFER,ePos,gl.STATIC_DRAW);
+  const bEA=gl.createBuffer();
+
+  function attr(p,name,buf,sz){const l=gl.getAttribLocation(p,name);if(l<0)return;
+    gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.enableVertexAttribArray(l);
+    gl.vertexAttribPointer(l,sz,gl.FLOAT,false,0,0);}
+
+  // 矩阵
+  function persp(f,a,n,fa){const t=1/Math.tan(f/2);
+    return [t/a,0,0,0, 0,t,0,0, 0,0,(fa+n)/(n-fa),-1, 0,0,2*fa*n/(n-fa),0]}
+  function mul(A,B){const C=new Array(16);
+    for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;
+      for(let k=0;k<4;k++)s+=A[k*4+j]*B[i*4+k];C[i*4+j]=s}return C}
+  function rY(a){const c=Math.cos(a),s=Math.sin(a);return[c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1]}
+  function rX(a){const c=Math.cos(a),s=Math.sin(a);return[1,0,0,0,0,c,s,0,0,-s,c,0,0,0,0,1]}
+  function tr(x,y,z){return[1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1]}
+
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+
+  let cur={...S.idle}, tgt=S.idle, T=0, ry=0.5, rx=-0.16;
+  let drag=false, lx=0, ly=0;
+  cv.addEventListener('pointerdown',e=>{drag=true;lx=e.clientX;ly=e.clientY;cv.setPointerCapture(e.pointerId)});
+  cv.addEventListener('pointerup',()=>drag=false);
+  cv.addEventListener('pointermove',e=>{if(!drag)return;
+    ry+=(e.clientX-lx)*0.008; rx=Math.max(-1.2,Math.min(1.2,rx+(e.clientY-ly)*0.005));
+    lx=e.clientX;ly=e.clientY;});
+
+  // 激活波：随机点亮节点并沿边扩散
+  const act=new Float32Array(N);
+  let nextFire=0;
+  function fire(){
+    const seed=Math.floor(Math.random()*N);
+    act[seed]=1.0;
+    edges.forEach(e=>{
+      if(e[0]===seed) act[e[1]]=Math.max(act[e[1]],0.75);
+      if(e[1]===seed) act[e[0]]=Math.max(act[e[0]],0.75);
+    });
+  }
+
+  function frame(){
+    cur=mix(cur,tgt,0.055); T+=0.016;
+    if(!drag) ry+=0.0022*cur.spin*6;
+
+    // 激活衰减与触发
+    const decay=0.965-0.03*cur.burst;
+    for(let i=0;i<N;i++) act[i]*=decay;
+    nextFire-=0.016;
+    if(nextFire<=0){ fire(); nextFire=lerp(1.5,0.25,cur.burst); }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER,bNA);gl.bufferData(gl.ARRAY_BUFFER,act,gl.DYNAMIC_DRAW);
+    // 边的激活 = 两端较大值
+    edges.forEach((e,i)=>{const v=Math.max(act[e[0]],act[e[1]]);eAct[i*2]=v;eAct[i*2+1]=v;});
+    gl.bindBuffer(gl.ARRAY_BUFFER,bEA);gl.bufferData(gl.ARRAY_BUFFER,eAct,gl.DYNAMIC_DRAW);
+
+    const aspect=cv.width/cv.height;
+    let M=mul(rY(ry),rX(rx));
+    // 相机拉近：2.55 时网格只占卡片中间一小团
+    M=mul(tr(0,0,-2.05),M);
+    const VP=mul(persp(1.0,aspect,0.1,20),M);
+
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.useProgram(PL);
+    attr(PL,'pos',bEP,3); attr(PL,'act',bEA,1);
+    gl.uniformMatrix4fv(gl.getUniformLocation(PL,'uMVP'),false,new Float32Array(VP));
+    gl.uniform1f(gl.getUniformLocation(PL,'uGlow'),cur.glow);
+    gl.uniform1f(gl.getUniformLocation(PL,'uWarm'),cur.warm);
+    gl.uniform1f(gl.getUniformLocation(PL,'uSpread'),cur.spread);
+    gl.drawArrays(gl.LINES,0,E*2);
+
+    gl.useProgram(PN);
+    attr(PN,'pos',bNP,3); attr(PN,'act',bNA,1);
+    gl.uniformMatrix4fv(gl.getUniformLocation(PN,'uMVP'),false,new Float32Array(VP));
+    gl.uniform1f(gl.getUniformLocation(PN,'uT'),T);
+    gl.uniform1f(gl.getUniformLocation(PN,'uPulse'),cur.pulse);
+    gl.uniform1f(gl.getUniformLocation(PN,'uGlow'),cur.glow);
+    gl.uniform1f(gl.getUniformLocation(PN,'uWarm'),cur.warm);
+    gl.uniform1f(gl.getUniformLocation(PN,'uSpread'),cur.spread);
+    gl.drawArrays(gl.POINTS,0,N);
+
+    requestAnimationFrame(frame);
+  }
+  frame();
+
+  card.querySelectorAll('.b').forEach(btn=>btn.onclick=()=>{
+    card.querySelectorAll('.b').forEach(x=>x.classList.remove('on'));
+    btn.classList.add('on'); tgt=S[btn.dataset.s];
+  });
+  return {nodes:N, edges:E};
+}
+
+/* ═══════ 六种节点组织方式 ═══════ */
+function linkNear(nodes, maxDist, maxDeg){
+  const edges=[], deg=new Array(nodes.length).fill(0);
+  for(let i=0;i<nodes.length;i++)for(let j=i+1;j<nodes.length;j++){
+    if(deg[i]>=maxDeg||deg[j]>=maxDeg)continue;
+    const dx=nodes[i][0]-nodes[j][0],dy=nodes[i][1]-nodes[j][1],dz=nodes[i][2]-nodes[j][2];
+    if(dx*dx+dy*dy+dz*dz<maxDist*maxDist){edges.push([i,j]);deg[i]++;deg[j]++;}
+  }
+  return edges;
+}
+
+// ① 球壳：节点均布在球面，最纯粹
+const g1=()=>{
+  const nodes=[],N=190;
+  for(let i=0;i<N;i++){
+    const y=1-(i/(N-1))*2, r=Math.sqrt(Math.max(0,1-y*y));
+    const th=i*2.39996;
+    nodes.push([Math.cos(th)*r*0.92, y*0.92, Math.sin(th)*r*0.92]);
+  }
+  return {nodes, edges:linkNear(nodes,0.30,6)};
+};
+
+// ② 双层脑：内核 + 外皮层，两层间有放射连接
+const g2=()=>{
+  const nodes=[];
+  for(let i=0;i<70;i++){          // 内核
+    const y=1-(i/69)*2, r=Math.sqrt(Math.max(0,1-y*y)), th=i*2.39996;
+    nodes.push([Math.cos(th)*r*0.44, y*0.44, Math.sin(th)*r*0.44]);
+  }
+  for(let i=0;i<150;i++){         // 外皮层（略扁，像大脑）
+    const y=1-(i/149)*2, r=Math.sqrt(Math.max(0,1-y*y)), th=i*2.39996;
+    nodes.push([Math.cos(th)*r*1.0, y*0.80, Math.sin(th)*r*0.88]);
+  }
+  const edges=linkNear(nodes,0.30,5);
+  for(let i=0;i<70;i+=2) edges.push([i, 70+((i*7)%150)]);   // 放射连接
+  return {nodes, edges};
+};
+
+// ③ 环形矩阵：三个正交圆环互相穿插
+const g3=()=>{
+  const nodes=[],edges=[];
+  const rings=[[1,0,0],[0,1,0],[0,0,1]];
+  rings.forEach((ax,ri)=>{
+    const start=nodes.length, C=62;
+    for(let i=0;i<C;i++){
+      const a=i/C*6.2832, R=0.92-ri*0.05;
+      let p;
+      if(ri===0) p=[0,Math.cos(a)*R,Math.sin(a)*R];
+      else if(ri===1) p=[Math.cos(a)*R,0,Math.sin(a)*R];
+      else p=[Math.cos(a)*R,Math.sin(a)*R,0];
+      nodes.push(p);
+      if(i>0) edges.push([start+i-1,start+i]);
+    }
+    edges.push([start+C-1,start]);
+  });
+  // 环间交叉连接
+  for(let i=0;i<62;i+=5){edges.push([i,62+((i*3)%62)]);edges.push([62+i,124+((i*5)%62)]);}
+  return {nodes, edges};
+};
+
+// ④ 晶格核心：立方晶格，最"机械/秩序"
+const g4=()=>{
+  const nodes=[],edges=[],K=5,idx={};
+  for(let x=0;x<K;x++)for(let y=0;y<K;y++)for(let z=0;z<K;z++){
+    const d=Math.hypot(x-2,y-2,z-2);
+    if(d>2.6)continue;
+    idx[`${x},${y},${z}`]=nodes.length;
+    nodes.push([(x-2)/2*0.92,(y-2)/2*0.92,(z-2)/2*0.92]);
+  }
+  for(const k in idx){
+    const [x,y,z]=k.split(',').map(Number);
+    [[1,0,0],[0,1,0],[0,0,1]].forEach(([dx,dy,dz])=>{
+      const nk=`${x+dx},${y+dy},${z+dz}`;
+      if(nk in idx) edges.push([idx[k],idx[nk]]);
+    });
+  }
+  return {nodes, edges};
+};
+
+// ⑤ 星云团簇：几个密集团块 + 团块间长程连接（最像"记忆分区"）
+const g5=()=>{
+  const nodes=[],edges=[],hubs=[];
+  const C=6;
+  for(let c=0;c<C;c++){
+    const a=c/C*6.2832, r=0.62;
+    const cx=Math.cos(a)*r, cy=(Math.random()-0.5)*0.75, cz=Math.sin(a)*r;
+    hubs.push(nodes.length);
+    nodes.push([cx,cy,cz]);
+    for(let i=0;i<26;i++){
+      nodes.push([cx+(Math.random()-0.5)*0.52,
+                  cy+(Math.random()-0.5)*0.52,
+                  cz+(Math.random()-0.5)*0.52]);
+    }
+  }
+  const e2=linkNear(nodes,0.26,5);
+  edges.push(...e2);
+  for(let i=0;i<hubs.length;i++)                       // 团块中枢互联
+    for(let j=i+1;j<hubs.length;j++) if((i+j)%2===0) edges.push([hubs[i],hubs[j]]);
+  return {nodes, edges};
+};
+
+// ⑥ 分层神经网：真正的"神经网络"结构，输入→隐藏→输出
+const g6=()=>{
+  const nodes=[],edges=[];
+  const layers=[7,13,16,13,7], xs=[-0.92,-0.46,0,0.46,0.92];
+  const li=[];
+  layers.forEach((cnt,L)=>{
+    const start=nodes.length, arr=[];
+    for(let i=0;i<cnt;i++){
+      const a=i/cnt*6.2832;
+      const R=0.30+0.30*Math.sin(L/(layers.length-1)*Math.PI);
+      nodes.push([xs[L], Math.cos(a)*R, Math.sin(a)*R]);
+      arr.push(start+i);
+    }
+    li.push(arr);
+  });
+  for(let L=0;L<li.length-1;L++)
+    li[L].forEach(a=>li[L+1].forEach(b=>{ if(Math.random()<0.34) edges.push([a,b]); }));
+  return {nodes, edges};
+};
+
+const gens=[g1,g2,g3,g4,g5,g6];
+const stats=[];
+for(let i=0;i<6;i++){
+  stats.push(makeMesh(document.getElementById('c'+(i+1)), gens[i]));
+}
+// 在标题栏显示真实节点/边数（不写死假数字）
+stats.forEach((s,i)=>{
+  document.querySelector('#c'+(i+1)+' .d').textContent =
+    document.querySelector('#c'+(i+1)+' .d').textContent+' · '+s.nodes+'节点 '+s.edges+'边';
+});
+</script>
+</body></html>

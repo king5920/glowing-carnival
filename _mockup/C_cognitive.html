@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 方案 C：认知界面（Cognitive Surface）
+  —— 对标白龙马 Brain UI，但适配 823x521 的真实画布
+
+  白龙马做对的事（我照搬的理念）：
+    1. 三栏分层：L1 感知 / 中央记忆图 / L2 推理，把"思考"变成空间
+    2. 记忆图是活的：节点会呼吸、被激活时点亮
+    3. 毛玻璃 + 发光 + 深色，营造"仪器"质感（它用了 28 处 backdrop-filter）
+    4. 顶部常驻状态：STATE / NODES / LINKS / 温度
+
+  我做的适配（因为你屏幕只有它的 2/3）：
+    · 侧栏可折叠，默认只留窄轨道，点击展开
+    · 字号下限 11px，不学它的 9px
+    · 记忆图用 canvas，节点数自适应
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>方案C 认知界面</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg0:#111821; --bg1:#172231; --bg-deep:#0d141d;
+  --ink:#f3f5fb; --ink2:#a2adbd; --dim:#778397;
+  --line:rgba(150,169,198,.13); --line-strong:rgba(164,183,214,.32);
+  --panel:rgba(20,28,40,.78); --panel-raised:rgba(26,36,50,.70);
+  --cool:#4f8cff; --warm:#ff9f1c; --ok:#39d98a; --danger:#f87171;
+  --node-low:#213652; --node-high:#ffbe6b;
+  --glow:rgba(255,159,28,.16);
+}
+html,body{height:100%}
+body{width:823px;height:521px;overflow:hidden;background:
+  radial-gradient(1200px 600px at 20% -10%, rgba(79,140,255,.10), transparent 60%),
+  radial-gradient(900px 500px at 85% 110%, rgba(255,159,28,.07), transparent 60%),
+  var(--bg0);
+  color:var(--ink);font:12px/1.55 "Microsoft YaHei",system-ui,sans-serif;
+  display:flex;flex-direction:column}
+
+/* ── 顶部状态条 ── */
+.tbar{height:30px;flex:none;display:flex;align-items:center;gap:0;
+  padding:0 10px;border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(23,34,49,.9),rgba(17,24,33,.6));
+  backdrop-filter:blur(12px)}
+.brand{display:flex;align-items:center;gap:7px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 8px var(--ok);animation:bp 2.6s infinite}
+@keyframes bp{50%{opacity:.35}}
+.bname{font-size:11px;font-weight:800;letter-spacing:2.2px}
+.bsub{font-size:9.5px;color:var(--dim);letter-spacing:.8px}
+.tsp{flex:1}
+.stat{display:flex;gap:13px;font-size:9.5px;color:var(--dim);letter-spacing:.6px}
+.stat b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.stat .warm{color:var(--warm)}
+
+/* ── 主体三区 ── */
+.main{flex:1;display:flex;min-height:0;position:relative}
+
+/* L1 左栏：感知（可折叠） */
+.l1{width:172px;flex:none;border-right:1px solid var(--line);
+  background:var(--panel);backdrop-filter:blur(14px);
+  display:flex;flex-direction:column;transition:width .28s cubic-bezier(.4,0,.2,1)}
+.l1.collapsed{width:28px}
+.l1.collapsed .l1body,.l1.collapsed .lhead .txt{display:none}
+.lhead{height:26px;flex:none;display:flex;align-items:center;gap:6px;padding:0 8px;
+  border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+.lhead:hover{background:rgba(79,140,255,.07)}
+.lhead .kick{font-size:8.5px;color:var(--warm);letter-spacing:1.4px;font-weight:800}
+.lhead .txt{font-size:10px;color:var(--ink2);letter-spacing:.8px}
+.lhead .arw{margin-left:auto;color:var(--dim);font-size:9px}
+.l1body{flex:1;overflow-y:auto;padding:8px}
+.l1body::-webkit-scrollbar{width:4px}
+.l1body::-webkit-scrollbar-thumb{background:#2a3644;border-radius:2px}
+.chip{display:inline-block;font-size:9px;padding:1px 6px;border-radius:4px;
+  border:1px solid var(--line-strong);color:var(--ink2);margin:0 4px 4px 0}
+.chip.on{background:rgba(57,217,138,.14);border-color:rgba(57,217,138,.4);color:var(--ok)}
+.perc{font-size:10.5px;color:var(--ink2);line-height:1.75;
+  padding:6px 0;border-bottom:1px dashed var(--line)}
+.perc:last-child{border:0}
+.perc b{color:var(--ink)}
+.perc .lbl{font-size:8.5px;color:var(--warm);letter-spacing:1px;display:block;margin-bottom:2px}
+
+/* 中央：记忆图 + 对话叠加 */
+.center{flex:1;position:relative;min-width:0;display:flex;flex-direction:column}
+#graph{position:absolute;inset:0;z-index:0}
+.chat{position:relative;z-index:1;flex:1;overflow-y:auto;padding:12px 14px;
+  display:flex;flex-direction:column;gap:9px}
+.chat::-webkit-scrollbar{width:5px}
+.chat::-webkit-scrollbar-thumb{background:rgba(120,140,170,.25);border-radius:3px}
+.m{max-width:78%;font-size:12px;padding:7px 11px;border-radius:11px;
+  backdrop-filter:blur(10px);border:1px solid var(--line);
+  box-shadow:0 6px 20px rgba(0,0,0,.22);animation:mi .35s ease both}
+@keyframes mi{from{opacity:0;transform:translateY(6px)}}
+.m.j{align-self:flex-start;background:rgba(23,34,49,.82)}
+.m.u{align-self:flex-end;background:rgba(79,140,255,.16);border-color:rgba(79,140,255,.3)}
+.m .who{font-size:8.5px;letter-spacing:1.3px;color:var(--warm);font-weight:800;margin-bottom:3px}
+.m.u .who{color:var(--cool);text-align:right}
+.m .t{font-size:9px;color:var(--dim);margin-top:3px}
+.toolrow{align-self:flex-start;display:flex;align-items:center;gap:7px;font-size:10px;
+  background:rgba(13,20,29,.8);border:1px solid var(--line-strong);border-radius:7px;
+  padding:4px 9px;backdrop-filter:blur(8px)}
+.toolrow .tg{font-size:8.5px;font-weight:800;letter-spacing:1px;color:var(--warm)}
+.spin{width:8px;height:8px;border:1.5px solid rgba(255,159,28,.3);
+  border-top-color:var(--warm);border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* 输入 */
+.inbar{position:relative;z-index:2;flex:none;padding:8px 12px;border-top:1px solid var(--line);
+  background:rgba(13,20,29,.86);backdrop-filter:blur(14px);display:flex;gap:7px;align-items:center}
+.inbar input{flex:1;background:rgba(10,16,24,.9);border:1px solid var(--line-strong);
+  border-radius:9px;color:var(--ink);padding:7px 11px;font:12px "Microsoft YaHei";outline:none}
+.inbar input:focus{border-color:var(--cool);box-shadow:0 0 0 2px rgba(79,140,255,.15)}
+.ib{width:31px;height:31px;flex:none;border-radius:9px;border:1px solid var(--line-strong);
+  background:rgba(26,36,50,.8);color:var(--ink2);cursor:pointer;font-size:13px}
+.ib:hover{color:var(--warm);border-color:rgba(255,159,28,.45)}
+.send{background:linear-gradient(135deg,#ff9f1c,#ffbe6b);color:#231303;border:0;font-weight:800;
+  border-radius:9px;padding:0 13px;height:31px;cursor:pointer;font-size:11px;letter-spacing:1px}
+
+/* L2 右栏：推理流 */
+.l2{width:188px;flex:none;border-left:1px solid var(--line);background:var(--panel);
+  backdrop-filter:blur(14px);display:flex;flex-direction:column;
+  transition:width .28s cubic-bezier(.4,0,.2,1)}
+.l2.collapsed{width:28px}
+.l2.collapsed .l2body,.l2.collapsed .lhead .txt{display:none}
+.l2body{flex:1;overflow-y:auto;padding:8px}
+.l2body::-webkit-scrollbar{width:4px}
+.l2body::-webkit-scrollbar-thumb{background:#2a3644;border-radius:2px}
+.strm{border-left:2px solid rgba(255,159,28,.35);padding:4px 0 6px 8px;margin-bottom:8px}
+.strm .sh{font-size:8.5px;letter-spacing:1.2px;color:var(--warm);font-weight:800;
+  display:flex;justify-content:space-between}
+.strm .sb{font-size:10.5px;color:var(--ink2);line-height:1.7;margin-top:3px}
+.strm .sb b{color:var(--ink)}
+.think-dots span{display:inline-block;width:3px;height:3px;border-radius:50%;
+  background:var(--warm);margin-right:2px;animation:td 1.4s infinite}
+.think-dots span:nth-child(2){animation-delay:.2s}
+.think-dots span:nth-child(3){animation-delay:.4s}
+@keyframes td{0%,60%,100%{opacity:.25}30%{opacity:1}}
+/* 心跳扫描环 */
+.hbring{position:relative;height:3px;background:rgba(79,140,255,.12);border-radius:2px;
+  overflow:hidden;margin:5px 0}
+.hbring i{position:absolute;inset:0;width:34%;border-radius:2px;
+  background:linear-gradient(90deg,transparent,var(--cool),transparent);animation:sw 3.2s infinite}
+@keyframes sw{to{transform:translateX(300%)}}
+</style></head><body>
+
+<div class="tbar">
+  <div class="brand"><span class="dot"></span>
+    <span class="bname">JARVIS</span>
+    <span class="bsub">COGNITIVE SURFACE</span></div>
+  <div class="tsp"></div>
+  <div class="stat">
+    <span>STATE <b class="warm">streaming</b></span>
+    <span>NODES <b>128</b></span>
+    <span>LINKS <b>396</b></span>
+    <span>心跳 <b>28′</b></span>
+    <span>今日 <b>16/200</b></span>
+  </div>
+</div>
+
+<div class="main">
+  <!-- L1 感知 -->
+  <div class="l1" id="l1">
+    <div class="lhead" onclick="document.getElementById('l1').classList.toggle('collapsed')">
+      <span class="kick">L1</span><span class="txt">感知 PERCEPTION</span><span class="arw">◀</span>
+    </div>
+    <div class="l1body">
+      <div><span class="chip on">self 3</span><span class="chip on">active 1</span><span class="chip">known 91</span><span class="chip">decayed 25</span></div>
+      <div class="perc"><span class="lbl">环境</span>周日 · 休市<br>已连续运行 <b>19 小时</b></div>
+      <div class="perc"><span class="lbl">用户画像</span>做 A 股量化<br>要<b>先给数字</b>，别铺垫</div>
+      <div class="perc"><span class="lbl">未竟任务</span>周一 09:15 开盘前<br>跑门禁并提醒</div>
+      <div class="perc"><span class="lbl">最近激活</span>容量上限 <b>180 万</b><br>导航精简为 <b>5 入口</b></div>
+    </div>
+  </div>
+
+  <!-- 中央：记忆图 + 对话 -->
+  <div class="center">
+    <canvas id="graph"></canvas>
+    <div class="chat">
+      <div class="m j"><div class="who">JARVIS</div>
+        早。你昨天说今天要看量化能不能开仓，我提前查了。<div class="t">09:02</div></div>
+      <div class="toolrow"><span class="spin"></span><span class="tg">TOOL</span>
+        <span>gate_check</span><span style="color:var(--ok)">200 · 0.3s</span></div>
+      <div class="m j"><div class="who">JARVIS</div>
+        今天休市。最近交易日 <b>20260904</b>：NEUTRAL / LOW_VOL，建议仓位 <b>59%</b>。<br>
+        你说过容量上限约 <b>180 万</b>，别超。<div class="t">09:02</div></div>
+      <div class="m u"><div class="who">YOU</div>明早开盘前再提醒我<div class="t">09:04</div></div>
+      <div class="m j"><div class="who">JARVIS</div>已设：周一 <b>09:15</b>。<div class="t">09:04</div></div>
+    </div>
+    <div class="inbar">
+      <button class="ib" title="按住说话">🎙</button>
+      <input placeholder="和 Jarvis 说点什么…">
+      <button class="send">SEND</button>
+    </div>
+  </div>
+
+  <!-- L2 推理 -->
+  <div class="l2" id="l2">
+    <div class="lhead" onclick="document.getElementById('l2').classList.toggle('collapsed')">
+      <span class="kick">L2</span><span class="txt">推理 REASONING</span><span class="arw">▶</span>
+    </div>
+    <div class="l2body">
+      <div class="strm">
+        <div class="sh"><span>◆ STREAM</span><span style="color:var(--dim)">09.02</span></div>
+        <div class="sb">检索记忆，命中「开盘前看门禁」习惯。当前 <b>周日休市</b>，改为汇报最近交易日。</div>
+      </div>
+      <div class="strm">
+        <div class="sh"><span>◆ SET_TASK</span><span style="color:var(--dim)">09.04</span></div>
+        <div class="sb">登记提醒 <b>周一 09:15</b>，唤醒前先跑门禁。</div>
+        <div class="hbring"><i></i></div>
+      </div>
+      <div class="strm">
+        <div class="sh"><span>◆ THINKING</span><span class="think-dots"><span></span><span></span><span></span></span></div>
+        <div class="sb">观察到你连续 3 天问同一问题，考虑是否<b>自动化</b>为每日晨报。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// 记忆图：节点呼吸 + 连线，激活时点亮（对标白龙马的活体记忆图）
+const cv=document.getElementById('graph'),cx=cv.getContext('2d');
+let W,H,nodes=[],links=[];
+function init(){
+  const r=cv.getBoundingClientRect();W=cv.width=r.width;H=cv.height=r.height;
+  nodes=[];const N=46;
+  for(let i=0;i<N;i++)nodes.push({
+    x:Math.random()*W,y:Math.random()*H,
+    vx:(Math.random()-.5)*.13,vy:(Math.random()-.5)*.13,
+    r:1.1+Math.random()*2.4, ph:Math.random()*6.28,
+    hot:Math.random()<.18
+  });
+  links=[];
+  for(let i=0;i<N;i++)for(let j=i+1;j<N;j++){
+    const d=Math.hypot(nodes[i].x-nodes[j].x,nodes[i].y-nodes[j].y);
+    if(d<95&&Math.random()<.28)links.push([i,j]);
+  }
+}
+function draw(t){
+  cx.clearRect(0,0,W,H);
+  cx.lineWidth=.6;
+  links.forEach(([a,b])=>{
+    const A=nodes[a],B=nodes[b],d=Math.hypot(A.x-B.x,A.y-B.y);
+    if(d>120)return;
+    const al=(1-d/120)*.22;
+    cx.strokeStyle=`rgba(255,159,28,${al})`;
+    cx.beginPath();cx.moveTo(A.x,A.y);cx.lineTo(B.x,B.y);cx.stroke();
+  });
+  nodes.forEach(n=>{
+    n.x+=n.vx;n.y+=n.vy;
+    if(n.x<0||n.x>W)n.vx*=-1; if(n.y<0||n.y>H)n.vy*=-1;
+    const pulse=.55+.45*Math.sin(t/900+n.ph);
+    const rad=n.r*(n.hot?1.5:1);
+    if(n.hot){
+      const g=cx.createRadialGradient(n.x,n.y,0,n.x,n.y,rad*7);
+      g.addColorStop(0,`rgba(255,190,107,${.30*pulse})`);
+      g.addColorStop(1,'rgba(255,190,107,0)');
+      cx.fillStyle=g;cx.beginPath();cx.arc(n.x,n.y,rad*7,0,6.28);cx.fill();
+    }
+    cx.fillStyle=n.hot?`rgba(255,190,107,${.75*pulse+.25})`:`rgba(33,54,82,${.6*pulse+.4})`;
+    cx.beginPath();cx.arc(n.x,n.y,rad,0,6.28);cx.fill();
+  });
+  requestAnimationFrame(draw);
+}
+init();requestAnimationFrame(draw);
+addEventListener('resize',init);
+</script>
+</body></html>

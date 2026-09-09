@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 界面方案 A：单栏专注
+  设计约束（实测得出，非假设）：
+    · 有效画布仅 823 x 521 CSS px（1440x912 物理 ÷ 175% 缩放）
+    · 因此：不做三栏、不堆卡片、字号不敢小于 12px
+  取舍：一切让位于对话本身，状态压缩成一条顶栏。
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>方案A 单栏专注</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --border:#2a3038;
+  --text:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --ok:#2ecc71; --warn:#f1c40f;
+}
+body{background:var(--bg);color:var(--text);font:13px/1.6 "Microsoft YaHei",system-ui,sans-serif;
+  height:521px;width:823px;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── 顶栏：所有状态压成一行，省垂直空间 ── */
+.top{height:38px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px;
+  background:var(--panel);border-bottom:1px solid var(--border)}
+.logo{font-weight:800;letter-spacing:2px;font-size:13px;color:var(--accent)}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 0 0 rgba(46,204,113,.7);animation:pl 2.4s infinite}
+@keyframes pl{70%{box-shadow:0 0 0 7px rgba(46,204,113,0)}100%{box-shadow:0 0 0 0 rgba(46,204,113,0)}}
+.st{font-size:11px;color:var(--dim);display:flex;gap:4px;align-items:center}
+.st b{color:var(--text);font-weight:600}
+.spacer{flex:1}
+.icobtn{width:26px;height:26px;border-radius:6px;border:1px solid var(--border);
+  background:var(--panel2);color:var(--dim);cursor:pointer;font-size:12px}
+.icobtn:hover{color:var(--text);border-color:var(--accent)}
+
+/* ── 对话区：占据全部剩余空间 ── */
+.chat{flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.chat::-webkit-scrollbar{width:7px}
+.chat::-webkit-scrollbar-thumb{background:#30363d;border-radius:4px}
+.msg{display:flex;gap:9px;max-width:88%}
+.msg.me{align-self:flex-end;flex-direction:row-reverse}
+.av{width:24px;height:24px;flex:none;border-radius:6px;display:grid;place-items:center;
+  font-size:11px;font-weight:700}
+.av.j{background:linear-gradient(135deg,#1f6feb,#58a6ff);color:#fff}
+.av.u{background:var(--panel2);color:var(--dim);border:1px solid var(--border)}
+.bub{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  padding:8px 11px;font-size:13px}
+.msg.me .bub{background:#1f3a5f;border-color:#2d5385}
+.bub .t{font-size:10px;color:var(--dim);margin-top:4px}
+
+/* 思考流：折叠，不抢视线 */
+.think{border-left:2px solid var(--accent);background:rgba(88,166,255,.05);
+  border-radius:0 8px 8px 0;padding:6px 10px;font-size:11.5px;color:var(--dim)}
+.think summary{cursor:pointer;color:var(--accent);user-select:none;font-size:11px}
+.think .step{padding:3px 0;border-bottom:1px dashed rgba(255,255,255,.06)}
+.think .step:last-child{border:0}
+
+/* 工具调用卡：紧凑单行 */
+.tool{display:flex;align-items:center;gap:8px;background:var(--panel2);
+  border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:11.5px}
+.tool .tag{background:rgba(88,166,255,.18);color:var(--accent);border-radius:4px;
+  padding:1px 6px;font-size:10px;font-weight:700}
+
+/* ── 输入区 ── */
+.input{flex:none;border-top:1px solid var(--border);background:var(--panel);padding:9px 12px}
+.ibox{display:flex;gap:8px;align-items:flex-end}
+textarea{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:9px;
+  color:var(--text);padding:8px 10px;font:13px/1.5 "Microsoft YaHei",sans-serif;
+  resize:none;height:36px;outline:none}
+textarea:focus{border-color:var(--accent)}
+.mic{width:36px;height:36px;flex:none;border-radius:9px;border:1px solid var(--border);
+  background:var(--panel2);color:var(--dim);cursor:pointer;font-size:15px}
+.mic.on{background:rgba(231,76,60,.2);border-color:#e74c3c;color:#ff9d94}
+.hint{font-size:10px;color:var(--dim);margin-top:5px;display:flex;gap:12px}
+kbd{background:var(--panel2);border:1px solid var(--border);border-radius:3px;
+  padding:0 4px;font-size:9.5px}
+</style></head><body>
+
+<div class="top">
+  <span class="pulse"></span>
+  <span class="logo">JARVIS</span>
+  <span class="st">记忆 <b>128</b></span>
+  <span class="st">心跳 <b>28分钟后</b></span>
+  <span class="st">今日 <b>16/200</b></span>
+  <span class="spacer"></span>
+  <button class="icobtn" title="记忆">🧠</button>
+  <button class="icobtn" title="设置">⚙</button>
+</div>
+
+<div class="chat">
+  <div class="msg"><div class="av j">J</div><div class="bub">
+    早。昨天你说今天要看量化那边能不能开仓，我提前查了。<div class="t">09:02</div>
+  </div></div>
+
+  <details class="think" open>
+    <summary>▾ 思考过程（3 步 · 1.8s）</summary>
+    <div class="step">检索记忆 → 命中「每日开盘前看门禁」习惯</div>
+    <div class="step">调用 gate_check → 读取 /api/gate</div>
+    <div class="step">发现周末休市，改为汇报下一交易日</div>
+  </details>
+
+  <div class="tool"><span class="tag">TOOL</span>
+    <span>gate_check</span><span style="color:var(--dim)">→ 127.0.0.1:8891/api/gate</span>
+    <span style="margin-left:auto;color:var(--ok)">200 · 0.3s</span>
+  </div>
+
+  <div class="msg"><div class="av j">J</div><div class="bub">
+    今天周日休市。最近一个交易日 <b>20260904</b>：市场 NEUTRAL、风控 LOW_VOL、建议仓位 <b>59%</b>。<br>
+    提醒一句——你上次说容量上限约 <b>180 万</b>，别超。
+    <div class="t">09:02</div>
+  </div></div>
+
+  <div class="msg me"><div class="av u">我</div><div class="bub">
+    知道了，明早开盘前再提醒我一次<div class="t">09:04</div>
+  </div></div>
+
+  <div class="msg"><div class="av j">J</div><div class="bub">
+    好，已设提醒：<b>周一 09:15</b>。我会先跑一遍门禁再叫你。<div class="t">09:04</div>
+  </div></div>
+</div>
+
+<div class="input">
+  <div class="ibox">
+    <textarea placeholder="说点什么…"></textarea>
+    <button class="mic" title="按住说话">🎙</button>
+  </div>
+  <div class="hint">
+    <span><kbd>空格</kbd> 按住说话</span>
+    <span><kbd>Enter</kbd> 发送</span>
+    <span style="margin-left:auto">本地运行 · 127.0.0.1:3800</span>
+  </div>
+</div>
+</body></html>

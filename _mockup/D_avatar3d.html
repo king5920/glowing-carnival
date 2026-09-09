@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 3D 形象设计 · 四个候选
+  ==========================================================
+  硬件实测结论（决定了设计方向，不是审美选择）：
+    GPU        Intel Iris Xe (ANGLE / D3D11)，WebGL2 可用
+    性能预算   30,000 三角形 = 稳定 60 FPS
+               180,000 三角形 = 8 FPS（崩）
+  => 结论：不能做人形/毛发/次表面散射。
+     必须走"抽象能量核心"路线 —— 这恰恰也是贾维斯的正统形象
+     （电影里 J.A.R.V.I.S. 本来就没有身体，是环绕的光与线）
+
+  四个候选全部用 raw WebGL2，无第三方库，单文件可跑。
+  每个都有 5 种状态：idle 待机 / listen 聆听 / think 思考 / speak 说话 / alert 警告
+  ==========================================================
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>JARVIS 3D 形象候选</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0f16;color:#e6edf3;font:12px/1.6 "Microsoft YaHei",system-ui,sans-serif;
+  padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.card{background:rgba(20,28,40,.6);border:1px solid rgba(164,183,214,.2);
+  border-radius:14px;overflow:hidden;backdrop-filter:blur(10px)}
+.ch{padding:8px 12px;border-bottom:1px solid rgba(150,169,198,.13);
+  display:flex;align-items:center;gap:8px}
+.ch .n{font-size:9px;font-weight:800;letter-spacing:1.4px;color:#ff9f1c}
+.ch .t{font-size:12px;font-weight:600}
+.ch .d{font-size:9.5px;color:#778397;margin-left:auto}
+canvas{display:block;width:100%;height:210px;background:radial-gradient(circle at 50% 50%,#0d141d,#060a0f)}
+.ctl{padding:7px 10px;display:flex;gap:5px;flex-wrap:wrap;border-top:1px solid rgba(150,169,198,.13)}
+.b{font-size:9.5px;padding:3px 9px;border-radius:6px;cursor:pointer;
+  border:1px solid rgba(164,183,214,.25);background:rgba(26,36,50,.7);color:#a2adbd}
+.b:hover{color:#fff;border-color:#ff9f1c}
+.b.on{background:rgba(255,159,28,.2);border-color:#ff9f1c;color:#ffbe6b}
+.note{grid-column:1/-1;font-size:11px;color:#778397;line-height:1.75;
+  background:rgba(79,140,255,.06);border:1px solid rgba(79,140,255,.25);
+  border-radius:10px;padding:10px 14px}
+.note b{color:#e6edf3}
+</style></head><body>
+
+<div class="note">
+  <b>硬件实测</b>：你的 Intel Iris Xe 支持 WebGL2，<b>30,000 三角形稳 60 FPS</b>，但 180,000 三角形只有 <b>8 FPS</b>。
+  所以下面四个方案都控制在预算内 —— 也正因如此，走的是<b>抽象能量核心</b>路线，
+  而不是人形。这与电影里的 J.A.R.V.I.S. 一致：它本来就没有身体，只有光与线。
+  <br>点下面的状态按钮，看它在<b>待机 / 聆听 / 思考 / 说话 / 警告</b>时的不同反应。
+</div>
+
+<!-- ① 核心球 -->
+<div class="card">
+  <div class="ch"><span class="n">01</span><span class="t">ARC CORE · 方舟反应堆</span>
+    <span class="d">粒子球 + 光环</span></div>
+  <canvas id="c1"></canvas>
+  <div class="ctl" data-for="1">
+    <span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+    <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span>
+    <span class="b" data-s="alert">警告</span></div>
+</div>
+
+<!-- ② 环形矩阵 -->
+<div class="card">
+  <div class="ch"><span class="n">02</span><span class="t">HALO RING · 环形矩阵</span>
+    <span class="d">同心旋转环</span></div>
+  <canvas id="c2"></canvas>
+  <div class="ctl" data-for="2">
+    <span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+    <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span>
+    <span class="b" data-s="alert">警告</span></div>
+</div>
+
+<!-- ③ 神经网格 -->
+<div class="card">
+  <div class="ch"><span class="n">03</span><span class="t">NEURAL MESH · 神经网格</span>
+    <span class="d">3D 记忆星云</span></div>
+  <canvas id="c3"></canvas>
+  <div class="ctl" data-for="3">
+    <span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+    <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span>
+    <span class="b" data-s="alert">警告</span></div>
+</div>
+
+<!-- ④ 声纹晶体 -->
+<div class="card">
+  <div class="ch"><span class="n">04</span><span class="t">VOICE PRISM · 声纹晶体</span>
+    <span class="d">音频驱动多面体</span></div>
+  <canvas id="c4"></canvas>
+  <div class="ctl" data-for="4">
+    <span class="b on" data-s="idle">待机</span><span class="b" data-s="listen">聆听</span>
+    <span class="b" data-s="think">思考</span><span class="b" data-s="speak">说话</span>
+    <span class="b" data-s="alert">警告</span></div>
+</div>
+
+<script>
+/* ═══════ 公共：极简 WebGL 工具 ═══════ */
+function mkGL(cv){
+  const gl=cv.getContext('webgl2',{antialias:true,alpha:true});
+  const dpr=Math.min(devicePixelRatio,2);
+  function size(){cv.width=cv.clientWidth*dpr;cv.height=cv.clientHeight*dpr;
+    gl.viewport(0,0,cv.width,cv.height);}
+  size();addEventListener('resize',size);
+  return gl;
+}
+function prog(gl,v,f){
+  const c=(t,s)=>{const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
+    if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(o));return o};
+  const p=gl.createProgram();
+  gl.attachShader(p,c(gl.VERTEX_SHADER,v));gl.attachShader(p,c(gl.FRAGMENT_SHADER,f));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(p));
+  return p;
+}
+// 状态 -> 参数（所有形象共用一套语义）
+const STATES={
+  idle  :{speed:.30,amp:.06,glow:.55,hue:0.00,spread:1.00},
+  listen:{speed:.55,amp:.16,glow:.85,hue:0.10,spread:1.12},
+  think :{speed:1.35,amp:.30,glow:1.00,hue:0.02,spread:0.86},
+  speak :{speed:.85,amp:.42,glow:1.15,hue:0.06,spread:1.20},
+  alert :{speed:1.9 ,amp:.34,glow:1.30,hue:0.55,spread:1.05}
+};
+function lerpS(a,b,k){const o={};for(const x in a)o[x]=a[x]+(b[x]-a[x])*k;return o}
+
+/* ═══════ ① ARC CORE 方舟反应堆 ═══════ */
+(function(){
+  const gl=mkGL(document.getElementById('c1'));
+  const P=prog(gl,`#version 300 es
+  in vec3 pos; in float seed;
+  uniform float t,amp,spread; out float vI; out float vCore;
+  void main(){
+    float r0=length(pos);
+    // 呼吸 + 湍流（内核几乎不动，外晕晃得厉害 —— 制造"稳定核心"的观感）
+    float sway=smoothstep(.15,1.0,r0);
+    float br=1.0+amp*sin(t*1.6+seed*6.28)*(.3+sway);
+    vec3 p=pos*br*spread;
+    p.x+=amp*.42*sway*sin(t*2.1+seed*11.0);
+    p.y+=amp*.42*sway*cos(t*1.7+seed*7.0);
+    float a=t*.35; float c=cos(a),s=sin(a);
+    p=vec3(p.x*c-p.z*s, p.y, p.x*s+p.z*c);
+    vCore=1.0-smoothstep(.04,.22,r0);   // 收窄内核范围，避免糊成一坨白
+    vI=1.0-clamp(r0,0.,1.);
+    gl_Position=vec4(p.x*.85,p.y*1.32,0.,1.);
+    gl_PointSize=(1.3+2.2*vI+2.6*vCore)*(1.0+amp);
+  }`,`#version 300 es
+  precision highp float; in float vI; in float vCore;
+  uniform float glow,hue; out vec4 o;
+  void main(){
+    vec2 d=gl_PointCoord-.5; float m=1.0-smoothstep(.0,.5,length(d));
+    vec3 warm=vec3(1.0,.62,.11), cool=vec3(.31,.55,1.0), red=vec3(1.,.28,.28);
+    vec3 hot=vec3(1.0,.88,.62);
+    vec3 col=mix(cool,warm,clamp(vI*1.5,0.,1.));
+    col=mix(col,hot,vCore*.75);
+    col=mix(col,red,hue);
+    // 内核降透明度，靠"密集小点"而不是"大面积高亮"来表现
+    float a=m*m*(.13+.42*vI+.30*vCore);
+    o=vec4(col*glow*(1.0+vCore*.5), a);
+  }`);
+  const N=9000, pos=new Float32Array(N*3), sd=new Float32Array(N);
+  for(let i=0;i<N;i++){
+    const u=Math.random(),v=Math.random();
+    const th=u*6.2832, ph=Math.acos(2*v-1);
+    // 三层结构：致密内核(28%) + 中层壳(42%) + 稀疏外晕(30%)
+    // 之前是均匀球壳，看起来像一团散沙、没有"核心"，这里重新分配密度
+    const q=Math.random();
+    let r;
+    if(q<.28)      r=.05+.16*Math.pow(Math.random(),.5);   // 内核，极亮
+    else if(q<.70) r=.30+.26*Math.random();                 // 中层壳
+    else           r=.62+.38*Math.pow(Math.random(),1.7);   // 外晕，稀疏
+    pos[i*3]=r*Math.sin(ph)*Math.cos(th);
+    pos[i*3+1]=r*Math.sin(ph)*Math.sin(th);
+    pos[i*3+2]=r*Math.cos(ph);
+    sd[i]=Math.random();
+  }
+  const b1=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b1);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW);
+  gl.useProgram(P);
+  const lp=gl.getAttribLocation(P,'pos');gl.enableVertexAttribArray(lp);gl.vertexAttribPointer(lp,3,gl.FLOAT,false,0,0);
+  const b2=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b2);gl.bufferData(gl.ARRAY_BUFFER,sd,gl.STATIC_DRAW);
+  const ls=gl.getAttribLocation(P,'seed');gl.enableVertexAttribArray(ls);gl.vertexAttribPointer(ls,1,gl.FLOAT,false,0,0);
+  const U={t:gl.getUniformLocation(P,'t'),amp:gl.getUniformLocation(P,'amp'),
+    glow:gl.getUniformLocation(P,'glow'),hue:gl.getUniformLocation(P,'hue'),
+    spread:gl.getUniformLocation(P,'spread')};
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+  let cur={...STATES.idle},tgt=STATES.idle,T=0;
+  window.set1=s=>tgt=STATES[s];
+  (function loop(){
+    cur=lerpS(cur,tgt,.045); T+=.016*cur.speed;
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(P);
+    gl.uniform1f(U.t,T);gl.uniform1f(U.amp,cur.amp);
+    gl.uniform1f(U.glow,cur.glow);gl.uniform1f(U.hue,cur.hue);
+    gl.uniform1f(U.spread,cur.spread);
+    gl.drawArrays(gl.POINTS,0,N);
+    requestAnimationFrame(loop);
+  })();
+})();
+
+/* ═══════ ② HALO RING 环形矩阵 ═══════ */
+(function(){
+  const gl=mkGL(document.getElementById('c2'));
+  const P=prog(gl,`#version 300 es
+  in float idx; in float ring;
+  uniform float t,amp,spread; out float vI;
+  void main(){
+    float total=260.0;
+    float a=idx/total*6.2832 + t*(.3+ring*.42)*(mod(ring,2.0)<1.0?1.0:-1.0);
+    float rad=(.30+ring*.17)*spread;
+    // 3D 倾斜环（绕 X 轴倾角随 ring 变化）
+    float tilt=.35+ring*.18;
+    vec3 p=vec3(cos(a)*rad, sin(a)*rad*cos(tilt), sin(a)*rad*sin(tilt));
+    p.y+=amp*.16*sin(t*2.4+idx*.35);
+    // 整体缓慢摆动
+    float w=t*.4; float c=cos(w),s=sin(w);
+    p=vec3(p.x*c-p.z*s,p.y,p.x*s+p.z*c);
+    vI=.35+.65*(1.0-ring/3.0);
+    gl_Position=vec4(p.x*.85,p.y*1.32,0.,1.);
+    gl_PointSize=(2.2+2.6*vI)*(1.0+amp*1.4);
+  }`,`#version 300 es
+  precision highp float; in float vI; uniform float glow,hue; out vec4 o;
+  void main(){
+    vec2 d=gl_PointCoord-.5; float m=1.0-smoothstep(.0,.5,length(d));
+    vec3 warm=vec3(1.0,.66,.16), cool=vec3(.35,.6,1.0), red=vec3(1.,.3,.3);
+    vec3 col=mix(cool,warm,vI); col=mix(col,red,hue);
+    o=vec4(col*glow,m*m*vI);
+  }`);
+  const RINGS=4,PER=260,N=RINGS*PER;
+  const ai=new Float32Array(N),ar=new Float32Array(N);
+  let k=0;for(let r=0;r<RINGS;r++)for(let i=0;i<PER;i++){ai[k]=i;ar[k]=r;k++}
+  const b1=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b1);gl.bufferData(gl.ARRAY_BUFFER,ai,gl.STATIC_DRAW);
+  gl.useProgram(P);
+  let L=gl.getAttribLocation(P,'idx');gl.enableVertexAttribArray(L);gl.vertexAttribPointer(L,1,gl.FLOAT,false,0,0);
+  const b2=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b2);gl.bufferData(gl.ARRAY_BUFFER,ar,gl.STATIC_DRAW);
+  L=gl.getAttribLocation(P,'ring');gl.enableVertexAttribArray(L);gl.vertexAttribPointer(L,1,gl.FLOAT,false,0,0);
+  const U={t:gl.getUniformLocation(P,'t'),amp:gl.getUniformLocation(P,'amp'),
+    glow:gl.getUniformLocation(P,'glow'),hue:gl.getUniformLocation(P,'hue'),
+    spread:gl.getUniformLocation(P,'spread')};
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+  let cur={...STATES.idle},tgt=STATES.idle,T=0;
+  window.set2=s=>tgt=STATES[s];
+  (function loop(){
+    cur=lerpS(cur,tgt,.045);T+=.016*cur.speed;
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(P);
+    gl.uniform1f(U.t,T);gl.uniform1f(U.amp,cur.amp);gl.uniform1f(U.glow,cur.glow);
+    gl.uniform1f(U.hue,cur.hue);gl.uniform1f(U.spread,cur.spread);
+    gl.drawArrays(gl.POINTS,0,N);requestAnimationFrame(loop);
+  })();
+})();
+
+/* ═══════ ③ NEURAL MESH 神经网格 ═══════ */
+(function(){
+  const gl=mkGL(document.getElementById('c3'));
+  const VS=`#version 300 es
+  in vec3 pos; in float seed; uniform float t,amp,spread; out float vI;
+  void main(){
+    vec3 p=pos*spread;
+    p.x+=amp*.30*sin(t*1.3+seed*9.0);
+    p.y+=amp*.30*cos(t*1.1+seed*6.0);
+    p.z+=amp*.30*sin(t*.9+seed*4.0);
+    float a=t*.28,c=cos(a),s=sin(a);
+    p=vec3(p.x*c-p.z*s,p.y,p.x*s+p.z*c);
+    float depth=(p.z+1.2)/2.4;
+    vI=clamp(depth,.15,1.0);
+    gl_Position=vec4(p.x*.82,p.y*1.28,0.,1.);
+    gl_PointSize=(1.5+4.0*vI)*(1.0+amp);
+  }`;
+  const P=prog(gl,VS,`#version 300 es
+  precision highp float; in float vI; uniform float glow,hue; out vec4 o;
+  void main(){
+    vec2 d=gl_PointCoord-.5;float m=1.0-smoothstep(.0,.5,length(d));
+    vec3 warm=vec3(1.,.64,.14),cool=vec3(.28,.5,1.),red=vec3(1.,.3,.3);
+    vec3 col=mix(cool,warm,vI);col=mix(col,red,hue);
+    o=vec4(col*glow,m*m*vI*.9);
+  }`);
+  const PL=prog(gl,VS,`#version 300 es
+  precision highp float; in float vI; uniform float glow,hue; out vec4 o;
+  void main(){ vec3 c=mix(vec3(.25,.42,.9),vec3(1.,.62,.15),vI);
+    c=mix(c,vec3(1.,.3,.3),hue); o=vec4(c*glow,.10*vI); }`);
+  const N=520,pos=new Float32Array(N*3),sd=new Float32Array(N);
+  for(let i=0;i<N;i++){
+    const u=Math.random(),v=Math.random(),th=u*6.2832,ph=Math.acos(2*v-1);
+    const r=Math.pow(Math.random(),.4)*.95;
+    pos[i*3]=r*Math.sin(ph)*Math.cos(th);
+    pos[i*3+1]=r*Math.sin(ph)*Math.sin(th);
+    pos[i*3+2]=r*Math.cos(ph);sd[i]=Math.random();
+  }
+  // 邻近连线
+  const li=[];
+  for(let i=0;i<N;i++)for(let j=i+1;j<N;j++){
+    const dx=pos[i*3]-pos[j*3],dy=pos[i*3+1]-pos[j*3+1],dz=pos[i*3+2]-pos[j*3+2];
+    if(dx*dx+dy*dy+dz*dz<.055)li.push(i,j);
+  }
+  const lpos=new Float32Array(li.length*3),lsd=new Float32Array(li.length);
+  li.forEach((id,k)=>{lpos[k*3]=pos[id*3];lpos[k*3+1]=pos[id*3+1];lpos[k*3+2]=pos[id*3+2];lsd[k]=sd[id]});
+  function bind(p,pb,sb){
+    gl.useProgram(p);
+    gl.bindBuffer(gl.ARRAY_BUFFER,pb);
+    let l=gl.getAttribLocation(p,'pos');gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,3,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER,sb);
+    l=gl.getAttribLocation(p,'seed');gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,1,gl.FLOAT,false,0,0);
+  }
+  const pb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,pb);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW);
+  const sb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,sb);gl.bufferData(gl.ARRAY_BUFFER,sd,gl.STATIC_DRAW);
+  const lb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,lb);gl.bufferData(gl.ARRAY_BUFFER,lpos,gl.STATIC_DRAW);
+  const lsb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,lsb);gl.bufferData(gl.ARRAY_BUFFER,lsd,gl.STATIC_DRAW);
+  function U(p){return{t:gl.getUniformLocation(p,'t'),amp:gl.getUniformLocation(p,'amp'),
+    glow:gl.getUniformLocation(p,'glow'),hue:gl.getUniformLocation(p,'hue'),
+    spread:gl.getUniformLocation(p,'spread')}}
+  const UP=U(P),UL=U(PL);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+  let cur={...STATES.idle},tgt=STATES.idle,T=0;
+  window.set3=s=>tgt=STATES[s];
+  (function loop(){
+    cur=lerpS(cur,tgt,.045);T+=.016*cur.speed;
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+    bind(PL,lb,lsb);
+    gl.uniform1f(UL.t,T);gl.uniform1f(UL.amp,cur.amp);gl.uniform1f(UL.glow,cur.glow);
+    gl.uniform1f(UL.hue,cur.hue);gl.uniform1f(UL.spread,cur.spread);
+    gl.drawArrays(gl.LINES,0,li.length);
+    bind(P,pb,sb);
+    gl.uniform1f(UP.t,T);gl.uniform1f(UP.amp,cur.amp);gl.uniform1f(UP.glow,cur.glow);
+    gl.uniform1f(UP.hue,cur.hue);gl.uniform1f(UP.spread,cur.spread);
+    gl.drawArrays(gl.POINTS,0,N);
+    requestAnimationFrame(loop);
+  })();
+})();
+
+/* ═══════ ④ VOICE PRISM 声纹晶体 ═══════ */
+(function(){
+  const gl=mkGL(document.getElementById('c4'));
+  const P=prog(gl,`#version 300 es
+  in float ang; in float bar;
+  uniform float t,amp,spread,glow; out float vI;
+  void main(){
+    // 环形声纹柱：每根柱子高度由伪音频驱动
+    float h=.12+ .40*amp*(0.5+0.5*sin(t*4.0+ang*7.0))
+              + .10*sin(t*2.0+ang*3.0);
+    float rad=(.42+h*bar)*spread;
+    float a=ang+t*.22;
+    float tilt=.42;
+    vec3 p=vec3(cos(a)*rad, sin(a)*rad*cos(tilt)*.55, sin(a)*rad*sin(tilt));
+    p.y+= (bar-0.5)*h*1.5;
+    vI=bar;
+    gl_Position=vec4(p.x*.85,p.y*1.30,0.,1.);
+    gl_PointSize=2.4+3.0*amp;
+  }`,`#version 300 es
+  precision highp float; in float vI; uniform float glow,hue; out vec4 o;
+  void main(){
+    vec2 d=gl_PointCoord-.5;float m=1.0-smoothstep(.0,.5,length(d));
+    vec3 warm=vec3(1.,.68,.2),cool=vec3(.3,.55,1.),red=vec3(1.,.32,.32);
+    vec3 col=mix(cool,warm,vI);col=mix(col,red,hue);
+    o=vec4(col*glow,m*m*(.35+.65*vI));
+  }`);
+  const BARS=120,SEG=14,N=BARS*SEG;
+  const aa=new Float32Array(N),bb=new Float32Array(N);
+  let k=0;for(let i=0;i<BARS;i++)for(let j=0;j<SEG;j++){
+    aa[k]=i/BARS*6.2832;bb[k]=j/(SEG-1);k++}
+  const b1=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b1);gl.bufferData(gl.ARRAY_BUFFER,aa,gl.STATIC_DRAW);
+  gl.useProgram(P);
+  let L=gl.getAttribLocation(P,'ang');gl.enableVertexAttribArray(L);gl.vertexAttribPointer(L,1,gl.FLOAT,false,0,0);
+  const b2=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b2);gl.bufferData(gl.ARRAY_BUFFER,bb,gl.STATIC_DRAW);
+  L=gl.getAttribLocation(P,'bar');gl.enableVertexAttribArray(L);gl.vertexAttribPointer(L,1,gl.FLOAT,false,0,0);
+  const U={t:gl.getUniformLocation(P,'t'),amp:gl.getUniformLocation(P,'amp'),
+    glow:gl.getUniformLocation(P,'glow'),hue:gl.getUniformLocation(P,'hue'),
+    spread:gl.getUniformLocation(P,'spread')};
+  gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);
+  let cur={...STATES.idle},tgt=STATES.idle,T=0;
+  window.set4=s=>tgt=STATES[s];
+  (function loop(){
+    cur=lerpS(cur,tgt,.05);T+=.016*cur.speed;
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(P);
+    gl.uniform1f(U.t,T);gl.uniform1f(U.amp,cur.amp);gl.uniform1f(U.glow,cur.glow);
+    gl.uniform1f(U.hue,cur.hue);gl.uniform1f(U.spread,cur.spread);
+    gl.drawArrays(gl.POINTS,0,N);requestAnimationFrame(loop);
+  })();
+})();
+
+/* 状态按钮 */
+document.querySelectorAll('.ctl').forEach(c=>{
+  const n=c.dataset.for;
+  c.querySelectorAll('.b').forEach(b=>b.onclick=()=>{
+    c.querySelectorAll('.b').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    window['set'+n](b.dataset.s);
+  });
+});
+</script>
+</body></html>

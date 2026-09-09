@@ -1,0 +1,13 @@
+{
+  "name": "jarvis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0"
+  }
+}

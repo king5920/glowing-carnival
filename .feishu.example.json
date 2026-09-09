@@ -1,0 +1,6 @@
+{
+  "_note": "复制本文件为 .feishu.json 并填入真实值。真实文件已被 .gitignore 排除。appId/appSecret 从飞书开放平台『凭证与基础信息』获取；ownerOpenId 是你自己的 open_id，用于限定只响应主人消息。",
+  "appId": "cli_xxxxxxxxxxxxxxxx",
+  "appSecret": "your-app-secret-here",
+  "ownerOpenId": "ou_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}

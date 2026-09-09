@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 形象演化：蛋 → 应龙（六阶段 · 真 3D）
+  ================================================================
+  与上一版 E_dragon 的本质区别：
+    上一版 = 2D canvas 画的正弦曲线（伪 3D）
+    这一版 = 真 3D 管线：透视投影矩阵 + 四元数旋转 + 深度排序
+             + Lambert 法线光照 + 菲涅尔边缘光 + 景深虚化
+
+  性能实测（本机 Intel Iris Xe）：
+    带光照+深度测试的三角形  8,000 -> 60 FPS
+    本方案峰值约 5,200 三角形，留足余量
+
+  六阶段（采纳"从蛋开始"，比虺更完整地表达"孵化→成长"）：
+    ① 龙蛋   EGG      记忆 0     蛰伏，内有微光搏动
+    ② 虺     HUI      记忆 20    破壳小蛇，冷青色
+    ③ 蛟     JIAO     记忆 60    生鳞能兴水
+    ④ 虬     QIU      记忆 150   生角幼龙
+    ⑤ 角龙   JIAOLONG 记忆 400   成年真龙，龙须飘动
+    ⑥ 应龙   YINGLONG 记忆 1000  背生双翼，完全体
+
+  唯美的关键处理：
+    · 体积感      每节躯干是真实 3D 环状截面，不是点
+    · 材质        金属度随进化提升，菲涅尔边缘泛光
+    · 光照        主光 + 补光 + 边缘光三点布光
+    · 景深        远端自动虚化降透明度
+    · 粒子        灵气粒子环绕，越进化越盛
+  ================================================================
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>JARVIS · 蛋化龙 六阶段</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{width:823px;height:521px;overflow:hidden;position:relative;
+  background:radial-gradient(1000px 520px at 50% 42%,#0e1a26,#05080d 72%);
+  color:#e8eef6;font:12px/1.6 "Microsoft YaHei",system-ui,sans-serif}
+#gl{position:absolute;inset:0;z-index:0}
+body::before{content:'';position:absolute;inset:0;z-index:2;pointer-events:none;
+  background:repeating-linear-gradient(180deg,rgba(255,255,255,.012) 0 1px,transparent 1px 3px)}
+body::after{content:'';position:absolute;inset:0;z-index:2;pointer-events:none;
+  background:radial-gradient(circle at 50% 46%,transparent 50%,rgba(0,0,0,.6) 100%)}
+.hud{position:absolute;left:20px;top:18px;z-index:3;pointer-events:none}
+.cn{font-size:40px;font-weight:800;letter-spacing:6px;line-height:1;
+  background:linear-gradient(135deg,#ffd89b,#ff9f1c 60%,#ff7a18);
+  -webkit-background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 22px rgba(255,159,28,.45))}
+.en{font-size:10px;letter-spacing:4px;color:#ff9f1c;margin-top:6px;font-weight:700;opacity:.9}
+.ds{font-size:11.5px;color:#93a1b3;margin-top:9px;max-width:235px;line-height:1.8}
+.ds b{color:#e8eef6}
+.rs{position:absolute;right:20px;top:18px;z-index:3;text-align:right;pointer-events:none}
+.rs .k{font-size:9px;letter-spacing:2px;color:#6d7a8c}
+.rs .v{font-size:19px;font-weight:700;color:#ffd89b;font-variant-numeric:tabular-nums;margin-bottom:11px}
+.pg{position:absolute;left:20px;bottom:20px;z-index:3;width:300px}
+.pl{font-size:9.5px;color:#6d7a8c;letter-spacing:1px;display:flex;justify-content:space-between;margin-bottom:6px}
+.pl b{color:#ffd89b}
+.pt{height:4px;background:rgba(255,255,255,.07);border-radius:3px}
+.pf{height:100%;border-radius:3px;background:linear-gradient(90deg,#3a6ea8,#ff9f1c,#ffd89b);
+  transition:width .9s cubic-bezier(.4,0,.2,1);box-shadow:0 0 14px rgba(255,159,28,.55)}
+.pn{display:flex;justify-content:space-between;margin-top:8px}
+.pn span{font-size:9.5px;color:#48546a;cursor:pointer;letter-spacing:1px;transition:.25s;pointer-events:auto}
+.pn span:hover{color:#a3b0c2}
+.pn span.on{color:#ffd89b;font-weight:700;text-shadow:0 0 12px rgba(255,216,155,.7)}
+.tip{position:absolute;right:20px;bottom:20px;z-index:3;font-size:10px;color:#4e5a6b;
+  text-align:right;line-height:1.85}
+kbd{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:3px;padding:0 4px;font-size:9px}
+</style></head><body>
+<canvas id="gl"></canvas>
+<div class="hud">
+  <div class="cn" id="h-cn">龙蛋</div>
+  <div class="en" id="h-en">EGG · 蛰伏</div>
+  <div class="ds" id="h-ds">尚未破壳，内有微光搏动。<br><b>刚刚安装</b>，等待第一条记忆。</div>
+</div>
+<div class="rs">
+  <div class="k">MEMORIES</div><div class="v" id="h-mem">0</div>
+  <div class="k">STAGE</div><div class="v" id="h-idx">1 / 6</div>
+</div>
+<div class="pg">
+  <div class="pl"><span>进化进度</span><span><b id="h-next">还需 20 条记忆</b></span></div>
+  <div class="pt"><div class="pf" id="h-fill" style="width:4%"></div></div>
+  <div class="pn">
+    <span class="on" data-i="0">蛋</span><span data-i="1">虺</span><span data-i="2">蛟</span>
+    <span data-i="3">虬</span><span data-i="4">角龙</span><span data-i="5">应龙</span>
+  </div>
+</div>
+<div class="tip">点阶段名或按 <kbd>1</kbd>–<kbd>6</kbd> · 拖动可旋转视角<br>《述异记》：水虺五百年化为蛟，蛟千年化为龙</div>
+
+<script>
+/* ═══════════ 阶段参数 ═══════════ */
+const ST=[
+ {cn:'龙蛋',en:'EGG · 蛰伏',mem:0,fill:4,
+  d:'尚未破壳，内有微光搏动。<br><b>刚刚安装</b>，等待第一条记忆。',
+  egg:1,len:0,thick:.30,horn:0,wing:0,whisk:0,fin:0,claw:0,
+  gold:0,glow:.55,spd:.5,amp:.0,parts:60},
+ {cn:'虺',en:'HUI · 水虺',mem:20,fill:20,
+  d:'破壳而出的无足小蛇。<br><b>有了记忆</b>，但只会被动问答。',
+  egg:0,len:.30,thick:.34,horn:0,wing:0,whisk:0,fin:0,claw:0,
+  gold:.05,glow:.7,spd:1.25,amp:.75,parts:90},
+ {cn:'蛟',en:'JIAO · 蛟龙',mem:60,fill:38,
+  d:'生鳞，能兴云雨，仍无角。<br><b>学会调用工具</b>，能做事了。',
+  egg:0,len:.52,thick:.46,horn:0,wing:0,whisk:0,fin:.45,claw:.4,
+  gold:.3,glow:.85,spd:1.0,amp:.6,parts:140},
+ {cn:'虬',en:'QIU · 虬龙',mem:150,fill:56,
+  d:'头生双角的幼龙。<br><b>心跳启动</b>，开始主动醒来。',
+  egg:0,len:.70,thick:.60,horn:.65,wing:0,whisk:.3,fin:.7,claw:.7,
+  gold:.55,glow:1.0,spd:.82,amp:.48,parts:190},
+ {cn:'角龙',en:'JIAOLONG · 角龙',mem:400,fill:78,
+  d:'五百年方生角，成年真龙。<br><b>学会你的习惯</b>，能够预判。',
+  egg:0,len:.86,thick:.74,horn:1,wing:0,whisk:.85,fin:.9,claw:1,
+  gold:.8,glow:1.12,spd:.66,amp:.4,parts:240},
+ {cn:'应龙',en:'YINGLONG · 应龙',mem:1000,fill:100,
+  d:'龙之极致，背生双翼。<br><b>完全体</b>：预判注入 + 自动化。',
+  egg:0,len:1,thick:.95,horn:1,wing:1,whisk:1,fin:1,claw:1,
+  gold:1,glow:1.3,spd:.52,amp:.34,parts:300}
+];
+let idx=0, P=JSON.parse(JSON.stringify(ST[0])), T=0;
+let rotY=0.4, rotX=-0.12, dragging=false, lx=0, ly=0, vY=0.0016;
+
+/* ═══════════ WebGL 初始化 ═══════════ */
+const cv=document.getElementById('gl');
+const gl=cv.getContext('webgl2',{antialias:true,alpha:true});
+const DPR=Math.min(devicePixelRatio,2);
+function resize(){cv.width=innerWidth*DPR;cv.height=innerHeight*DPR;
+  cv.style.width=innerWidth+'px';cv.style.height=innerHeight+'px';
+  gl.viewport(0,0,cv.width,cv.height);}
+resize();addEventListener('resize',resize);
+
+function sh(t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);
+  if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(o));return o}
+function prog(v,f){const p=gl.createProgram();
+  gl.attachShader(p,sh(gl.VERTEX_SHADER,v));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,f));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(p));return p}
+
+/* 实体着色器：Lambert + 菲涅尔边缘光
+   注意（踩过的坑）：不要用 clip-space z 做景深淡出。
+   透视投影下 NDC z 集中在 0.94~0.99，任何基于它的 smoothstep 都会把
+   整个模型误判为"远处"并淡到不可见。改用相机空间距离，且只做轻微淡出。 */
+const SOLID=prog(`#version 300 es
+in vec3 pos; in vec3 nrm; in vec3 col; in float aAlpha;
+uniform mat4 uMVP; uniform mat3 uNM;
+out vec3 vN; out vec3 vC; out float vA;
+void main(){
+  vN=normalize(uNM*nrm); vC=col; vA=aAlpha;
+  gl_Position=uMVP*vec4(pos,1.0);
+}`,`#version 300 es
+precision highp float;
+in vec3 vN; in vec3 vC; in float vA;
+uniform float uGlow, uGold;
+out vec4 o;
+void main(){
+  vec3 N=normalize(vN);
+  vec3 L1=normalize(vec3(0.55,0.75,0.62));   // 主光（暖）
+  vec3 L2=normalize(vec3(-0.6,-0.25,0.35));  // 补光（冷）
+  vec3 V=vec3(0.0,0.0,1.0);
+  // 双面光照：背面也受光，避免大片死黑
+  float d1=max(abs(dot(N,L1)),0.0);
+  float d2=max(abs(dot(N,L2)),0.0)*0.45;
+  // 菲涅尔边缘光 —— 唯美感主要来源
+  float fres=pow(1.0-abs(dot(N,V)),2.2);
+  vec3 warmL=vec3(1.0,0.86,0.62);
+  vec3 coolL=vec3(0.42,0.62,1.0);
+  vec3 base=vC*(0.30+d1*0.90)+coolL*d2*0.55;
+  base+=warmL*fres*(0.60+0.80*uGold)*uGlow;
+  o=vec4(base*uGlow, clamp(vA+fres*0.35,0.0,1.0));
+}`);
+
+/* 粒子着色器 */
+const PART=prog(`#version 300 es
+in vec3 pos; in float seed;
+uniform mat4 uMVP; uniform float uT;
+out float vS;
+void main(){
+  vec3 p=pos;
+  float a=uT*0.5+seed*6.2832;
+  p.x+=sin(a)*0.05; p.y+=cos(a*1.3)*0.05; p.z+=sin(a*0.7)*0.05;
+  vS=seed;
+  vec4 cp=uMVP*vec4(p,1.0);
+  gl_Position=cp;
+  gl_PointSize=(1.5+3.0*fract(seed*7.3))*(1.2/max(cp.w,0.4));
+}`,`#version 300 es
+precision highp float; in float vS; uniform float uGlow,uGold; out vec4 o;
+void main(){
+  vec2 d=gl_PointCoord-0.5; float m=1.0-smoothstep(0.0,0.5,length(d));
+  vec3 cold=vec3(0.45,0.75,0.95), gold=vec3(1.0,0.78,0.35);
+  vec3 c=mix(cold,gold,uGold);
+  o=vec4(c*uGlow, m*m*0.55);
+}`);
+
+/* ═══════════ 矩阵工具 ═══════════ */
+function persp(f,a,n,fa){const t=1/Math.tan(f/2);
+  return [t/a,0,0,0, 0,t,0,0, 0,0,(fa+n)/(n-fa),-1, 0,0,2*fa*n/(n-fa),0]}
+function mul(A,B){const C=new Array(16);
+  for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;
+    for(let k=0;k<4;k++)s+=A[k*4+j]*B[i*4+k];C[i*4+j]=s}return C}
+function rotYm(a){const c=Math.cos(a),s=Math.sin(a);
+  return [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]}
+function rotXm(a){const c=Math.cos(a),s=Math.sin(a);
+  return [1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]}
+function trans(x,y,z){return [1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1]}
+
+/* ═══════════ 几何生成 ═══════════ */
+// 龙的脊椎路径
+// 调参教训：0.42*L 的固定弯曲幅度过猛，龙身对折成"香蕉"。
+// 东方龙的气韵来自「长身 + 多个浅波」，不是一个深弯。
+// 因此：拉长主轴、减小单波幅度、增加波数。
+function spinePt(u,t){
+  const sw=P.amp;
+  const L=0.62+0.38*P.len;
+  // 关键修正：弯曲幅度必须与主轴长度成比例。
+  // 之前弯曲是绝对值，短身（虺/蛟）被同样的弯度折成一团，看起来像豆子。
+  const bend=0.30*L;
+  const baseY=Math.sin(u*Math.PI*2.1+0.3)*0.155*bend*2.2;
+  const baseZ=Math.cos(u*Math.PI*1.7)*0.115*bend*2.2;
+  const swimY=Math.sin(u*5.0 - t*P.spd*1.7)*0.075*sw*bend*2.2;
+  const swimZ=Math.cos(u*4.0 - t*P.spd*1.35)*0.075*sw*bend*2.2;
+  const x=(u-0.5)*2.75*L;
+  return [x, baseY+swimY, baseZ+swimZ];
+}
+function tangent(u,t){const e=0.012;
+  const a=spinePt(Math.max(0,u-e),t), b=spinePt(Math.min(1,u+e),t);
+  const d=[b[0]-a[0],b[1]-a[1],b[2]-a[2]];
+  const L=Math.hypot(...d)||1; return d.map(v=>v/L);
+}
+function frame(T0){
+  let up=[0,1,0];
+  if(Math.abs(T0[1])>0.94) up=[0,0,1];
+  let R=[T0[1]*up[2]-T0[2]*up[1], T0[2]*up[0]-T0[0]*up[2], T0[0]*up[1]-T0[1]*up[0]];
+  let l=Math.hypot(...R)||1; R=R.map(v=>v/l);
+  const U=[R[1]*T0[2]-R[2]*T0[1], R[2]*T0[0]-R[0]*T0[2], R[0]*T0[1]-R[1]*T0[0]];
+  return [R,U];
+}
+
+// 提高环向分段：10 → 16，龙身截面更圆润（实测 8000 三角形仍 60FPS，有余量）
+const SEG=72, RING=16;
+// 容量必须同时容纳「龙身放样」「蛋的球面」「双翼翼膜」，取最大值再留余量。
+const MAXV = Math.max(SEG*RING*6, 22*26*6) + 2*5*3 + 256;
+let vPos=new Float32Array(MAXV*3);
+let vNrm=new Float32Array(MAXV*3);
+let vCol=new Float32Array(MAXV*3);
+let vAlp=new Float32Array(MAXV);
+let vCount=0;
+
+function buildBody(t){
+  let k=0,kc=0,ka=0;
+  const cold=[0.30,0.66,0.85], gold=[1.0,0.70,0.20];
+  // 中间阶段走青玉→翡翠→琥珀→赤金的渐变，避免出现灰白色的"塑料感"过渡
+  const jade=[0.24,0.78,0.62];
+  const g=P.gold;
+  let col;
+  if(g<0.5){ const k2=g/0.5; col=cold.map((c,i)=>c+(jade[i]-c)*k2); }
+  else     { const k2=(g-0.5)/0.5; col=jade.map((c,i)=>c+(gold[i]-c)*k2); }
+
+  if(P.egg>0.02){
+    // ── 龙蛋：旋转椭球 ──
+    const LAT=22, LON=26;
+    for(let i=0;i<LAT;i++)for(let j=0;j<LON;j++){
+      const th0=i/LAT*Math.PI, th1=(i+1)/LAT*Math.PI;
+      const ph0=j/LON*6.2832, ph1=(j+1)/LON*6.2832;
+      const pulse=1+0.035*Math.sin(t*1.8);
+      const RX=0.34*pulse, RY=0.46*pulse, RZ=0.34*pulse;
+      const P00=[RX*Math.sin(th0)*Math.cos(ph0), RY*Math.cos(th0)*1.0-0.02, RZ*Math.sin(th0)*Math.sin(ph0)];
+      const P01=[RX*Math.sin(th0)*Math.cos(ph1), RY*Math.cos(th0)*1.0-0.02, RZ*Math.sin(th0)*Math.sin(ph1)];
+      const P10=[RX*Math.sin(th1)*Math.cos(ph0), RY*Math.cos(th1)*1.0-0.02, RZ*Math.sin(th1)*Math.sin(ph0)];
+      const P11=[RX*Math.sin(th1)*Math.cos(ph1), RY*Math.cos(th1)*1.0-0.02, RZ*Math.sin(th1)*Math.sin(ph1)];
+      // 蛋壳纹理感：用法线扰动模拟
+      const tri=[[P00,P10,P11],[P00,P11,P01]];
+      for(const T3 of tri) for(const v of T3){
+        const n=[v[0]/0.34,v[1]/0.46,v[2]/0.34];
+        const nl=Math.hypot(...n)||1;
+        vPos[k]=v[0];vPos[k+1]=v[1];vPos[k+2]=v[2];
+        vNrm[k]=n[0]/nl;vNrm[k+1]=n[1]/nl;vNrm[k+2]=n[2]/nl;
+        k+=3;
+        // 蛋：内部微光透出
+        const gm=0.5+0.5*Math.sin(t*2.0+v[1]*6.0);
+        vCol[kc++]=0.55+0.35*gm; vCol[kc++]=0.48+0.30*gm; vCol[kc++]=0.42+0.22*gm;
+        vAlp[ka++]=0.92;
+      }
+    }
+    vCount=ka; return;
+  }
+
+  // ── 龙身：沿脊椎放样环状截面 ──
+  for(let s=0;s<SEG;s++){
+    const u0=s/SEG, u1=(s+1)/SEG;
+    const A=spinePt(u0,t), B=spinePt(u1,t);
+    const [Ra,Ua]=frame(tangent(u0,t)), [Rb,Ub]=frame(tangent(u1,t));
+    // 头尾收细。0.30 太粗（成了香肠），0.155 太细（成了线）。取 0.19。
+    const tp=v=>Math.pow(Math.sin(Math.pow(v,0.72)*Math.PI),0.55);
+    // 颈部微隆起，让头有存在感
+    const neck=v=>1+0.35*Math.exp(-Math.pow((v-0.88)/0.11,2));
+    const ra=0.19*P.thick*tp(u0)*neck(u0)+0.012, rb=0.19*P.thick*tp(u1)*neck(u1)+0.012;
+    for(let r=0;r<RING;r++){
+      const a0=r/RING*6.2832, a1=(r+1)/RING*6.2832;
+      // 截面略扁（龙身非正圆）
+      const f0=[Math.cos(a0),Math.sin(a0)*0.80], f1=[Math.cos(a1),Math.sin(a1)*0.80];
+      const p00=[A[0]+(Ra[0]*f0[0]+Ua[0]*f0[1])*ra, A[1]+(Ra[1]*f0[0]+Ua[1]*f0[1])*ra, A[2]+(Ra[2]*f0[0]+Ua[2]*f0[1])*ra];
+      const p01=[A[0]+(Ra[0]*f1[0]+Ua[0]*f1[1])*ra, A[1]+(Ra[1]*f1[0]+Ua[1]*f1[1])*ra, A[2]+(Ra[2]*f1[0]+Ua[2]*f1[1])*ra];
+      const p10=[B[0]+(Rb[0]*f0[0]+Ub[0]*f0[1])*rb, B[1]+(Rb[1]*f0[0]+Ub[1]*f0[1])*rb, B[2]+(Rb[2]*f0[0]+Ub[2]*f0[1])*rb];
+      const p11=[B[0]+(Rb[0]*f1[0]+Ub[0]*f1[1])*rb, B[1]+(Rb[1]*f1[0]+Ub[1]*f1[1])*rb, B[2]+(Rb[2]*f1[0]+Ub[2]*f1[1])*rb];
+      const n0=[(Ra[0]*f0[0]+Ua[0]*f0[1]),(Ra[1]*f0[0]+Ua[1]*f0[1]),(Ra[2]*f0[0]+Ua[2]*f0[1])];
+      const n1=[(Ra[0]*f1[0]+Ua[0]*f1[1]),(Ra[1]*f1[0]+Ua[1]*f1[1]),(Ra[2]*f1[0]+Ua[2]*f1[1])];
+      // 鳞片：只做柔和的环向明暗，不做棋盘格
+      // （棋盘格 sin(a0*RING*0.5+s*1.15) 会形成"玉米粒"观感，非常廉价）
+      const scaleShade=1.0+(0.05+P.gold*0.13)*Math.sin(a0*3.0+s*0.35);
+      // 腹部偏亮（真实龙的配色：背深腹浅）
+      const belly=1.0+0.30*Math.max(0,-Math.sin(a0));
+      const sh2=scaleShade*belly;
+      const tris=[[p00,n0],[p10,n0],[p11,n1],[p00,n0],[p11,n1],[p01,n1]];
+      for(const [v,n] of tris){
+        const nl=Math.hypot(...n)||1;
+        vPos[k]=v[0];vPos[k+1]=v[1];vPos[k+2]=v[2];
+        vNrm[k]=n[0]/nl;vNrm[k+1]=n[1]/nl;vNrm[k+2]=n[2]/nl;k+=3;
+        vCol[kc++]=col[0]*sh2;vCol[kc++]=col[1]*sh2;vCol[kc++]=col[2]*sh2;
+        vAlp[ka++]=0.97;
+      }
+    }
+  }
+  vCount=ka;
+}
+
+/* 附属结构：角/须/鳍/翼/爪 —— 用线段带表现，轻量且飘逸 */
+let lPos=new Float32Array(20000*3), lCol=new Float32Array(20000*3), lAlp=new Float32Array(20000), lCount=0;
+// 翼膜追加写指针（指向实体缓冲）
+let vk=0, ck=0, ak=0;
+function pushLine(a,b,c,al){
+  lPos[lCount*3]=a[0];lPos[lCount*3+1]=a[1];lPos[lCount*3+2]=a[2];
+  lCol[lCount*3]=c[0];lCol[lCount*3+1]=c[1];lCol[lCount*3+2]=c[2];lAlp[lCount]=al;lCount++;
+  lPos[lCount*3]=b[0];lPos[lCount*3+1]=b[1];lPos[lCount*3+2]=b[2];
+  lCol[lCount*3]=c[0];lCol[lCount*3+1]=c[1];lCol[lCount*3+2]=c[2];lAlp[lCount]=al;lCount++;
+}
+function buildDetails(t){
+  lCount=0;
+  // 翼膜要追加到实体三角形缓冲的末尾，因此从当前 vCount 续写
+  vk=vCount*3; ck=vCount*3; ak=vCount;
+  if(P.egg>0.5) return;
+  const GC=[1.0,0.80,0.38];
+  const head=spinePt(1,t), Th=tangent(1,t), [Rh,Uh]=frame(Th);
+
+  // 背鳍
+  if(P.fin>0.03){
+    for(let s=6;s<SEG-4;s+=2){
+      const u=s/SEG, p=spinePt(u,t), Tg=tangent(u,t), [R,U]=frame(Tg);
+      const tp=Math.sin(Math.pow(u,0.8)*Math.PI);
+      const h=0.085*P.fin*tp*(1+0.18*Math.sin(t*2.4+u*11));
+      pushLine(p,[p[0]+U[0]*h,p[1]+U[1]*h,p[2]+U[2]*h],GC,0.42*P.fin);
+    }
+  }
+  // 龙角
+  if(P.horn>0.03){
+    for(const sg of [-1,1]){
+      let prev=head;
+      for(let i=1;i<=8;i++){
+        const s=i/8;
+        const bend=s*s*0.4;
+        const p=[head[0]+Th[0]*s*0.20*P.horn + Rh[0]*sg*(0.075*s+bend*0.05)*P.horn,
+                 head[1]+Th[1]*s*0.20*P.horn + Uh[1]*(0.10*s)*P.horn + Rh[1]*sg*0.075*s*P.horn,
+                 head[2]+Th[2]*s*0.20*P.horn + Rh[2]*sg*(0.075*s+bend*0.05)*P.horn];
+        pushLine(prev,p,GC,0.85*P.horn); prev=p;
+      }
+    }
+  }
+  // 龙须
+  if(P.whisk>0.03){
+    for(const sg of [-1,1]){
+      let prev=head;
+      for(let i=1;i<=14;i++){
+        const s=i/14;
+        const wav=Math.sin(t*2.2+s*5.5)*0.055*s;
+        const p=[head[0]+Th[0]*s*0.42*P.whisk + Rh[0]*sg*(0.03+wav),
+                 head[1]+Th[1]*s*0.42*P.whisk + Uh[1]*wav*1.4 - s*0.03,
+                 head[2]+Th[2]*s*0.42*P.whisk + Rh[2]*sg*(0.03+wav)];
+        pushLine(prev,p,[1.0,0.86,0.52],0.5*P.whisk*(1-s*0.5)); prev=p;
+      }
+    }
+  }
+  // 四爪
+  if(P.claw>0.05){
+    for(const cu of [0.34,0.60]){
+      const p=spinePt(cu,t), Tg=tangent(cu,t), [R,U]=frame(Tg);
+      for(const sg of [-1,1]){
+        for(let f=0;f<3;f++){
+          const sp=(f-1)*0.35;
+          const swing=Math.sin(t*1.8+cu*8+f)*0.03;
+          const tipp=[p[0]+R[0]*sg*0.11*P.claw+Tg[0]*sp*0.05,
+                      p[1]-0.10*P.claw+swing,
+                      p[2]+R[2]*sg*0.11*P.claw+Tg[2]*sp*0.05];
+          pushLine(p,tipp,GC,0.42*P.claw);
+        }
+      }
+    }
+  }
+  // 双翼（应龙）—— 用三角面片实体，而非 1px 线（线在粗躯干旁完全看不见）
+  if(P.wing>0.02){
+    const wu=0.40, wp=spinePt(wu,t), Tg=tangent(wu,t), [R,U]=frame(Tg);
+    const flap=0.55+0.45*Math.sin(t*1.7);
+    for(const sg of [-1,1]){
+      const tips=[];
+      for(let f=0;f<6;f++){
+        const s=f/5;
+        const spread=0.30+s*0.62;
+        const rise=(1-s*0.42)*flap;
+        const back=(s-0.35)*0.34;
+        tips.push([
+          wp[0]+R[0]*sg*0.78*P.wing*spread + U[0]*0.46*P.wing*rise + Tg[0]*back,
+          wp[1]+R[1]*sg*0.78*P.wing*spread + U[1]*0.46*P.wing*rise + Tg[1]*back,
+          wp[2]+R[2]*sg*0.78*P.wing*spread + U[2]*0.46*P.wing*rise + Tg[2]*back]);
+      }
+      // 翼膜：翼根 → 相邻两翼尖 组成三角面
+      for(let f=0;f<tips.length-1;f++){
+        const nrm=[U[0],U[1],U[2]];
+        for(const v of [wp,tips[f],tips[f+1]]){
+          vPos[vk]=v[0];vPos[vk+1]=v[1];vPos[vk+2]=v[2];
+          vNrm[vk]=nrm[0];vNrm[vk+1]=nrm[1];vNrm[vk+2]=nrm[2];vk+=3;
+          vCol[ck++]=1.0;vCol[ck++]=0.72;vCol[ck++]=0.30;
+          vAlp[ak++]=0.34*P.wing;
+        }
+      }
+      // 翼骨用亮线强调
+      tips.forEach(tp2=>pushLine(wp,tp2,[1.0,0.86,0.45],0.75*P.wing));
+    }
+  }
+}
+
+/* 灵气粒子 */
+const PN=300;
+const pPos=new Float32Array(PN*3), pSeed=new Float32Array(PN);
+for(let i=0;i<PN;i++){
+  const a=Math.random()*6.2832, r=0.5+Math.random()*0.9, y=(Math.random()-0.5)*1.1;
+  pPos[i*3]=Math.cos(a)*r; pPos[i*3+1]=y; pPos[i*3+2]=Math.sin(a)*r;
+  pSeed[i]=Math.random();
+}
+
+/* ═══════════ 缓冲区 ═══════════ */
+const bPos=gl.createBuffer(), bNrm=gl.createBuffer(), bCol=gl.createBuffer(), bAlp=gl.createBuffer();
+const lbPos=gl.createBuffer(), lbCol=gl.createBuffer(), lbAlp=gl.createBuffer(), lbNrm=gl.createBuffer();
+const pbPos=gl.createBuffer(), pbSeed=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,pbPos);gl.bufferData(gl.ARRAY_BUFFER,pPos,gl.STATIC_DRAW);
+gl.bindBuffer(gl.ARRAY_BUFFER,pbSeed);gl.bufferData(gl.ARRAY_BUFFER,pSeed,gl.STATIC_DRAW);
+
+function attr(p,name,buf,size){
+  const l=gl.getAttribLocation(p,name); if(l<0)return;
+  gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.enableVertexAttribArray(l);
+  gl.vertexAttribPointer(l,size,gl.FLOAT,false,0,0);
+}
+
+/* ═══════════ 交互 ═══════════ */
+cv.addEventListener('pointerdown',e=>{dragging=true;lx=e.clientX;ly=e.clientY;cv.setPointerCapture(e.pointerId)});
+cv.addEventListener('pointerup',()=>dragging=false);
+cv.addEventListener('pointermove',e=>{
+  if(!dragging)return;
+  rotY+=(e.clientX-lx)*0.006; rotX+=(e.clientY-ly)*0.004;
+  rotX=Math.max(-1.1,Math.min(1.1,rotX));
+  lx=e.clientX;ly=e.clientY;
+});
+
+/* ═══════════ 主循环 ═══════════ */
+gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
+gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+
+function lerpP(){
+  const t=ST[idx];
+  for(const k in P) if(typeof P[k]==='number') P[k]+=(t[k]-P[k])*0.05;
+}
+
+function render(){
+  T+=0.016; lerpP();
+  if(!dragging) rotY+=vY;
+
+  buildBody(T); buildDetails(T);
+  vCount = ak;                       // 计入翼膜追加的顶点
+  gl.bindBuffer(gl.ARRAY_BUFFER,bPos);gl.bufferData(gl.ARRAY_BUFFER,vPos.subarray(0,vCount*3),gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bNrm);gl.bufferData(gl.ARRAY_BUFFER,vNrm.subarray(0,vCount*3),gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bCol);gl.bufferData(gl.ARRAY_BUFFER,vCol.subarray(0,vCount*3),gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bAlp);gl.bufferData(gl.ARRAY_BUFFER,vAlp.subarray(0,vCount),gl.DYNAMIC_DRAW);
+
+  const aspect=cv.width/cv.height;
+  let M=mul(rotYm(rotY),rotXm(rotX));
+  // 相机距离：实测「画面占比」发现龙只占 0.4~3%，远远太小。
+  // 原因是相机固定在远处，而龙的实际半径只有 ~0.08。
+  // 正确做法：按当前形态的包围半径反推距离，让主体稳定占据约 55% 画面高度。
+  const bodyHalf = P.egg>0.5 ? 0.50 : (0.62+0.38*P.len)*1.42;
+  const camDist = bodyHalf/Math.tan(1.05/2)*1.15;
+  M=mul(trans(0,0,-camDist),M);
+  const VP=mul(persp(1.05,aspect,0.1,20),M);
+  // 法线矩阵（旋转部分）
+  const NM=[M[0],M[1],M[2], M[4],M[5],M[6], M[8],M[9],M[10]];
+
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+
+  // 实体
+  gl.useProgram(SOLID);
+  attr(SOLID,'pos',bPos,3);attr(SOLID,'nrm',bNrm,3);
+  attr(SOLID,'col',bCol,3);attr(SOLID,'aAlpha',bAlp,1);
+  gl.uniformMatrix4fv(gl.getUniformLocation(SOLID,'uMVP'),false,new Float32Array(VP));
+  gl.uniformMatrix3fv(gl.getUniformLocation(SOLID,'uNM'),false,new Float32Array(NM));
+  gl.uniform1f(gl.getUniformLocation(SOLID,'uGlow'),P.glow);
+  gl.uniform1f(gl.getUniformLocation(SOLID,'uGold'),P.gold);
+  gl.drawArrays(gl.TRIANGLES,0,vCount);
+
+  // 附属线条（用独立法线缓冲，长度与顶点数严格一致，避免 INVALID_OPERATION）
+  if(lCount>1){
+    if(!window.__lnrm || window.__lnrm.length<lCount*3) window.__lnrm=new Float32Array(lCount*3).fill(0.577);
+    gl.bindBuffer(gl.ARRAY_BUFFER,lbPos);gl.bufferData(gl.ARRAY_BUFFER,lPos.subarray(0,lCount*3),gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER,lbCol);gl.bufferData(gl.ARRAY_BUFFER,lCol.subarray(0,lCount*3),gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER,lbAlp);gl.bufferData(gl.ARRAY_BUFFER,lAlp.subarray(0,lCount),gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER,lbNrm);gl.bufferData(gl.ARRAY_BUFFER,window.__lnrm.subarray(0,lCount*3),gl.DYNAMIC_DRAW);
+    attr(SOLID,'pos',lbPos,3);attr(SOLID,'col',lbCol,3);
+    attr(SOLID,'aAlpha',lbAlp,1);attr(SOLID,'nrm',lbNrm,3);
+    gl.drawArrays(gl.LINES,0,lCount);
+  }
+
+  // 粒子
+  gl.useProgram(PART);
+  attr(PART,'pos',pbPos,3);attr(PART,'seed',pbSeed,1);
+  gl.uniformMatrix4fv(gl.getUniformLocation(PART,'uMVP'),false,new Float32Array(VP));
+  gl.uniform1f(gl.getUniformLocation(PART,'uT'),T);
+  gl.uniform1f(gl.getUniformLocation(PART,'uGlow'),P.glow);
+  gl.uniform1f(gl.getUniformLocation(PART,'uGold'),P.gold);
+  gl.depthMask(false);
+  gl.drawArrays(gl.POINTS,0,Math.round(P.parts));
+  gl.depthMask(true);
+
+  requestAnimationFrame(render);
+}
+render();
+
+/* ═══════════ 阶段切换 ═══════════ */
+function setStage(i){
+  idx=i; const s=ST[i];
+  document.getElementById('h-cn').textContent=s.cn;
+  document.getElementById('h-en').textContent=s.en;
+  document.getElementById('h-ds').innerHTML=s.d;
+  document.getElementById('h-mem').textContent=s.mem;
+  document.getElementById('h-idx').textContent=(i+1)+' / 6';
+  document.getElementById('h-fill').style.width=s.fill+'%';
+  document.getElementById('h-next').textContent=
+    i<5 ? ('还需 '+(ST[i+1].mem-s.mem)+' 条记忆') : '已达完全体';
+  document.querySelectorAll('.pn span').forEach((n,k)=>n.classList.toggle('on',k===i));
+}
+document.querySelectorAll('.pn span').forEach(n=>n.onclick=()=>setStage(+n.dataset.i));
+addEventListener('keydown',e=>{const k=+e.key; if(k>=1&&k<=6) setStage(k-1)});
+</script>
+</body></html>

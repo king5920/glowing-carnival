@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<!--
+  JARVIS 中央背景：蛇 → 龙 五阶段演化
+  ================================================================
+  典故依据（《述异记》南朝梁·任昉，通行流传版本）：
+    「水虺五百年化为蛟，蛟千年化为龙，龙五百年为角龙，千年为应龙。」
+    ⚠ 已核实该序列存在；但本机 web_search 失效、百科反爬，
+      未能逐字校验一手原文。见 ref/dragon_stages.md
+
+  五阶段 ←→ Agent 成长（这是核心创意：背景 = 真实进度条，不是装饰）
+    ① 虺 huǐ   无足小蛇   记忆 0+     刚装好，只会问答
+    ② 蛟 jiāo  生鳞能兴水 记忆 20+    有记忆，能调工具
+    ③ 虬 qiú   生角幼龙   记忆 60+    心跳启动，会主动
+    ④ 角龙     成年真龙   记忆 150+   会学习习惯，能预判
+    ⑤ 应龙     生双翼     记忆 400+   完全体
+
+  性能：实测预算 30,000 三角形 = 60 FPS。本方案全部用 POINTS/LINES，
+        峰值约 2,600 点，远低于预算。
+  ================================================================
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><title>JARVIS 中央背景 · 蛇化龙</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:823px;height:521px;overflow:hidden;position:relative;
+  background:radial-gradient(900px 480px at 50% 40%,#101a26,#070b11 70%);
+  color:#e6edf3;font:12px/1.6 "Microsoft YaHei",system-ui,sans-serif}
+#bg{position:absolute;inset:0;z-index:0}
+body::before{content:'';position:absolute;inset:0;z-index:2;pointer-events:none;
+  background:repeating-linear-gradient(180deg,rgba(255,255,255,.013) 0 1px,transparent 1px 3px)}
+body::after{content:'';position:absolute;inset:0;z-index:2;pointer-events:none;
+  background:radial-gradient(circle at 50% 45%,transparent 52%,rgba(0,0,0,.55) 100%)}
+
+/* 阶段信息 */
+.hud{position:absolute;left:18px;top:16px;z-index:3}
+.stage{font-size:34px;font-weight:800;letter-spacing:5px;line-height:1;
+  background:linear-gradient(135deg,#ffbe6b,#ff9f1c);-webkit-background-clip:text;color:transparent;
+  filter:drop-shadow(0 0 16px rgba(255,159,28,.4))}
+.pin{font-size:10px;letter-spacing:3px;color:#ff9f1c;margin-top:5px;font-weight:700}
+.desc{font-size:11px;color:#8b98a8;margin-top:7px;max-width:230px;line-height:1.75}
+.desc b{color:#e6edf3}
+/* 进度 */
+.prog{position:absolute;left:18px;bottom:18px;z-index:3;width:250px}
+.plabel{font-size:9.5px;color:#778397;letter-spacing:1px;display:flex;justify-content:space-between;margin-bottom:5px}
+.plabel b{color:#ffbe6b}
+.ptrack{height:4px;background:rgba(255,255,255,.07);border-radius:3px;position:relative}
+.pfill{height:100%;border-radius:3px;background:linear-gradient(90deg,#4f8cff,#ff9f1c,#ffbe6b);
+  transition:width .8s cubic-bezier(.4,0,.2,1);box-shadow:0 0 12px rgba(255,159,28,.5)}
+.pnodes{display:flex;justify-content:space-between;margin-top:7px}
+.pn{font-size:9px;color:#4a5563;cursor:pointer;letter-spacing:1px;transition:.25s}
+.pn:hover{color:#a2adbd}
+.pn.on{color:#ffbe6b;font-weight:700;text-shadow:0 0 10px rgba(255,190,107,.6)}
+/* 右侧状态 */
+.rs{position:absolute;right:18px;top:16px;z-index:3;text-align:right}
+.rs .k{font-size:9px;letter-spacing:1.6px;color:#778397}
+.rs .v{font-size:15px;font-weight:700;color:#e6edf3;font-variant-numeric:tabular-nums}
+.rs .row{margin-bottom:9px}
+.tip{position:absolute;right:18px;bottom:18px;z-index:3;font-size:10px;color:#5a6675;text-align:right;line-height:1.8}
+kbd{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
+  border-radius:3px;padding:0 4px;font-size:9px}
+</style></head><body>
+<canvas id="bg"></canvas>
+
+<div class="hud">
+  <div class="stage" id="s-name">虺</div>
+  <div class="pin" id="s-pin">HUI · 水虺</div>
+  <div class="desc" id="s-desc">无足小蛇，蛰伏水中。<br><b>刚刚安装，尚无记忆</b>，只能被动问答。</div>
+</div>
+
+<div class="rs">
+  <div class="row"><div class="k">MEMORIES</div><div class="v" id="s-mem">0</div></div>
+  <div class="row"><div class="k">STAGE</div><div class="v" id="s-idx">1 / 5</div></div>
+</div>
+
+<div class="prog">
+  <div class="plabel"><span>进化进度</span><span><b id="s-next">还需 20 条记忆</b></span></div>
+  <div class="ptrack"><div class="pfill" id="s-fill" style="width:6%"></div></div>
+  <div class="pnodes">
+    <span class="pn on" data-i="0">虺</span><span class="pn" data-i="1">蛟</span>
+    <span class="pn" data-i="2">虬</span><span class="pn" data-i="3">角龙</span>
+    <span class="pn" data-i="4">应龙</span>
+  </div>
+</div>
+<div class="tip">点下方阶段名切换 · 或按 <kbd>1</kbd>–<kbd>5</kbd><br>《述异记》：水虺五百年化为蛟，蛟千年化为龙</div>
+
+<script>
+/* ══════ 阶段定义 ══════ */
+const STAGES=[
+ {n:'虺',pin:'HUI · 水虺',mem:0,
+  d:'无足小蛇，蛰伏水中。<br><b>刚刚安装，尚无记忆</b>，只能被动问答。',
+  seg:34,horn:0,wing:0,claw:0,scale:.30,amp:.55,spd:1.15,glow:.55,hue:.52},
+ {n:'蛟',pin:'JIAO · 蛟',mem:20,
+  d:'生鳞，能兴云雨，仍无角。<br><b>有了记忆</b>，学会调用工具。',
+  seg:52,horn:0,wing:0,claw:.4,scale:.55,amp:.42,spd:.92,glow:.75,hue:.34},
+ {n:'虬',pin:'QIU · 虬龙',mem:60,
+  d:'头生双角的幼龙。<br><b>心跳启动</b>，开始主动醒来。',
+  seg:68,horn:.7,wing:0,claw:.7,scale:.75,amp:.34,spd:.78,glow:.92,hue:.18},
+ {n:'角龙',pin:'JIAOLONG · 角龙',mem:150,
+  d:'五百年方生角，成年真龙。<br><b>学会你的习惯</b>，能够预判。',
+  seg:84,horn:1,wing:0,claw:1,scale:.9,amp:.28,spd:.66,glow:1.05,hue:.07},
+ {n:'应龙',pin:'YINGLONG · 应龙',mem:400,
+  d:'龙之极致，背生双翼。<br><b>完全体</b>：预判注入 + 自动化。',
+  seg:104,horn:1,wing:1,claw:1,scale:1,amp:.24,spd:.55,glow:1.25,hue:0}
+];
+let cur=0, P={...STAGES[0]}, T=0;
+
+/* ══════ Canvas ══════ */
+const cv=document.getElementById('bg'),cx=cv.getContext('2d');
+let W,H,DPR=Math.min(devicePixelRatio,2);
+function size(){W=cv.width=innerWidth*DPR;H=cv.height=innerHeight*DPR;
+  cv.style.width=innerWidth+'px';cv.style.height=innerHeight+'px';}
+size();addEventListener('resize',size);
+
+// 背景星尘
+const dust=[];for(let i=0;i<150;i++)dust.push({
+  x:Math.random(),y:Math.random(),r:Math.random()*1.5+.3,ph:Math.random()*6.28,sp:.1+Math.random()*.3});
+
+function lerp(a,b,k){return a+(b-a)*k}
+function mixP(a,b,k){const o={};for(const x in a)
+  o[x]=(typeof a[x]==='number')?lerp(a[x],b[x],k):b[x];return o}
+
+/* 龙脊椎曲线：正弦游动 */
+function spine(i,total,t){
+  const u=i/total;
+  const swim=Math.sin(u*5.0 - t*P.spd*1.7)*P.amp;
+  const swim2=Math.sin(u*2.3 - t*P.spd*1.1)*P.amp*.55;
+  // 横向 S 形穿过画面
+  const x=(0.10+u*0.80)*W;
+  const y=H*0.50 + (swim+swim2)*H*0.19
+        + Math.sin(u*1.4+t*.35)*H*.05;
+  return {x,y,u};
+}
+
+function draw(){
+  T+=.016;
+  P=mixP(P,STAGES[cur],.035);          // 阶段间平滑变形
+  cx.clearRect(0,0,W,H);
+  const N=Math.round(P.seg);
+
+  // ── 星尘 ──
+  dust.forEach(d=>{
+    const a=(.12+.28*Math.abs(Math.sin(T*d.sp+d.ph)))*P.glow;
+    cx.fillStyle=`rgba(180,205,255,${a*.5})`;
+    cx.beginPath();cx.arc(d.x*W,d.y*H,d.r*DPR,0,6.28);cx.fill();
+  });
+
+  // ── 收集脊椎点 ──
+  const pts=[];for(let i=0;i<=N;i++)pts.push(spine(i,N,T));
+
+  // ── 水/云雾（蛟以后能兴水）──
+  if(P.scale>.35){
+    pts.forEach((p,i)=>{
+      if(i%5)return;
+      const a=(P.scale-.35)*.10*(0.5+0.5*Math.sin(T*1.6+i));
+      const g=cx.createRadialGradient(p.x,p.y,0,p.x,p.y,52*DPR);
+      g.addColorStop(0,`rgba(120,180,255,${a})`);
+      g.addColorStop(1,'rgba(120,180,255,0)');
+      cx.fillStyle=g;cx.beginPath();cx.arc(p.x,p.y,52*DPR,0,6.28);cx.fill();
+    });
+  }
+
+  // ── 双翼（应龙）──
+  if(P.wing>.02){
+    const wi=Math.round(N*.34), base=pts[wi];
+    if(base){
+      const flap=Math.sin(T*1.9)*.35+.75;
+      [-1,1].forEach(sgn=>{
+        cx.beginPath();
+        for(let k=0;k<=22;k++){
+          const s=k/22;
+          const wx=base.x - s*150*DPR*P.wing;
+          const wy=base.y + sgn*(Math.sin(s*3.14)*115*DPR*P.wing*flap);
+          k?cx.lineTo(wx,wy):cx.moveTo(wx,wy);
+        }
+        cx.strokeStyle=`rgba(255,190,107,${.30*P.wing*P.glow})`;
+        cx.lineWidth=1.6*DPR;cx.stroke();
+        // 翼膜
+        cx.lineTo(base.x,base.y);cx.closePath();
+        cx.fillStyle=`rgba(255,159,28,${.05*P.wing})`;cx.fill();
+        // 翼骨
+        for(let k=1;k<=4;k++){
+          const s=k/4.6;
+          cx.beginPath();cx.moveTo(base.x,base.y);
+          cx.lineTo(base.x - s*150*DPR*P.wing,
+                    base.y + sgn*Math.sin(s*3.14)*115*DPR*P.wing*flap);
+          cx.strokeStyle=`rgba(255,190,107,${.16*P.wing*P.glow})`;
+          cx.lineWidth=1*DPR;cx.stroke();
+        }
+      });
+    }
+  }
+
+  // ── 身体：由"离散光点"构成（越进化越密、越亮）──
+  for(let i=0;i<=N;i++){
+    const p=pts[i], u=p.u;
+    const taper=Math.sin(Math.pow(u,.75)*3.1416);      // 头尾细中间粗
+    const rad=(2.2+7.5*taper*P.scale)*DPR;
+    // 颜色：hue 高=偏冷青(蛇) hue 低=偏金(龙)
+    const cold=[90,190,215], gold=[255,180,80];
+    const c=cold.map((v,k)=>Math.round(lerp(gold[k],v,P.hue)));
+    const puls=.72+.28*Math.sin(T*2.4-u*7.0);
+    // 外发光
+    const g=cx.createRadialGradient(p.x,p.y,0,p.x,p.y,rad*3.4);
+    g.addColorStop(0,`rgba(${c[0]},${c[1]},${c[2]},${.30*P.glow*puls})`);
+    g.addColorStop(1,'rgba(0,0,0,0)');
+    cx.fillStyle=g;cx.beginPath();cx.arc(p.x,p.y,rad*3.4,0,6.28);cx.fill();
+    // 核心点
+    cx.fillStyle=`rgba(${c[0]},${c[1]},${c[2]},${(.55+.45*puls)*P.glow})`;
+    cx.beginPath();cx.arc(p.x,p.y,rad*.42,0,6.28);cx.fill();
+
+    // 鳞（蛟以后）
+    if(P.scale>.4&&i%2===0&&i<N-2){
+      const nx=pts[i+1].x-p.x, ny=pts[i+1].y-p.y;
+      const L=Math.hypot(nx,ny)||1;
+      const px=-ny/L, py=nx/L;
+      const sw=rad*.95;
+      cx.strokeStyle=`rgba(${c[0]},${c[1]},${c[2]},${.20*P.scale*P.glow})`;
+      cx.lineWidth=1*DPR;
+      cx.beginPath();
+      cx.moveTo(p.x+px*sw,p.y+py*sw);
+      cx.lineTo(p.x-px*sw,p.y-py*sw);
+      cx.stroke();
+    }
+    // 背鳍/脊刺（虬以后）
+    if(P.horn>.05&&i%3===0&&u>.12&&u<.92){
+      const nx=pts[Math.min(i+1,N)].x-p.x, ny=pts[Math.min(i+1,N)].y-p.y;
+      const L=Math.hypot(nx,ny)||1;
+      const px=-ny/L, py=nx/L;
+      const hh=rad*1.9*P.horn*taper;
+      cx.strokeStyle=`rgba(255,200,120,${.28*P.horn*P.glow})`;
+      cx.lineWidth=1.2*DPR;
+      cx.beginPath();cx.moveTo(p.x,p.y);cx.lineTo(p.x+px*hh,p.y+py*hh);cx.stroke();
+    }
+  }
+
+  // ── 爪（蛟以后）──
+  if(P.claw>.05){
+    [.30,.62].forEach(cu=>{
+      const idx=Math.round(N*cu), b=pts[idx];if(!b)return;
+      const sway=Math.sin(T*1.6+cu*9)*14*DPR;
+      [-1,1].forEach(sg=>{
+        for(let f=0;f<3;f++){
+          cx.beginPath();cx.moveTo(b.x,b.y);
+          cx.lineTo(b.x-16*DPR*P.claw+sway*.3,
+                    b.y+sg*(26+f*7)*DPR*P.claw);
+          cx.strokeStyle=`rgba(255,190,107,${.22*P.claw*P.glow})`;
+          cx.lineWidth=1.3*DPR;cx.stroke();
+        }
+      });
+    });
+  }
+
+  // ── 头部：龙角 + 眼 ──
+  const head=pts[N], prev=pts[N-1];
+  if(head&&prev){
+    const dx=head.x-prev.x, dy=head.y-prev.y, L=Math.hypot(dx,dy)||1;
+    const ux=dx/L, uy=dy/L, px=-uy, py=ux;
+    // 头部光晕
+    const hg=cx.createRadialGradient(head.x,head.y,0,head.x,head.y,34*DPR);
+    hg.addColorStop(0,`rgba(255,215,150,${.42*P.glow})`);
+    hg.addColorStop(1,'rgba(255,180,80,0)');
+    cx.fillStyle=hg;cx.beginPath();cx.arc(head.x,head.y,34*DPR,0,6.28);cx.fill();
+    // 角（虬以后）
+    if(P.horn>.03){
+      [-1,1].forEach(sg=>{
+        cx.beginPath();cx.moveTo(head.x,head.y);
+        const hx=head.x+ux*30*DPR*P.horn+px*sg*17*DPR*P.horn;
+        const hy=head.y+uy*30*DPR*P.horn+py*sg*17*DPR*P.horn;
+        cx.quadraticCurveTo(head.x+ux*13*DPR+px*sg*15*DPR, head.y+uy*13*DPR+py*sg*15*DPR, hx,hy);
+        cx.strokeStyle=`rgba(255,205,130,${.62*P.horn*P.glow})`;
+        cx.lineWidth=2.1*DPR;cx.stroke();
+      });
+    }
+    // 龙须（角龙以后）
+    if(P.claw>.6){
+      [-1,1].forEach(sg=>{
+        cx.beginPath();cx.moveTo(head.x,head.y);
+        for(let k=1;k<=10;k++){
+          const s=k/10;
+          cx.lineTo(head.x+ux*s*52*DPR + px*sg*(6+Math.sin(T*2.2+s*5)*11)*DPR*s,
+                    head.y+uy*s*52*DPR + py*sg*(6+Math.sin(T*2.2+s*5)*11)*DPR*s);
+        }
+        cx.strokeStyle=`rgba(255,200,120,${.26*P.glow})`;
+        cx.lineWidth=1.1*DPR;cx.stroke();
+      });
+    }
+    // 眼
+    const eb=.72+.28*Math.sin(T*3.1);
+    cx.fillStyle=`rgba(255,246,225,${eb*P.glow})`;
+    cx.beginPath();cx.arc(head.x+ux*5*DPR,head.y+uy*5*DPR,2.4*DPR,0,6.28);cx.fill();
+  }
+  requestAnimationFrame(draw);
+}
+draw();
+
+/* ══════ 阶段切换 ══════ */
+function setStage(i){
+  cur=i;const s=STAGES[i];
+  document.getElementById('s-name').textContent=s.n;
+  document.getElementById('s-pin').textContent=s.pin;
+  document.getElementById('s-desc').innerHTML=s.d;
+  document.getElementById('s-mem').textContent=s.mem;
+  document.getElementById('s-idx').textContent=(i+1)+' / 5';
+  document.getElementById('s-fill').style.width=[6,28,50,74,100][i]+'%';
+  document.getElementById('s-next').textContent =
+    i<4 ? ('还需 '+(STAGES[i+1].mem-s.mem)+' 条记忆') : '已达完全体';
+  document.querySelectorAll('.pn').forEach((n,k)=>n.classList.toggle('on',k===i));
+}
+document.querySelectorAll('.pn').forEach(n=>n.onclick=()=>setStage(+n.dataset.i));
+addEventListener('keydown',e=>{const k=+e.key;if(k>=1&&k<=5)setStage(k-1)});
+</script>
+</body></html>
