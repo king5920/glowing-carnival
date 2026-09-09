@@ -125,7 +125,34 @@ assert(alt === null || /push2delay|push2his/.test(alt))
 
 ---
 
-## 五、动手前的检查清单
+## 五、提交纪律（这个项目独有的坑）
+
+### 提交前必看 `git status`，因为贾维斯自己会改文件
+
+这不是普通项目。服务运行期间它会**主动写文件** —— 往 `STATUS.md` 追加 Phase 记录、
+改 `src/` 下的模块、往 `sandbox/` 写产物。
+
+建库当天就栽了一次：写文档时 `git add -A`，把贾维斯自己修的一个飞书投递 bug
+（`src/mind.js` +35 行、`STATUS.md` +100 行）裹进了 `docs:` 提交里。
+后来用 `git reset --soft HEAD~1` 拆成两个提交才理清。
+
+**规矩**：
+
+```bash
+git status --short      # 先看清有哪些改动，分别是谁改的
+git add <具体文件>       # 按逻辑分组，不要图省事用 -A
+```
+
+一个提交只讲一件事。`docs:` 里不要混 `fix:`。
+
+### 改历史只在未推送时做
+
+`git reset --soft` / `commit --amend` 只用在本地未推送的提交上。
+拆分提交时用 `--soft`（保留工作区内容），不要用 `--hard`。
+
+---
+
+## 六、动手前的检查清单
 
 改 `src/` 下的模块前：
 
@@ -142,7 +169,7 @@ assert(alt === null || /push2delay|push2his/.test(alt))
 
 ---
 
-## 六、文档纪律
+## 七、文档纪律
 
 ### STATUS.md 只在前面追加
 
@@ -169,7 +196,7 @@ Phase 18 就是这么开头的，那是范例不是瑕疵。
 
 ---
 
-## 七、密钥
+## 八、密钥
 
 `.env`（ARK Key）和 `.feishu.json`（appSecret）已在 `.gitignore` 中，
 `check-env` 每次都会验证它们没被 git 追踪。
