@@ -783,14 +783,24 @@ while ($true) {
     this.onEvent(ev);
   }
 
-  stop() {
+  /**
+   * 停止监听。返回 Promise —— 环形缓冲的子进程确实退出后才 resolve。
+   *
+   * 为什么要 await（2026-09-09 实测）：ring.stop() 内部是异步的，
+   * 老代码同步调完就立刻 cleanup(0) 删临时文件，
+   * 此时子进程还活着、还可能在写；更糟的是主进程若紧接着退出，
+   * 子进程变孤儿并锁住 ringmic.exe，下次重编译直接失败（CS0016）。
+   * 清理必须排在子进程确实死掉之后。
+   */
+  async stop() {
     if (this.ps) { this.ps.kill(); this.ps = null; }
-    /* 环形缓冲也要停 —— 它持有麦克风，不释放会让下次启动拿不到设备。
-     * 顺手清掉临时 WAV，别把磁盘塞满。 */
+    /* 环形缓冲也要停 —— 它持有麦克风，不释放会让下次启动拿不到设备。 */
     if (this.ring) {
-      try { this.ring.stop(); } catch { }
-      try { this.ring.cleanup(0); } catch { }
+      const r = this.ring;
       this.ring = null;
+      try { await r.stop(); } catch { }
+      /* 顺手清掉临时 WAV，别把磁盘塞满。必须在子进程退出后做。 */
+      try { r.cleanup(0); } catch { }
     }
     this.running = false;
   }

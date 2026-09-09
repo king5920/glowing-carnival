@@ -52,6 +52,13 @@ const fs = require('fs');
 
 const TMP_DIR = path.join(os.tmpdir(), 'jarvis-voice');
 
+/* stop() 的两级兜底超时。
+ * GRACE：等 C# 侧走完 waveInStop/Reset/Unprepare/Close 的时间，
+ *        实测优雅退出约 200-400ms，给 900ms 有余量。
+ * HARD ：连 kill 都没反应时也必须 resolve，绝不让调用方吊死。 */
+const STOP_GRACE_MS = 900;
+const STOP_HARD_MS = 3000;
+
 /* ══════════════ 为什么必须编译成独立 exe ══════════════
  *
  * ══ 实测对照（同一段 waveIn 代码，一字未改，只换宿主）══
@@ -176,7 +183,7 @@ public class JarvisRingMic {
     stdout.Flush();
   }
 
-  public static void Main() {
+  public static void Main(string[] args) {
     stdout = Console.OpenStandardOutput();
     try {
       int ndev = waveInGetNumDevs();
@@ -193,9 +200,18 @@ public class JarvisRingMic {
       f.bits = 16; f.align = 2; f.bps = (uint)(rate * 2); f.cb = 0;
 
       IntPtr h;
-      // 0xFFFFFFFF = WAVE_MAPPER: let Windows pick the current default input,
-      // so swapping headsets does not need a restart.
-      int rc = waveInOpen(out h, 0xFFFFFFFF, ref f, IntPtr.Zero, IntPtr.Zero, 0);
+      // Device selection comes from argv[0], not hardcoded.
+      // 0xFFFFFFFF = WAVE_MAPPER (Windows default input) is the fallback,
+      // but a caller that probed the devices can pick a better one:
+      // WAVE_MAPPER cannot be overridden, so a low-gain default device
+      // would leave us unable to use the good mic on the same machine.
+      uint devId = 0xFFFFFFFF;
+      if (args != null && args.Length > 0) {
+        int want;
+        if (int.TryParse(args[0], out want) && want >= 0) devId = (uint)want;
+      }
+      Emit("DEV id=" + (devId == 0xFFFFFFFF ? "mapper" : devId.ToString()));
+      int rc = waveInOpen(out h, devId, ref f, IntPtr.Zero, IntPtr.Zero, 0);
       Emit("OPEN rc=" + rc);
       if (rc != 0) return;
 
@@ -314,9 +330,49 @@ function ensureExe() {
   if (r.status !== 0 || !fs.existsSync(exePath)) {
     const msg = String(r.stdout || r.stderr || '').split(/\r?\n/)
       .filter(Boolean).slice(0, 2).join(' | ');
+
+    /* CS0016 = 写不了输出文件。绝大多数情况是上次运行崩溃/被强杀留下的
+     * 孤儿 ringmic.exe 还活着，持有文件锁。
+     * 这种「上一次的残留把这一次堵死」的状态必须能自愈，
+     * 否则用户看到的是语音功能凭空失效、重启客户端也没用。 */
+    if (/CS0016/.test(msg) || /CS0016/.test(String(r.stdout || ''))) {
+      if (killOrphans()) {
+        const r2 = spawnSync(csc, ['/nologo', '/optimize+', '/target:exe',
+          '/out:' + exePath, csPath], { encoding: 'utf8', windowsHide: true });
+        if (r2.status === 0 && fs.existsSync(exePath)) {
+          return { exe: exePath, recovered: '清理了残留采集进程后重新编译成功' };
+        }
+      }
+      return { error: '编译采集程序失败（输出文件被占用，且清理残留进程无效）: ' + msg.slice(0, 200) };
+    }
     return { error: '编译采集程序失败: ' + msg.slice(0, 240) };
   }
   return { exe: exePath };
+}
+
+/**
+ * 杀掉遗留的 ringmic.exe 进程。
+ *
+ * 只在编译因文件占用失败时调用 —— 平时不要主动杀，
+ * 否则会干掉正在正常服务的采集实例。
+ * @returns {boolean} 是否确实杀掉了至少一个
+ */
+function killOrphans() {
+  try {
+    const q = spawnSync('tasklist', ['/FI', 'IMAGENAME eq ringmic.exe', '/NH'],
+      { encoding: 'utf8', windowsHide: true });
+    if (!/ringmic\.exe/i.test(String(q.stdout || ''))) return false;
+    spawnSync('taskkill', ['/F', '/IM', 'ringmic.exe'],
+      { encoding: 'utf8', windowsHide: true });
+    /* taskkill 返回后句柄释放还要一小会儿，同步等一下 */
+    const until = Date.now() + 1200;
+    while (Date.now() < until) {
+      const q2 = spawnSync('tasklist', ['/FI', 'IMAGENAME eq ringmic.exe', '/NH'],
+        { encoding: 'utf8', windowsHide: true });
+      if (!/ringmic\.exe/i.test(String(q2.stdout || ''))) break;
+    }
+    return true;
+  } catch { return false; }
 }
 
 /**
@@ -345,9 +401,22 @@ class RingBuffer {
     this.silenceMs = 0;
     this.totalChunks = 0;
     this.lastChunkAt = 0;
+    this.device = null;     // start() 时填入实际选中的设备
   }
 
-  start() {
+  /**
+   * 启动采集。
+   *
+   * @param device 'auto'（默认，探测后选信号最好的）
+   *               | 'default'（Windows 默认输入 = WAVE_MAPPER）
+   *               | 设备索引数字
+   *
+   * 为什么要能选设备：原本硬编码 WAVE_MAPPER，等于"永远用系统默认"。
+   * 本机实测两个输入设备信号量级差一个数量级，
+   * 如果默认设备恰好是低增益的那个，**没有任何办法切过去**，
+   * 而现象是"能录音但识别不出东西"—— 会被误判成识别引擎的问题。
+   */
+  start(device = 'auto') {
     if (this.running) return;
 
     /* ══ 必须直接 spawn exe，不能经过 powershell ══
@@ -364,7 +433,18 @@ class RingBuffer {
       return;
     }
 
-    this.ps = spawn(built.exe, [], { windowsHide: true });
+    /* 复用 mic_record 的探测能力选设备 —— 不重复实现一套。
+     * 探测失败就退回 WAVE_MAPPER（-1），不能因为选设备失败就不录音。 */
+    let devIndex = -1;
+    try {
+      const resolved = require('./mic_record.js').resolveDevice(device);
+      devIndex = resolved.index;
+      this.device = resolved;
+    } catch (e) {
+      this.device = { index: -1, how: 'WAVE_MAPPER（探测不可用）', warn: e.message };
+    }
+
+    this.ps = spawn(built.exe, [String(devIndex)], { windowsHide: true });
     this.running = true;
 
     this.ps.stdout.on('data', d => this._onData(d));
@@ -382,15 +462,42 @@ class RingBuffer {
     });
   }
 
+  /**
+   * 停止采集。返回 Promise，resolve 时子进程**已确实退出**。
+   *
+   * 为什么必须可等待（2026-09-09 实测）：
+   * 老版本是「发射后不管」——写 quit、600ms 后兜底 kill，然后立即返回。
+   * 调用方一旦紧接着 process.exit()，那个 600ms 的 timer 永远不触发，
+   * 子进程变孤儿；孤儿**持有 ringmic.exe 的文件锁**，
+   * 导致下一次 ensureExe() 重编译报 CS0016「另一个进程正在使用该文件」，
+   * 表现为语音功能凭空失效。必须让调用方能 await 到真正退出。
+   *
+   * @returns {Promise<void>}
+   */
   stop() {
     this.running = false;
-    if (!this.ps) return;
-    /* 先请子进程自己退出（它会 waveInClose 释放麦克风），
-     * 再兜底 kill —— 不释放会让下一次启动拿不到设备。 */
-    try { this.ps.stdin.write('quit\n'); } catch { }
+    if (!this.ps) return Promise.resolve();
     const p = this.ps;
     this.ps = null;
-    setTimeout(() => { try { p.kill(); } catch { } }, 600);
+
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; clearTimeout(t1); clearTimeout(t2); resolve(); };
+      p.once('exit', finish);
+      p.once('close', finish);
+
+      /* 先请子进程自己退出（它会 waveInStop/Reset/Close 释放麦克风）。
+       * 优雅退出很重要：硬 kill 不走 waveInClose，
+       * 设备句柄要等系统回收，下一次启动可能拿不到麦克风。 */
+      try { p.stdin.write('quit\n'); } catch { }
+      /* stdin 关掉也能触发 C# 侧 ReadLine 返回（EOF） */
+      try { p.stdin.end(); } catch { }
+
+      /* 兜底一：优雅退出没赶上就强杀 */
+      const t1 = setTimeout(() => { try { p.kill(); } catch { } }, STOP_GRACE_MS);
+      /* 兜底二：连 kill 都没反应也要 resolve，绝不把调用方吊死 */
+      const t2 = setTimeout(finish, STOP_HARD_MS);
+    });
   }
 
   _onData(d) {
@@ -513,6 +620,9 @@ class RingBuffer {
       speaking: this.speaking,
       peakSmooth: this.peakSmooth,
       totalChunks: this.totalChunks,
+      /* 必须报出在录哪个设备。只说"running: true"而不说设备，
+       * 出问题时无法判断是"录错了设备"还是"设备本身有问题"。 */
+      device: this.device,
       /* 超过 2 秒没收到块就是卡住了 —— 明确报出来，
        * 不然又变成"看起来在工作但实际没连上"。 */
       stalled: this.running && this.lastChunkAt > 0
@@ -558,6 +668,7 @@ function wrapWav(pcm, rate) {
 }
 
 module.exports = {
-  RingBuffer, wrapWav, CS_SOURCE,
+  RingBuffer, wrapWav, CS_SOURCE, ensureExe, killOrphans,
   RATE, CHUNK_MS, RING_SECONDS, RING_BYTES, VOICE_THRESHOLD, TMP_DIR,
+  STOP_GRACE_MS, STOP_HARD_MS,
 };

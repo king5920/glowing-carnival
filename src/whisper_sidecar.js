@@ -34,13 +34,33 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-/* 模型大小选择。
+/* ══════════ 模型档位选择（2026-09-09 本机实测） ══════════
  *
- * small 是给纯 CPU 机器的甜点：约 500MB，中文可用，实时率约 0.3-0.5x
- * （说 3 秒的话，识别约 1-1.5 秒）。
- * medium/large 准确率更高但 CPU 上太慢，会让语音交互失去意义 ——
- * 等 5 秒才出结果不如打字。
- * 可用环境变量覆盖，但默认保守。 */
+ * 曾经默认 small，注释里写"实时率约 0.3-0.5x，说 3 秒识别 1-1.5 秒"——
+ * **那是推测，不是实测。** 真跑一遍：small 识别 4.8 秒音频要 4.9 秒，
+ * 实时率 1.0x，短句 1.4 秒音频也要 3.2 秒。等 5 秒才出结果，不如打字。
+ *
+ * 三档实测对比（20 核 CPU / int8 / beam=1 / 各 5 次取中位数）：
+ *
+ *   档位   体积    短句1.4s  中句4.8s  长句5.9s   准确率
+ *   tiny    75MB     0.31s     0.68s     0.68s   ✗ "假维斯"/"确然正常"/"四百零八"
+ *   base   145MB     1.00s     1.15s     1.17s   ✓ 全对
+ *   small  484MB     3.16s     5.00s     4.90s   ✓ 全对
+ *
+ * **base 是甜点：准确率和 small 打平，速度快 4.5 倍。**
+ * tiny 便宜但听不懂专有名词（连 initial_prompt 都救不回来），不可用。
+ *
+ * ⚠ 别用 cpu_threads 调优：实测 4/8/16 线程无差异（5~6 秒），
+ *   瓶颈不在并行度。也别指望关 temperature fallback ——
+ *   logprob -0.13 很健康，本来就没触发 fallback。
+ *
+ * ⚠ 基准测试必须取中位数、多次采样：本机后台常驻浏览器/微信/管家，
+ *   CPU 实时占用 30-40%，单次测量会在 2s~8s 之间乱跳，
+ *   足以让你得出三个互相矛盾的错误结论（我全踩了一遍）。
+ *   另：Win32_Processor.LoadPercentage 报 16% 是平均值假象，
+ *   要用 Get-Counter '\Processor(_Total)\% Processor Time' 才准。
+ *
+ * 可用 JARVIS_WHISPER_MODEL 覆盖（tiny/base/small/medium/large-v3）。 */
 /* ══════════ 领域提示词（实测效果显著） ══════════
  *
  * whisper 不认识"贾维斯"这个专有名词。实测：
@@ -51,15 +71,67 @@ const os = require('os');
  * 原因：initial_prompt 会作为上文送进解码器，
  * 让模型偏向这个领域的词汇分布。
  *
- * 提示词里放了唤醒词 + 高频股票术语，因为这台机器上
- * 贾维斯主要用于量化和行情场景。
+ * ══ 2026-09-09 修正：只放股票词是个偏科的提示 ══
+ *
+ * 旧提示只列了行情术语，结果**操作类命令被带偏**。
+ * 实测同一句"打开浏览器"（base 模型）：
+ *   旧提示(纯股票)  → "打开流软器"    logprob -0.317  ✗
+ *   新提示(+操作词) → "打开浏览器"    logprob -0.092  ✓
+ *   无提示          → "打開流冷氣"    logprob -0.704  ✗✗
+ *
+ * 提示词是**先验分布**，不是词表：给了股票先验，模型就用股票的
+ * 音素组合去猜所有词。所以必须覆盖真实使用的两类场景。
+ *
+ * ⚠ 别用 beam_size 救：实测 beam=3/5 结果与 beam=1 完全相同，
+ *   只多花 100-250ms。提示词修好了就不需要加 beam。
+ *
  * 不能放太长 —— prompt 占用 224 token 的上下文预算，
- * 塞满了会挤掉真正的音频上下文。 */
+ * 塞满了会挤掉真正的音频上下文。当前约 90 字，还有余量。 */
 const INITIAL_PROMPT = process.env.JARVIS_WHISPER_PROMPT
-  || '贾维斯是我的AI助手。以下是对贾维斯说的话，内容多为股票、大盘、指数、'
-   + '板块、涨跌、回测、选股、因子、持仓、资金流等话题。';
+  || '贾维斯是我的AI助手。以下是对贾维斯说的话，可能是操作指令，'
+   + '如打开浏览器、关闭窗口、截图、播放音乐、设置提醒、记一下、搜索、跑一下、查一下；'
+   + '也可能是行情话题，如股票、沪深300、上证指数、大盘、板块、涨跌、'
+   + '回测、选股、因子、持仓、资金流。';
 
-const MODEL_SIZE = process.env.JARVIS_WHISPER_MODEL || 'small';
+const MODEL_SIZE = process.env.JARVIS_WHISPER_MODEL || 'base';
+
+/* 各档模型体积（MB），用于给用户一个准确的下载预期。
+ * 之前代码里写死"small=500MB，其它=1.5GB"，base 会被误报成 1.5GB。 */
+const MODEL_MB = {
+  tiny: 75, base: 145, small: 484, medium: 1530, 'large-v3': 3090,
+};
+
+/* ══════════ 本地模型目录（离线兜底） ══════════
+ *
+ * huggingface_hub 下载在某些环境下会失败但**不抛错**，
+ * 只留下一个 0 字节的 model.bin，下次加载报
+ * "File model.bin is incomplete" —— 又一个「假的可用」。
+ * 实测两种失败：
+ *   ① Xet CAS 后端 401（hf-mirror 不支持 Xet 协议，需 HF_HUB_DISABLE_XET=1）
+ *   ② 沙箱/权限拦截文件落盘（SHFileOperationW 0x2）
+ *
+ * 所以支持一个本地目录：若 <LOCAL_MODEL_DIR>/<档位>/model.bin 存在且非空，
+ * 直接把目录路径传给 WhisperModel，完全跳过 hub。
+ * 手工准备（镜像直连可用，实测 200 OK）：
+ *   curl -L -o model.bin https://hf-mirror.com/Systran/faster-whisper-base/resolve/main/model.bin
+ *   同目录另需 config.json / tokenizer.json / vocabulary.txt */
+const LOCAL_MODEL_DIR = process.env.JARVIS_WHISPER_MODEL_DIR
+  || path.join(os.homedir(), '.cache', 'jarvis-whisper');
+
+/** 找本地模型目录；没有或不完整就返回 null（让调用方走 hub）。 */
+function localModelPath(size = MODEL_SIZE) {
+  try {
+    const dir = path.join(LOCAL_MODEL_DIR, size);
+    const bin = path.join(dir, 'model.bin');
+    /* 必须查大小 —— 0 字节残骸是下载失败的典型产物，
+     * 只判断 existsSync 会当成"已就绪"然后在加载时炸。 */
+    if (fs.statSync(bin).size < 1024 * 1024) return null;
+    for (const f of ['config.json', 'tokenizer.json', 'vocabulary.txt']) {
+      if (!fs.existsSync(path.join(dir, f))) return null;
+    }
+    return dir;
+  } catch { return null; }
+}
 
 /* ══════════ HuggingFace 镜像（国内必需） ══════════
  *
@@ -114,7 +186,7 @@ const PROBE_TTL_MS = 5 * 60 * 1000;
  * 协议：stdin 送一行 JSON 请求，stdout 回一行 JSON 结果。
  * 用行分隔而非长度前缀 —— 调试时能直接看懂。 */
 let _worker = null;
-const WORKER_IDLE_MS = 10 * 60 * 1000;   // 闲置 10 分钟就放掉（模型占约 500MB 内存）
+const WORKER_IDLE_MS = 10 * 60 * 1000;   // 闲置 10 分钟就放掉（模型常驻内存，base 约 150MB）
 let _workerIdleTimer = null;
 
 function runPy(pyExe, code, timeoutMs = 20000) {
@@ -243,22 +315,48 @@ async function probe(force = false) {
   result.available = true;
   result.version = info.version || null;
 
-  /* 3) 模型是否已缓存。
-   * 没缓存时**首次调用会下载 500MB** —— 这必须提前告诉用户，
-   * 不能让他在说完一句话后等 10 分钟不知道发生了什么。 */
-  const hfHome = process.env.HF_HOME
-    || path.join(os.homedir(), '.cache', 'huggingface');
-  try {
-    if (fs.existsSync(hfHome)) {
-      const hit = fs.readdirSync(path.join(hfHome, 'hub'), { withFileTypes: true })
-        .some(d => d.isDirectory() && d.name.includes(`whisper-${MODEL_SIZE}`));
-      result.modelCached = hit;
-    }
-  } catch (_) { /* 目录不存在就是没缓存，不是错误 */ }
+  /* 3) 模型是否已就绪。
+   * 没就绪时**首次调用会下载**（base 约 145MB，small 约 484MB）——
+   * 这必须提前告诉用户，不能让他在说完一句话后等 10 分钟不知道发生了什么。
+   *
+   * 两个来源：本地目录（离线兜底，优先）> HF hub 缓存。 */
+  const local = localModelPath();
+  if (local) {
+    result.modelCached = true;
+    result.modelPath = local;
+    result.modelSource = '本地目录';
+  } else {
+    const hfHome = process.env.HF_HOME
+      || path.join(os.homedir(), '.cache', 'huggingface');
+    try {
+      /* ⚠ 不能只看目录名存在。两个坑：
+       *   ① includes('whisper-base') 会误命中 whisper-base.en，必须精确匹配
+       *   ② 下载失败会留 0 字节 model.bin，目录在但模型是废的 ——
+       *      报"已缓存"然后加载时炸，正是「假的可用」 */
+      const hubDir = path.join(hfHome, 'hub');
+      const want = `models--Systran--faster-whisper-${MODEL_SIZE}`;
+      const hit = fs.readdirSync(hubDir, { withFileTypes: true })
+        .find(d => d.isDirectory() && d.name === want);
+      if (hit) {
+        const snapRoot = path.join(hubDir, hit.name, 'snapshots');
+        const ok = fs.readdirSync(snapRoot).some(s => {
+          try {
+            return fs.statSync(path.join(snapRoot, s, 'model.bin')).size > 1024 * 1024;
+          } catch { return false; }
+        });
+        result.modelCached = ok;
+        if (hit && !ok) result.modelBroken = true;
+        result.modelSource = ok ? 'HF 缓存' : null;
+      }
+    } catch (_) { /* 目录不存在就是没缓存，不是错误 */ }
+  }
 
   if (!result.modelCached) {
-    result.reason = `可用，但 ${MODEL_SIZE} 模型尚未下载`
-      + `（首次识别会下载约 ${MODEL_SIZE === 'small' ? '500MB' : '1.5GB'}）`;
+    const mb = MODEL_MB[MODEL_SIZE] || '未知大小';
+    result.reason = result.modelBroken
+      ? `${MODEL_SIZE} 模型缓存已损坏（model.bin 为空，下载中断）`
+        + `，请删除 ~/.cache/huggingface/hub/models--Systran--faster-whisper-${MODEL_SIZE} 后重试`
+      : `可用，但 ${MODEL_SIZE} 模型尚未下载（首次识别会下载约 ${mb}MB）`;
   }
 
   _probeCache = result; _probeAt = Date.now();
@@ -273,7 +371,9 @@ function workerCode() {
     'import sys, json, math',
     'from faster_whisper import WhisperModel',
     // 模型加载放在循环外 —— 这是整个优化的核心
-    `m = WhisperModel(${JSON.stringify(MODEL_SIZE)}, device="cpu", compute_type=${JSON.stringify(COMPUTE_TYPE)})`,
+    /* 有本地模型目录就传目录路径，完全跳过 hub 下载；
+     * 否则传档位名（"base"），由 faster-whisper 自己去 hub 拉。 */
+    `m = WhisperModel(${JSON.stringify(localModelPath() || MODEL_SIZE)}, device="cpu", compute_type=${JSON.stringify(COMPUTE_TYPE)})`,
     'sys.stdout.write(json.dumps({"type":"ready"}) + "\\n"); sys.stdout.flush()',
     'for line in sys.stdin:',
     '    line = line.strip()',
@@ -322,6 +422,9 @@ async function getWorker(pyExe) {
         env: Object.assign({}, process.env, {
           PYTHONIOENCODING: 'utf-8',
           HF_ENDPOINT: HF_ENDPOINT,
+          /* 必须禁 Xet：hf-mirror 不支持 Xet CAS 协议，
+           * 走 Xet 会拿到 401 Unauthorized 并留下 0 字节 model.bin。 */
+          HF_HUB_DISABLE_XET: '1',
         }),
       });
     } catch (e) {
@@ -383,7 +486,7 @@ async function getWorker(pyExe) {
   return startPromise;
 }
 
-/** 续期闲置计时器 —— 模型占约 500MB 内存，长期不用该放掉 */
+/** 续期闲置计时器 —— 模型常驻内存（base 约 150MB），长期不用该放掉 */
 function touchWorker() {
   if (_workerIdleTimer) clearTimeout(_workerIdleTimer);
   _workerIdleTimer = setTimeout(() => { stopWorker(); }, WORKER_IDLE_MS);
@@ -423,7 +526,7 @@ async function transcribe(wavPath, opts = {}) {
       ok: false,
       reason: p.modelCached
         ? 'whisper 进程启动失败'
-        : `whisper 进程启动失败（首次需从 ${HF_ENDPOINT} 下载约 500MB 模型）`,
+        : `whisper 进程启动失败（首次需从 ${HF_ENDPOINT} 下载约 ${MODEL_MB[MODEL_SIZE] || '?'}MB 模型）`,
       fallback: 'System.Speech',
     };
   }
@@ -485,8 +588,21 @@ async function transcribe(wavPath, opts = {}) {
       reason = `下载模型失败：连不上 ${HF_ENDPOINT}。`
         + '国内访问 huggingface.co 通常超时 —— '
         + '可设 JARVIS_HF_ENDPOINT 换镜像，或继续用系统语音。';
+    } else if (/model\.bin is incomplete|failed to read a value of size/i.test(raw)) {
+      /* 实测：下载中断留下 0 字节 model.bin，之后每次加载都报这个。
+       * 关键是必须告诉用户「删掉重下」，否则他会以为是模型不兼容。 */
+      reason = `${MODEL_SIZE} 模型文件损坏（下载中断留下空文件）。`
+        + `请删除 ~/.cache/huggingface/hub/models--Systran--faster-whisper-${MODEL_SIZE} 后重试，`
+        + '或手工下载到 ~/.cache/jarvis-whisper/' + MODEL_SIZE + '/。';
+    } else if (/xethub|CAS Client Error|reconstructions/i.test(raw)) {
+      reason = 'HuggingFace Xet 传输协议失败（镜像站不支持）。'
+        + '已默认设 HF_HUB_DISABLE_XET=1，若仍失败请手工下载模型到 '
+        + '~/.cache/jarvis-whisper/' + MODEL_SIZE + '/。';
+    } else if (/SHFileOperationW|Errno 13|PermissionError|Access is denied/i.test(raw)) {
+      reason = '模型缓存写入被拒（权限或沙箱限制）。'
+        + '可手工下载模型到 ~/.cache/jarvis-whisper/' + MODEL_SIZE + '/ 绕过。';
     } else if (/No space left|Errno 28/i.test(raw)) {
-      reason = '磁盘空间不足，模型需要约 500MB。';
+      reason = `磁盘空间不足，${MODEL_SIZE} 模型需要约 ${MODEL_MB[MODEL_SIZE] || '?'}MB。`;
     } else if (/ctranslate2|DLL load failed|ImportError/i.test(raw)) {
       reason = 'ctranslate2 加载失败，Windows 上多为缺 Microsoft Visual C++ 运行库。';
     } else if (/转写超时/.test(raw)) {
@@ -497,14 +613,59 @@ async function transcribe(wavPath, opts = {}) {
     return { ok: false, reason, rawError: raw.slice(0, 600), fallback: 'System.Speech' };
   }
 
+  const cleaned = cleanTranscript(msg.text || '');
   return {
     ok: true,
-    text: msg.text || '',
+    text: cleaned.text,
+    raw: cleaned.changed ? (msg.text || '') : undefined,
     conf: msg.conf,
     lang: msg.lang,
     langProb: msg.langProb,
     engine: `faster-whisper:${MODEL_SIZE}`,
   };
+}
+
+/* ══════════ 转写结果清洗（2026-09-09 实测必需） ══════════
+ *
+ * 短音频末尾 whisper 会稳定吐幻觉 token。**不是偶发，是 100% 复现**：
+ *   "截图"     → "截图Ｇ跌"      conf 0.641（4/4 次完全一致）
+ *   "播放音乐" → "播放音乐；。"  conf 0.682（3/3 次完全一致）
+ *   "搜索一下今天的新闻" → 尾部一个 U+FFFD 替换字符
+ *
+ * 成因：解码器在音频结束后仍要产 token，短音频没有足够上下文
+ * 让它稳定输出 <|endoftext|>，于是抓一个高频字凑数。
+ * 顺带一个可用信号：**带幻觉尾巴的句子 conf 明显偏低**
+ * （0.64/0.68 vs 正常 0.89~0.95）。
+ *
+ * ⚠ 清洗必须保守。宁可漏掉一个垃圾字符，也不能吃掉真实内容 ——
+ *   识别结果会直接进指令解析，"关闭窗口"被削成"关闭"是更糟的错。
+ * 所以只删三类**明确**无意义的尾部字符，不做同音词纠正、不动句子中部。 */
+function cleanTranscript(text) {
+  const before = text;
+  let t = text;
+
+  /* 1) U+FFFD 替换字符：解码失败的产物，任何位置都无意义 */
+  t = t.replace(/\uFFFD/g, '');
+
+  /* 2) 尾部标点堆叠："；。" "，。" "。。" —— 只保留最后一个句号 */
+  t = t.replace(/[，,、；;：:。.!！?？\s]{2,}$/u, '。');
+
+  /* 2b) 尾部单个"非终止"标点：短音频常吐 "截图；" "查一下上证指数：" ——
+   * 分号/冒号/逗号出现在句尾在中文里没有意义，一律换成句号。
+   * ⚠ 不动 。！？ —— 那些是合法句末标点，删了会丢失语气信息
+   *   （疑问句进指令解析时"？"是有用的信号）。 */
+  t = t.replace(/[，,、；;：:]$/u, '。');
+
+  /* 3) 尾部孤立的全角/半角单字母 + 单字组合，如 "Ｇ跌"。
+   * 严格限定：必须紧跟在中文之后、且长度 ≤2、且含全角字母 ——
+   * 三个条件同时满足才删，避免误伤"看一下A股"这类真实内容。 */
+  t = t.replace(/(?<=[\u4e00-\u9fa5])[Ａ-Ｚａ-ｚ][\u4e00-\u9fa5]?[。.]?$/u, '');
+
+  /* 4) 收尾：去空白，若清完只剩标点则视为空 */
+  t = t.trim();
+  if (/^[，,、；;：:。.!！?？\s]*$/u.test(t)) t = '';
+
+  return { text: t, changed: t !== before };
 }
 
 /**
@@ -525,11 +686,14 @@ async function status() {
     /* 安装命令给出来让用户自己决定 —— 这是"可选旁路"的含义。
      * 自动装 1GB 依赖是越界。 */
     installHint: p.installHint,
+    modelSource: p.modelSource || null,
     note: p.available
-      ? (p.modelCached ? '正在使用 faster-whisper（识别准确率高于系统语音）'
+      ? (p.modelCached
+        ? `正在使用 faster-whisper:${p.modelSize}（${p.modelSource || '已就绪'}，`
+          + '识别准确率高于系统语音)'
         : '已安装但模型未下载，首次识别会先下载模型')
       : ' 使用 Windows 系统语音（零依赖，准确率略低）。安装 faster-whisper 可提升准确率，'
-        + '但需要约 500MB 模型文件 —— 贾维斯不会替你安装。',
+        + `但需要约 ${MODEL_MB[MODEL_SIZE] || '?'}MB 模型文件 —— 贾维斯不会替你安装。`,
   };
 }
 
@@ -537,7 +701,8 @@ async function status() {
 function resetProbe() { _probeCache = null; _probeAt = 0; }
 
 module.exports = {
-  probe, transcribe, status, resetProbe, stopWorker,
-  MODEL_SIZE, COMPUTE_TYPE, TMP_DIR, HF_ENDPOINT, INITIAL_PROMPT,
-  WORKER_IDLE_MS,
+  probe, transcribe, status, resetProbe, stopWorker, localModelPath,
+  cleanTranscript,
+  MODEL_SIZE, MODEL_MB, COMPUTE_TYPE, TMP_DIR, HF_ENDPOINT, INITIAL_PROMPT,
+  LOCAL_MODEL_DIR, WORKER_IDLE_MS,
 };

@@ -144,7 +144,14 @@ const voiceHub = {
         }).catch(() => { this._sttEngine = 'System.Speech'; });
       }
     } else if (this.isListening() || this._starting) {
-      try { if (this.listener) this.listener.stop(); } catch (_) {}
+      /* listener.stop() 是 async（要等采集子进程真正退出，
+       * 否则孤儿进程锁住 ringmic.exe 让下次启动编译失败）。
+       * 这里不 await —— _sync 本身是同步入口，被多处调用；
+       * 但必须 catch，否则未处理的 rejection 会打挂进程。 */
+      try {
+        const p = this.listener && this.listener.stop();
+        if (p && typeof p.catch === 'function') p.catch(() => { });
+      } catch (_) { }
       this.listener = null;
       this._starting = false;
     }
