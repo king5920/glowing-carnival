@@ -20,6 +20,7 @@ const SUITES = [
   ['星图 starmap', 'src/jarvis-starmap.test.js'],
   ['着色 shader', 'src/jarvis-shader.test.js'],
   ['上游 jiwen', 'src/jiwen.test.js'],
+  ['语音 voice', 'src/voice.test.js'],
 ];
 
 /* ── 先验环境。地基不对，测试结果没有意义 ── */

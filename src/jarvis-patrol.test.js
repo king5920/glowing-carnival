@@ -587,6 +587,440 @@ test('飞书：getConnectUrl 已导出（分步排查需要）', () => {
     'getConnectUrl 未导出，凭证对不对和长连接能不能建立就无法分开排查');
 });
 
+/* ══════════ 前向收益回填（第四优先的另一半）══════════ */
+
+test('回填：必须绕开 sandbox 读取截断，否则会静默删历史', () => {
+  /* ══ 一个会静默销毁几个月数据的 bug ══
+   *
+   * sandbox.read 有 MAX_READ_CHARS = 40000 截断（保护模型上下文，合理），
+   * 并且**返回 truncated:true 但 content 已被 slice**。
+   *
+   * 第一版 calibration 直接用 sb.read + sb.write：
+   * 实测造 25 天样本（156KB）只读回 10 天，
+   * 而 backfill() 会拿读到的内容**整份重写文件** ——
+   * 超出 40KB 的历史样本被**静默删除**，没有任何报错。
+   * 攒两个月的数据可能一次回填就全没了。
+   *
+   * read 明明返回了 truncated 标志，我没读。
+   * 又是「没看返回结构就用」这个今天反复犯的错误。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'calibration.js'), 'utf8');
+  assert(/readRaw/.test(src) && /writeRaw/.test(src),
+    '缺 readRaw/writeRaw —— 用 sb.read 会因 40000 字符截断而静默丢历史');
+  assert(!/sb\.read\(SCAN_FILE\)/.test(src),
+    'history/record 仍在用 sb.read(SCAN_FILE)，会截断');
+  assert(!/sb\.write\(SCAN_FILE/.test(src),
+    'backfill 仍在用 sb.write(SCAN_FILE)，配合截断读取会删数据');
+
+  /* 运行时验证：写入超过 40000 字符仍能全量读回 */
+  const cal = require('./tools/calibration');
+  const fs = require('fs');
+  const sb = require('./tools/sandbox');
+  const abs = sb.safePath(cal.SCAN_FILE);
+  const real = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
+  try {
+    const lines = [];
+    for (let i = 0; i < 60; i++) {
+      lines.push(JSON.stringify({
+        date: `2099-01-${String(1 + i).padStart(2, '0')}`,
+        padding: 'x'.repeat(800), sectors: [],
+      }));
+    }
+    const payload = lines.join('\n') + '\n';
+    assert(payload.length > 40000, '测试数据本身没超过截断阈值，测不到问题');
+    fs.writeFileSync(abs, payload, 'utf8');
+    const back = cal.history();
+    assert(back.length === 60,
+      `写入 60 条只读回 ${back.length} 条 —— 截断又回来了`);
+  } finally {
+    if (real !== null) fs.writeFileSync(abs, real, 'utf8');
+    else if (fs.existsSync(abs)) fs.unlinkSync(abs);
+  }
+});
+
+test('回填：缺失的那天必须留 null，不能填 0', () => {
+  /* 某板块某天没进前 30 名时，它的 level 是**未知**，不是"没涨"。
+   * 填 0 会把"没记录"伪装成"零涨幅"，在回归里把均值往 0 拉 ——
+   * 这是最恶劣的数据污染，而且看起来完全正常（有数字、无报错）。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'calibration.js'), 'utf8');
+  assert(/数据缺失，不是 0 涨幅/.test(src),
+    '没有说明缺失日必须留 null 的理由，后人可能改成填 0');
+  const m = /if \(!Number\.isFinite\(later\)[\s\S]{0,400}?continue;/.exec(src);
+  assert(m, '缺失 later 时没有 continue —— 可能被填成了 0');
+});
+
+test('回填：analyze 必须同时要求条数和独立天数', () => {
+  /* 只看条数会被"板块×天"的乘法效应骗过：
+   * 每天存 30 个板块，2 天就有 60 条，看起来样本很多，
+   * 实际只有 2 天的市场环境。同一天的 30 个板块同涨同跌，
+   * 高度相关，不是独立样本。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'calibration.js'), 'utf8');
+  assert(/fwdDays/.test(src), '没统计回填覆盖的独立天数');
+  assert(/MIN_FWD_DAYS/.test(src), '没有独立天数下限');
+  assert(/高度相关|不算独立样本/.test(src),
+    '没说明同一天多板块不算独立样本的理由');
+});
+
+test('回填：均值差异必须过效应量门槛，不能只比大小', () => {
+  /* ══ 实测证据：均值比较会误报 ══
+   * 造两组**漂移完全相同**的假数据（真值 = 门槛无用），
+   * 结果主线组均值 +0.79% vs 情绪组 +0.43% ——
+   * 纯噪声也能让均值分出高下。
+   * 只比均值就会得出"硬门槛有效"的错误结论。
+   * 加了效应量（|d|<0.2 视为噪声）后，正确报出"无实际区分力"。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'calibration.js'), 'utf8');
+  assert(/effectSize/.test(src), '没算效应量');
+  assert(/0\.2/.test(src), '没有效应量噪声阈值');
+  assert(/无实际区分力/.test(src), '缺"无区分力"这个判词分支');
+});
+
+test('回填：已接入 patrol，且必须在 record 之后执行', () => {
+  /* 顺序很关键：必须先把今天存进去，才能给之前的样本当参照物。
+   * 顺序反了会永远差一天，最近那天的 d1 永远填不上。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'patrol.js'), 'utf8');
+  const fn = /async function runCloseScan\(\)[\s\S]*?\n}/.exec(src);
+  assert(fn, '找不到 runCloseScan');
+  assert(/cal\.backfill\(\)/.test(fn[0]), 'patrol 没调用 backfill');
+  const iRec = fn[0].indexOf('cal.record(');
+  const iBf = fn[0].indexOf('cal.backfill(');
+  assert(iRec > 0 && iBf > iRec,
+    'backfill 必须在 record 之后 —— 否则今天的点位来不及当参照物');
+  const cal = require('./tools/calibration');
+  assert(typeof cal.backfill === 'function', 'backfill 未导出');
+});
+
+test('回填：板块指数点位必须存下来（历史K线全部不可用）', () => {
+  /* 实测板块历史K线三个域名全挂：
+   *   push2his   /stock/kline/get?secid=90.BKxxxx → TCP 层被拦
+   *   push2delay 同上                            → 返回 0 行
+   *   push2      同上                            → TCP 层被拦
+   * 龙头个股历史K线也是 0 行。
+   * 所以回填**只能**靠每天存 level 再做差。
+   * 少了这个字段，第四优先的回归永远做不了。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'close_scan.js'), 'utf8');
+  assert(/level: Number\(d\.f2\)/.test(src),
+    'close_scan 没存板块指数点位 f2 —— 回填没有参照物');
+  const cal = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'calibration.js'), 'utf8');
+  assert(/level: s\.level/.test(cal), 'calibration 没把 level 存进样本');
+});
+
+/* ══════════ 用户 2026-09-09 提的四项优先修复 ══════════ */
+
+test('第一优先：资金流数量短缺必须断言，不能静默成功', async () => {
+  /* ══ 用户的原话 ══
+   * 「我连续两次告诉你"只有一天"，第三次才拿到 20 日序列……
+   *   这个不修，我会继续给你错的判断，而且我自己不知道错了。」
+   *
+   * ══ 但根因和用户/我最初的判断都不同，必须记清楚 ══
+   * 用户提的修法是 `len(klines) > 0`。
+   * **这条检查其实早就存在**（stock_fundflow.js 里 `if (!klines || !klines.length)`），
+   * 而且它**根本拦不住这个 bug** —— 因为返回的不是空数组。
+   *
+   * 实测：请求 lmt=20，klines 长度 = 1。非空，所有旧检查全部通过。
+   * 真正的根因是：**要 20 给 1，没有任何代码比较过 请求量 vs 返回量**。
+   *
+   * 「非空但远少于请求」比「空数组」隐蔽得多 —— 空数组显眼，
+   * 数量短缺看起来完全正常。这才是那类"我自己不知道错了"的 bug。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'stock_fundflow.js'), 'utf8');
+  assert(/shortfall/.test(src), '缺数量短缺断言');
+  assert(/requested/.test(src) && /received/.test(src),
+    '返回值必须同时带 requested/received，否则调用方无法自查');
+
+  const ff = require('./tools/stock_fundflow');
+  const r = await ff.fundFlow('603019', 20);
+  assert(r.requested === 20, `requested 应为 20，实际 ${r.requested}`);
+  assert(typeof r.received === 'number', 'received 缺失');
+  /* 东财只给当日，所以这里必然短缺 —— 必须被标出来 */
+  if (r.received < 3) {
+    assert(r.shortfall, `请求20只返回${r.received}却没标 shortfall —— 静默短缺又回来了`);
+    assert(/只返回当日|备用源/.test(r.shortfall.reason || ''),
+      'shortfall.reason 没说明原因和出路');
+    assert(/⚠/.test(r.note), 'note 里没有醒目警告');
+  }
+});
+
+test('第一优先：数量短缺不能记为健康成功', () => {
+  /* 健康表如果把"要20给1"记成成功，面板永远是绿的，
+   * 而用户拿到的是残缺数据 —— 指标测的不是用户关心的东西。
+   * 这正是 Phase 20 里「100%成功但用户说用不上」的翻版。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'stock_fundflow.js'), 'utf8');
+  const m = /if \(shortfall\) \{[\s\S]{0,400}?\n  \}/.exec(src);
+  assert(m, '找不到 shortfall 分支');
+  assert(/health\.record\(SOURCE,\s*false/.test(m[0]),
+    '数量短缺时应 health.record(false)，否则面板绿灯骗人');
+});
+
+test('第二优先：板块必须分页抓全，不能只抓第一页', async () => {
+  /* ══ 用户的原话 ══
+   * 「现在 496 个板块只抓 196 个，中间三百个我看不见。
+   *   今天这五个主线候选恰好都在涨幅前端所以能抓到，
+   *   但如果某条线正在低位启动、涨幅排在中段，我会完全漏掉。」
+   *
+   * 实测比用户说的更糟：只抓了 **80 / 1000**（行业40+概念40）。
+   *
+   * 这个漏洞最恶劣的地方是**它只在关键时刻发作**：
+   * 主线涨起来后排在前面，抓得到；主线低位吸筹时排在中段，抓不到。
+   * 越是想早发现主线，它越会挡住你。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'close_scan.js'), 'utf8');
+  assert(/for \(let pn = 1/.test(src), '没有分页循环');
+  assert(/coverage/.test(src), '没有覆盖率断言');
+
+  const cs = require('./tools/close_scan');
+  const rows = await cs.fetchSectorFlow('industry');
+  const total = rows[0] && rows[0].total;
+  if (total) {
+    assert(rows.length >= total * 0.98,
+      `只抓到 ${rows.length}/${total} —— 分页没抓全，中段板块会漏`);
+  }
+  assert(rows.length > 200,
+    `行业板块只抓到 ${rows.length} 个，实测上游有 496 个`);
+});
+
+test('第三优先：盘后调用必须校验数据时点', async () => {
+  /* ══ 用户的原话 ══
+   * 「你说"收盘了"，我拿到的是 11:00 的数据。
+   *   应该在盘后调用时校验数据时间是否 ≥15:00，
+   *   不匹配就明确提示，而不是等我自己发现。」
+   *
+   * 原则：不要让用户替你做校验。
+   * 靠人眼比对两个时间戳，早晚会漏。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'close_scan.js'), 'utf8');
+  assert(/staleWarning/.test(src), '缺时点校验');
+  assert(/afterClose/.test(src), '没判断是否盘后');
+
+  const cs = require('./tools/close_scan');
+  const r = await cs.scan({ topN: 3 });
+  assert('staleWarning' in r, 'scan 返回里缺 staleWarning 字段');
+  assert('afterClose' in r, 'scan 返回里缺 afterClose 字段');
+  /* 若确实盘后且数据是盘中的，必须有警告；反之不该乱报 */
+  if (r.afterClose && r.dataTime) {
+    const hh = Number(String(r.dataTime).split(':')[0]);
+    if (hh < 15) assert(r.staleWarning, `盘后拿到 ${r.dataTime} 的数据却没警告`);
+    else assert(!r.staleWarning, `数据是 ${r.dataTime}（终盘）却误报警告`);
+  }
+  /* 警告必须出现在报告正文里，不能只在字段里 */
+  if (r.staleWarning) {
+    assert(cs.formatScan(r).includes(r.staleWarning),
+      '警告没写进报告正文 —— 用户看报告时发现不了');
+  }
+});
+
+test('第四优先：校准样本必须落盘，且样本不足时拒绝下结论', async () => {
+  /* ══ 用户的原话 ══
+   * 「"10日≥50亿"这个门槛是单日样本定的……
+   *   每天扫完存一份到沙箱，攒够样本再回归。」
+   *
+   * 这补上了「过滤阈值必须来自实测样本」的空缺。
+   * 关键是 analyze() 必须**在样本不足时明确拒绝出结论** ——
+   * 「基于单次观测下结论」是我在语音那边犯过 5 次的错误，
+   * 不能在这里用一个似是而非的数字重演。 */
+  const cal = require('./tools/calibration');
+  const h = cal.history();
+  assert(Array.isArray(h), 'history() 应返回数组');
+
+  const a = cal.analyze(20);
+  assert(typeof a.ready === 'boolean', 'analyze 缺 ready 字段');
+  if (h.length < 20) {
+    assert(a.ready === false,
+      `只有 ${h.length} 天样本却 ready=true —— 又在少量观测上下结论`);
+    assert(/样本不足|不做/.test(a.verdict),
+      `样本不足时 verdict 必须明确说不做结论：${a.verdict}`);
+  }
+
+  /* 记录里必须存判定当时的阈值和覆盖率，否则回归无法剔除脏样本 */
+  if (h.length) {
+    const r = h[h.length - 1];
+    assert(r.thresholds, '没存判定当时的阈值 —— 改阈值后无法解释历史判定');
+    assert('coverageComplete' in r, '没存覆盖率 —— 无法剔除抓不全那天的脏样本');
+    assert('staleWarning' in r, '没存时点校验 —— 无法剔除盘中快照那天');
+    assert(Array.isArray(r.sectors) && r.sectors.length > 12,
+      `只存了 ${r.sectors && r.sectors.length} 个板块 —— `
+      + '回归最需要看"被判体量不足的后来涨没涨"（假阴性），只存前12名全是高分板块');
+    assert(r.sectors[0].forward, '没留 forward 占位，无法回填次日表现');
+  }
+});
+
+/* ══════════ 收盘扫描：指数判时机 · 板块定方向 · 龙头选个股 ══════════ */
+
+test('收盘扫描：主线判定必须有资金体量硬门槛', () => {
+  /* ══ 第一版的错误，记录下来防止回退 ══
+   *
+   * 阈值最初把 MAINLINE_10D_YI 定在 30亿，实测 80 个板块里
+   * **16 个被判"主线候选"（20%）** —— 主线不可能有 16 条。
+   *
+   * 更糟的是出现「航运港口：10日主力+9.4亿」却拿 83 分评上主线：
+   * 因为加速/普涨/龙头涨停三项满分，加权盖过了体量不足。
+   * 但主线的定义就是**钱多且持续**，龙头涨停而资金没进的是情绪盘。
+   * 把它标成主线会直接误导仓位。
+   *
+   * 修法是把体量改成**一票否决**而不是加权项。 */
+  const cs = require('./tools/close_scan');
+  const th = cs.currentThresholds();
+  assert(th.MAINLINE_10D_YI >= 50,
+    `体量门槛 ${th.MAINLINE_10D_YI}亿 太低 —— 实测 30亿 会让 20% 板块变主线`);
+
+  /* 构造一个"高分但体量不足"的板块：必须被拦住 */
+  const emo = cs.scoreMainline({
+    d10Yi: 9.4, d5Yi: 22.4, changePct: 2.81,
+    upCount: 37, downCount: 0,
+    leader: '海通发展', leaderPct: 9.98,
+  });
+  assert(emo.score >= 80, `这个样本应该是高分，实际 ${emo.score}`);
+  assert(emo.grade !== '主线候选',
+    `10日仅 9.4亿 却评为主线候选 —— 体量硬门槛失效了`);
+  assert(/情绪驱动|体量不足/.test(emo.grade),
+    `应明确标注情绪驱动，实际 grade=${emo.grade}`);
+
+  /* 真正体量够的必须能评上 */
+  const real = cs.scoreMainline({
+    d10Yi: 140.6, d5Yi: 133.2, changePct: 2.73,
+    upCount: 43, downCount: 5,
+    leader: '依顿电子', leaderPct: 10,
+  });
+  assert(real.grade === '主线候选',
+    `10日140.6亿+普涨+龙头涨停 应评主线候选，实际 ${real.grade}`);
+});
+
+test('收盘扫描：10日资金必须一次请求取得，不能依赖本地累积', () => {
+  /* 个股 fflow 四个入口全部只给当日（见 stock_fundflow.js），
+   * 我一开始以为板块也要自己按天攒。实测发现东财 clist
+   * 同一请求就带 f164(5日)/f174(10日)，**零累积零等待**。
+   *
+   * 锁住这个字段：如果后人改成本地累积，
+   * 用户要等 10 个交易日才能看到第一份完整扫描。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'close_scan.js'), 'utf8');
+  assert(/f174/.test(src), '缺 f174（10日主力净额）字段');
+  assert(/f164/.test(src), '缺 f164（5日主力净额）字段');
+  assert(/fid=f174/.test(src), '未按 10 日资金排序，取不到"近10日活跃"的板块');
+});
+
+test('收盘扫描：分级板块必须去重（航海装备Ⅱ/Ⅲ 是同一个）', () => {
+  /* 实测东财按申万一二三级都建板块，
+   * 「航海装备Ⅱ」和「航海装备Ⅲ」数据完全一致
+   * （同为 +4.67%、今日8.6亿、10日19.5亿、龙头亚星锚链）。
+   * 不去重的话前 10 名会被同一题材塞进两三条，挤掉真正不同的方向。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'close_scan.js'), 'utf8');
+  assert(/[ⅠⅡⅢⅣⅤ]/.test(src), '没有处理罗马数字分级板块的去重');
+  assert(/mergedNames/.test(src), '去重后没保留被合并的板块名（无法追溯）');
+});
+
+test('收盘扫描：用户选了不推送，patrol 必须恒不报告', () => {
+  /* 用户在飞书垃圾消息事故后明确选择：
+   * 「先只在网页显示，等我看几天觉得靠谱再开推送」。
+   * 这条必须锁死 —— 不能因为觉得"这个结果很重要"就自作主张推送。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'patrol.js'), 'utf8');
+  const fn = /async function runCloseScan\(\)[\s\S]*?\n}/.exec(src);
+  assert(fn, '找不到 runCloseScan');
+  assert(!/worthReporting:\s*true/.test(fn[0]),
+    'runCloseScan 里出现 worthReporting:true —— 用户明确说了先不推送');
+  assert(/worthReporting:\s*false/.test(fn[0]), '应显式写 worthReporting:false');
+});
+
+test('收盘扫描：只在交易日收盘后跑，周末不跑', () => {
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'patrol.js'), 'utf8');
+  assert(/isAfterClose/.test(src), '没有收盘时间窗判定');
+  /* 必须限定 day 1-5，否则周末会重复跑出和周五一样的结果 */
+  const m = /const isAfterClose\s*=\s*([^;]+);/.exec(src);
+  assert(m, '找不到 isAfterClose 定义');
+  assert(/day\s*>=\s*1/.test(m[1]) && /day\s*<=\s*5/.test(m[1]),
+    `收盘扫描没限定交易日，周末会跑出重复结果: ${m[1]}`);
+  assert(/hour\s*>=\s*15/.test(m[1]),
+    `收盘扫描必须 15:00 之后才跑（盘中资金流还在变）: ${m[1]}`);
+});
+
+test('收盘扫描：已注册为模型工具且说明了硬门槛语义', () => {
+  const r = require('./tools/registry');
+  const t = r.listForModel().map(x => x.function || x).find(x => x.name === 'close_scan');
+  assert(t, 'close_scan 未注册 —— 模型用不到');
+  /* description 必须解释"情绪驱动"是什么意思，
+   * 否则模型会把它和"主线候选"当成同一档 */
+  assert(/情绪驱动|体量/.test(t.description),
+    'description 没解释资金体量硬门槛，模型会误把情绪盘当主线');
+});
+
+test('收盘扫描：落盘失败不能被静默吞掉', async () => {
+  /* ══ 实际踩到的坑 ══
+   * 第一版写 category:'market'，但 memories 表有 CHECK 约束
+   * category IN ('person','place','event','interest','project')。
+   * 结果 addMemory 抛 CHECK constraint failed，
+   * 而我的 catch 把错误吞了 → memId 恒 null，但扫描仍返回 ok:true。
+   *
+   * 这就是本项目反复强调的「看起来在工作但实际没连上」：
+   * 表面全绿，实际每天的扫描结果一条都没存下来，
+   * 而校准阈值恰恰依赖这些历史记录。
+   *
+   * 所以：错误必须冒泡到返回值里，且 category 必须合法。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'patrol.js'), 'utf8');
+  const fn = /async function runCloseScan\(\)[\s\S]*?\n}/.exec(src);
+  assert(fn, '找不到 runCloseScan');
+  assert(/memError/.test(fn[0]),
+    '落盘错误被静默吞掉 —— 必须记进 memError 并返回，否则永远发现不了');
+  assert(!/category:\s*'market'/.test(fn[0]),
+    "category:'market' 违反 CHECK 约束（只允许 person/place/event/interest/project）");
+
+  /* 运行时验证：真能落盘且能查回 */
+  const p = require('./patrol');
+  const db = require('./db');
+  const r = await p.runCloseScan();
+  if (r.ok) {
+    assert(!r.memError, `落盘报错: ${r.memError}`);
+    assert(r.memId, '扫描成功但没落盘 —— 历史记录缺失就无法校准阈值');
+    const m = db.memById(r.memId);
+    assert(m && /收盘扫描/.test(m.content), '落盘的记忆查不回来');
+  }
+});
+
+test('收盘扫描：时间戳必须本地时区，且报告要自证数据时点', async () => {
+  /* ══ 一个时区 bug 让整份报告可信度打折 ══
+   *
+   * 第一版 at 用 `new Date().toISOString()`，UTC 比北京时间早 8 小时。
+   * 19:00 收盘后扫描，报告里显示 "10:59"。
+   * 端到端测试时贾维斯直接在回答开头写了一整段：
+   *   「扫描返回的时间戳是 10:59:55，不是收盘后……
+   *     所以下面的板块资金和涨幅是上午盘中的，不是终盘数据」
+   *
+   * 数据其实完全正确（东财 f124 时间戳 = 15:39:32，确实是终盘），
+   * 只是我的时间戳格式误导了模型。
+   *
+   * 双重修法：
+   *   1. at 用本地时间
+   *   2. 报告显式带上**行情数据自己的时点**（f124），不靠推断 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'close_scan.js'), 'utf8');
+  assert(!/at:\s*new Date\(\)\.toISOString/.test(src),
+    'at 用了 toISOString（UTC）—— 会显示成 8 小时前，模型会误判为盘中数据');
+  assert(/f124/.test(src), '没取 f124 数据时点 —— 无法自证是不是收盘数据');
+
+  const cs = require('./tools/close_scan');
+  const r = await cs.scan({ topN: 3 });
+  if (r.ok) {
+    /* at 应该和本机当前小时一致（容差 1 小时，跨小时边界） */
+    const nowH = new Date().getHours();
+    const m = /\s(\d{1,2}):/.exec(r.at);
+    assert(m, `at 格式无法解析小时: ${r.at}`);
+    const atH = Number(m[1]);
+    assert(Math.abs(atH - nowH) <= 1,
+      `at 小时 ${atH} 与本机 ${nowH} 差太多 —— 时区又错了`);
+    const text = cs.formatScan(r);
+    assert(/数据时点/.test(text), '报告没写数据时点');
+  }
+});
+
 /* ══════════ 推送去重（防止你关掉通知）══════════ */
 
 test('推送：测试态绝不真发飞书（用户曾一天收到 100+ 条垃圾）', async () => {
@@ -1494,8 +1928,36 @@ test('环形缓冲：必须轮询而不是注册回调', () => {
   const cs = micRing.CS_SOURCE;
   assert(/flags & 1u/.test(cs) || /WHDR_DONE/.test(cs),
     '没有轮询 WHDR_DONE 标志位');
-  assert(/waveInOpen\(out h, 0xFFFFFFFF/.test(cs),
-    '没用 WAVE_MAPPER —— 换耳机就得重启');
+});
+
+test('环形缓冲：设备号可指定，且以 WAVE_MAPPER 兜底', () => {
+  /* ══ 这条断言改过一次，值得说明为什么 ══
+   *
+   * 旧版要求 C# 里**写死** `waveInOpen(out h, 0xFFFFFFFF`，
+   * 理由是"没用 WAVE_MAPPER 换耳机就得重启"。
+   *
+   * 但那只是当时实现「换耳机不用重启」的手段，不是目的本身。
+   * 2026-09-09 把设备号参数化后，能力反而更强了：
+   *   · 不传参 → 仍是 WAVE_MAPPER（旧行为完整保留）
+   *   · 传设备号 → 可绕开"Windows 默认设备恰好是坏的那个"
+   * 实测本机默认设备是板载阵列麦（rms=1，quiet），
+   * USB 耳机才是可用的（rms=12，ok）—— 写死 WAVE_MAPPER 时
+   * 只能靠用户去系统设置里换默认设备，程序自己无能为力。
+   *
+   * 所以断言的对象要从「写死某个手段」换成「守住那个目的」：
+   * 兜底必须还在，同时必须可被覆盖。 */
+  const cs = micRing.CS_SOURCE;
+  assert(/uint devId = 0xFFFFFFFF/.test(cs),
+    '丢了 WAVE_MAPPER 兜底 —— 探测失败时会完全没法录音');
+  assert(/args\.Length/.test(cs) && /TryParse\(args\[0\]/.test(cs),
+    '设备号不可指定 —— 默认设备是坏的时候程序无法自救');
+  assert(/waveInOpen\(out h, devId/.test(cs),
+    '打开设备时没用解析出来的 devId');
+  /* 光 C# 支持没用，Node 侧得真的把它传下去 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'mic_ring.js'), 'utf8');
+  assert(/spawn\(built\.exe, \[String\(devIndex\)\]/.test(src),
+    'Node 侧没把设备号作为参数传给采集进程');
 });
 
 test('环形缓冲：stalled 必须能被检测到', () => {
