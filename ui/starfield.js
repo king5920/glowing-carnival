@@ -18,12 +18,24 @@
   'use strict';
   const cv = document.getElementById('graph');
   const gl = cv.getContext('webgl2', { antialias: true, alpha: true });
-  if (!gl) { console.error('WebGL2 不可用'); return; }
+  if (!gl) {
+    /* 无 WebGL2：不再只 console.error 留一片黑，明确降级到静态示意，
+       并告知"对话/记忆不受影响"——坏了明说，不让用户以为整个系统挂了。 */
+    console.error('WebGL2 不可用，3D 星图降级为静态示意');
+    document.body.classList.add('no-webgl');
+    if (window.STAR === undefined) window.STAR = null;
+    return;
+  }
 
   const GALAXIES = ['person', 'place', 'event', 'interest', 'project'];
   const GAL_CN = { person: '人物', place: '地点', event: '事件', interest: '兴趣', project: '项目' };
 
-  const DPR = Math.min(devicePixelRatio || 1, 2);
+  /* DPR 钳到 1.75（研究建议 1.5–2）：2K/4K 屏下肉眼几乎无差，
+     但像素填充量比 DPR=2 少约 23%，星图是常驻动画，这点省电/降温值得。*/
+  const DPR = Math.min(devicePixelRatio || 1, 1.75);
+  /* 用 var 提升到作用域顶：初始 resize() 在调度器定义之前就会执行，
+     此时还不能唤醒 rAF（TDZ），靠这个旗标跳过；调度器就绪后置 true。*/
+  var schedulerReady = false;
   function resize() {
     // 按 canvas 自身 CSS 盒尺寸设缓冲，不用 innerWidth——星图只占中央舞台一块
     const r = cv.getBoundingClientRect();
@@ -31,6 +43,9 @@
     const h = Math.max(1, Math.floor(r.height * DPR));
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     gl.viewport(0, 0, cv.width, cv.height);
+    /* 初始那次 resize 早于调度器变量初始化（TDZ），不能唤醒；
+       首屏由 build 后的 wake('boot') 负责，这里只响应之后的窗口缩放。*/
+    if (schedulerReady) wake('resize');
   }
   resize(); addEventListener('resize', resize);
 
@@ -48,13 +63,20 @@
   }
 
   const PN = prog(`#version 300 es
-  in vec3 pos; in float act; in float sz; in float hue; in float ring;
-  uniform mat4 uMVP; uniform float uT,uPulse,uSpread;
-  out float vD; out float vA; out float vHue; out float vRing;
+  in vec3 pos; in float act; in float sz; in float hue; in float ring; in float dim;
+  uniform mat4 uMVP; uniform float uT,uPulse,uSpread,uWake;
+  out float vD; out float vA; out float vHue; out float vRing; out float vCore; out float vIn; out float vSz; out float vDim;
   void main(){
     vec4 cp=uMVP*vec4(pos*uSpread,1.0);
     vD=clamp(1.0-(cp.w-1.2)/2.6,0.05,1.0);
-    vA=act; vHue=hue; vRing=ring; gl_Position=cp;
+    /* 双星核（你 / 贾维斯，sz=4.4，次大的星系中枢才 2.8）：
+       阈值 3.5 只命中这两颗，是全图唯一的冷色能量核。 */
+    vCore=step(3.5,sz);
+    /* 苏醒波：按节点到球心的归一化半径排相位，核(近)先亮、皮层(远)后亮。
+       vIn=该节点"点亮进度" 0未亮→1已亮；uWake 为全局波前(0→1)。 */
+    float rad=clamp(length(pos)/1.0,0.0,1.0);
+    vIn=clamp((uWake*1.28-rad*1.06)/0.20, 0.0, 1.0);
+    vA=act; vHue=hue; vRing=ring; vSz=sz; vDim=dim; gl_Position=cp;
     float br=1.0+0.30*uPulse*sin(uT*2.6+act*11.0+sz*3.0);
     /* 尺寸公式：加性为主，乘性只作用于基础项。
      *
@@ -68,10 +90,12 @@
      * 最终取 pow(sz, 0.62)：4.4→2.5、0.78→0.85，差 2.9 倍，
      * 既有层次又不刺眼。基础项也整体上调，保证骨架点看得清。 */
     float s=pow(max(sz,0.05),0.62);
-    /* 合并过的记忆额外放大一点，让"这颗星吞并过别的星"能被看见 */
-    gl_PointSize=(4.6*s + 2.4*vD + 2.2*act)*br*(1.0+0.22*ring);
+    /* 合并过的记忆额外放大；未被苏醒波扫到的点 vIn=0（开场尚不存在）；
+       双星核放大 1.9 倍，暗场里成为清晰的两颗反应炉焦点。 */
+    gl_PointSize=(4.6*s + 2.4*vD + 2.2*act)*br*(1.0+0.22*ring)
+               *(1.0+0.90*vCore)*vIn;
   }`, `#version 300 es
-  precision highp float; in float vD; in float vA; in float vHue; in float vRing;
+  precision highp float; in float vD; in float vA; in float vHue; in float vRing; in float vCore; in float vIn; in float vSz; in float vDim;
   uniform float uGlow,uWarm,uT; out vec4 o;
   void main(){
     vec2 d=gl_PointCoord-0.5; float r=length(d);
@@ -83,12 +107,16 @@
      *
      * 现在 hue 由数据决定（衰减状态 / 节点种类），每颗星带自己的语义：
      *   0.0 冷蓝  = 正在变淡的记忆
-     *   0.35 青绿 = 新鲜记忆
+     *   0.35 青   = 新鲜记忆
      *   0.6 琥珀  = 实体
      *   1.0 金白  = 核心
      * uWarm 仍然叠加全局情绪，两者相乘而不是互相覆盖。 */
+    /* fresh 原为 vec3(0.44,0.93,0.74)（色相 156.7°，落在绿带 [120°,180°]）：
+       记忆类别语义在金融仪表盘里会被读成"跌色"，违反 DESIGN.md §1.1 反向纪律。
+       改青色 (0.53,0.88,0.95) 色相 190°，与图例 c-person #86e1f3 对齐，
+       冷→暖编码保留：褪色蓝(224°)→新鲜青(190°)→实体琥珀→核心金白。 */
     vec3 fade=vec3(0.42,0.55,0.92);
-    vec3 fresh=vec3(0.44,0.93,0.74);
+    vec3 fresh=vec3(0.53,0.88,0.95);
     vec3 amber=vec3(1.0,0.74,0.34);
     vec3 gold=vec3(1.0,0.95,0.78);
     vec3 c = vHue<0.35 ? mix(fade,fresh,vHue/0.35)
@@ -99,6 +127,25 @@
     // 激活时冲向白热
     c = mix(c, vec3(1.0,0.98,0.92), vA*0.80);
 
+    /* ── 明亮常态 ──
+       用户偏好：待机时皮层就保持明亮、蓝白饱满、结构点清晰可见，
+       不做"压暗周边只剩双核"的暗场聚光。冷核仍保留，但靠自身青白辉光区分，
+       不靠把周围压黑。暗场只存在于开场第 0.25s（由苏醒波 vIn 控制点的显隐）。 */
+    float dim=1.0;
+
+    /* ── 冷色能量核（仅双星：你 / 贾维斯）──
+       冷青白（品牌青 #3fd0ff 一带）覆盖任意语义暖色；紧致辉光 + 白心，
+       刻意"小而亮"而非"大而散"，避免糊成一团光雾。 */
+    vec3 coreC=vec3(0.70,0.88,1.0);
+    c = mix(c, coreC, vCore);
+    float breathe=0.88+0.12*sin(uT*2.0);
+    float coreGlow=(1.0-smoothstep(0.0,0.40,r))*vCore*breathe;
+
+    /* STAGE4 ??????????/??????????? + additive ???
+       ????????????????? draw call????????????? */
+    float imp=smoothstep(1.8,3.4,vSz)*(1.0-vCore);
+    vec3 impAdd=vec3(0.55,0.80,1.0)*(1.0-smoothstep(0.06,0.5,r))*imp*0.55;
+
     /* ── 合并光环 ──
      * 吞并过其他记忆的星带一圈缓慢呼吸的环，
      * 让"这里发生过合并"在星图上直接可见（原来只能点开卡片才知道）。 */
@@ -108,8 +155,16 @@
       halo=(1.0-smoothstep(0.0,0.055,abs(r-rr)))*0.55;
     }
 
-    float a = m*m*(0.85+0.30*vD)*(0.62+0.60*vA) + halo*vRing;
-    o=vec4(c*uGlow*(1.5+0.9*vD)+vec3(halo*0.8), a);
+    float a = (m*m*(0.85+0.30*vD)*(0.62+0.60*vA) + halo*vRing)*dim
+            + coreGlow*coreGlow*(0.62+0.38*vD);
+    // 核辉光（冷青白）独立叠加，不被暗场压；中心近白高光做成"反应炉"亮心
+    vec3 coreAdd = coreC*coreGlow*coreGlow*1.5*(0.75+0.5*vD)
+                 + vec3(0.92,0.97,1.0)*(1.0-smoothstep(0.0,0.16,r))*vCore*1.0;
+    /* 苏醒波前闪光：节点刚被点亮(vIn 约 0.35~0.95)时闪一道青白高光，
+       像光沿网络传到、把星点逐个引燃。vIn=1 后闪光归零。 */
+    float flash=exp(-pow((vIn-0.62)/0.22,2.0));
+    vec3 wakeAdd=vec3(0.62,0.82,1.0)*flash*0.9*(1.0-vCore);
+    o=vec4((c*uGlow*(1.5+0.9*vD)+vec3(halo*0.8)*dim+coreAdd+wakeAdd+impAdd)*vDim, min(1.0,a)*vDim);
   }`);
 
   /* 线条：屏幕空间四边形加粗。
@@ -129,9 +184,9 @@
    *   aEnd     0 或 1，决定这个顶点落在 A 端还是 B 端
    */
   const PL = prog(`#version 300 es
-  in vec3 aA; in vec3 aB; in float aSide; in float aEnd; in float act;
-  uniform mat4 uMVP; uniform float uSpread, uThick, uAspect;
-  out float vD; out float vA; out float vT;
+  in vec3 aA; in vec3 aB; in float aSide; in float aEnd; in float act; in float dim;
+  uniform mat4 uMVP; uniform float uSpread, uThick, uAspect, uWake;
+  out float vD; out float vA; out float vT; out float vW; out float vDim;
   void main(){
     vec4 pa=uMVP*vec4(aA*uSpread,1.0);
     vec4 pb=uMVP*vec4(aB*uSpread,1.0);
@@ -143,15 +198,20 @@
     vec4 cp = mix(pa, pb, aEnd);
     vD=clamp(1.0-(cp.w-1.2)/2.6,0.05,1.0);
     vA=act;
+    /* 苏醒波：两端点都被点亮后这条边才出现（取较小进度）。 */
+    float rA=clamp(length(aA)/1.0,0.0,1.0), rB=clamp(length(aB)/1.0,0.0,1.0);
+    float inA=clamp((uWake*1.28-rA*1.06)/0.20,0.0,1.0);
+    float inB=clamp((uWake*1.28-rB*1.06)/0.20,0.0,1.0);
+    vW=min(inA,inB);
     /* vT = 沿边的参数位置（0=A端 1=B端），传给片元做能量流动。
      * 加上端点的世界坐标做相位偏移，否则所有边会同步闪烁像霓虹灯。 */
-    vT=aEnd + dot(aA, vec3(1.7, 2.3, 3.1));
+    vT=aEnd + dot(aA, vec3(1.7, 2.3, 3.1)); vDim=dim;
     // 偏移量随 w 缩放，使线宽在屏幕上恒定（不随距离变细）
     cp.xy += nrm * aSide * uThick * cp.w;
     gl_Position=cp;
   }`,
     `#version 300 es
-  precision highp float; in float vD; in float vA; in float vT;
+  precision highp float; in float vD; in float vA; in float vT; in float vW; in float vDim;
   uniform float uGlow,uWarm,uT,uFlow; out vec4 o;
   void main(){
     vec3 cool=vec3(0.34,0.60,1.0), warm=vec3(1.0,0.68,0.24);
@@ -165,11 +225,46 @@
     float pulse=exp(-pow((wave-0.5)*7.0,2.0)) * uFlow * (0.25+0.75*vA);
     c += vec3(0.55,0.80,1.0)*pulse*0.85;
 
-    // 线条加粗后总亮度上升明显，透明度要相应下调，否则线会盖过光点
-    o=vec4(c*uGlow, (0.17+0.42*vA)*vD + pulse*0.30);
+    // 线条加粗后总亮度上升明显，透明度要相应下调，否则线会盖过光点。
+    // vW：苏醒波到达前整条边透明（开场时边随节点一起从核向外长出）。
+    o=vec4(c*uGlow*vDim, ((0.17+0.42*vA)*vD + pulse*0.30)*vW*vDim);
   }`);
 
   /* ── 矩阵（列主序，配合 uniformMatrix4fv transpose=false） ── */
+  const PB = prog(`#version 300 es
+  /* ??????3 ??????????z ???????????? */
+  void main(){
+    vec2 v=vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2));
+    gl_Position=vec4(v*2.0-1.0, 0.999, 1.0);
+  }`, `#version 300 es
+  precision highp float; uniform vec2 uRes; uniform float uT,uWarm,uGlow; out vec4 o;
+  float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+  float vnoise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+    return mix(mix(hash(i),hash(i+vec2(1.0,0.0)),f.x),
+               mix(hash(i+vec2(0.0,1.0)),hash(i+vec2(1.0,1.0)),f.x), f.y); }
+  float fbm(vec2 p){ float v=0.0,a=0.5;
+    for(int i=0;i<3;i++){ v+=a*vnoise(p); p*=2.13; a*=0.5; } return v; }
+  void main(){
+    vec2 uv=gl_FragCoord.xy/uRes;
+    vec2 c=uv-0.5; c.x*=uRes.x/uRes.y;
+    float r=length(c);
+
+    /* ????? #0B1526 -> ?? #03060C ?????? --bg #0A1320 ??? */
+    vec3 col=mix(vec3(0.043,0.082,0.149), vec3(0.012,0.024,0.047), smoothstep(0.05,0.85,r));
+
+    /* ???????????60s ???????rAF ??????? */
+    float n1=fbm(c*2.6+vec2(uT*0.016,-uT*0.006));
+    col+=vec3(0.10,0.23,0.36)*pow(n1,2.6)*0.60*smoothstep(1.0,0.15,r);
+
+    /* ?????????????? uWarm ?????? 8% ??? */
+    float n2=fbm(c*3.4-vec2(uT*0.011,0.0)+7.31);
+    col+=vec3(0.30,0.19,0.08)*pow(n2,3.2)*(0.20+0.45*uWarm)*smoothstep(1.1,0.2,r);
+
+    /* vignette??????????????? */
+    col*=1.0-0.38*smoothstep(0.55,1.10,r);
+    o=vec4(col,1.0);
+  }`);
+
   const persp = (f, a, n, fa) => { const t = 1 / Math.tan(f / 2);
     return [t / a, 0, 0, 0, 0, t, 0, 0, 0, 0, (fa + n) / (n - fa), -1, 0, 0, 2 * fa * n / (n - fa), 0]; };
   function mul(A, B) { const C = new Array(16);
@@ -183,19 +278,34 @@
    * flow = 能量沿边流动的强度。待机时几乎关闭，
    * 否则画面一直在流，反而看不出"什么时候真的在干活"。 */
   const S = {
-    idle:   { spin: .22, pulse: .30, glow: .66, warm: .28, spread: 1.00, flow: 0.08 },
+    /* 明亮常态：待机皮层就饱满清晰（用户偏好）。glow 从原版 .42 提到 .62，
+       让蓝白神经球明亮通透；不做全局暖染。开场时另有 intro glow 增益。*/
+    idle:   { spin: .10, pulse: .22, glow: .62, warm: .14, spread: 1.00, flow: 0.04 },
     listen: { spin: .38, pulse: .55, glow: .90, warm: .52, spread: 1.06, flow: 0.35 },
     think:  { spin: 1.15, pulse: .95, glow: 1.08, warm: .28, spread: .90, flow: 1.00 },
-    speak:  { spin: .62, pulse: 1.35, glow: 1.32, warm: .92, spread: 1.10, flow: 0.62 },
+    speak:  { spin: .62, pulse: 1.55, glow: 1.40, warm: .92, spread: 1.10, flow: 0.80 },
     alert:  { spin: .30, pulse: 1.50, glow: 1.20, warm: 1.00, spread: 1.00, flow: 0.75 },
   };
   const lerp = (a, b, k) => a + (b - a) * k;
   let cur = { ...S.idle }, tgt = S.idle;
 
+  /* ── 苏醒开场（boot wake animation）──
+     uWake 0→1 驱动 shader 里的从核向外点亮波。时间线由 playWake() 推进，
+     frame() 每帧把 wakeVal 上传给两个 program。reduced-motion 时直接置 1（终态）。 */
+  let wakeVal = 0;          // 当前波前值
+  let wakeStart = 0;        // performance.now() 起始
+  let wakeActive = false;
+  const WAKE_MS = 1900;     // 开场总时长
+  const prefersReducedMotion = () =>
+    !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
   /* ── 图数据 ── */
-  let nodes = [], edges = [], act = null, sizes = null, hues = null, rings = null;
+  let nodes = [], edges = [], act = null, baseAct = null, sizes = null, hues = null, rings = null;
   let contentR = 1.0;
   let bPos, bAct, bSz, bHue, bRing, bEA, bEB, bESide, bEEnd, bEAct, eA, eB, eSide, eEnd, eAct;
+  let bDim, bEDim, dimArr = null, eDimArr = null;
+  let galHubIdx = {}, semEdges = [], hoverIdx = -1;
+  let focRy = 0, focRx = 0, focZ = 1, focTRy = 0, focTRx = 0, focTZ = 1;
   const nameToIdx = new Map();     // 实体名 → 节点索引
   const memToIdx = new Map();      // 记忆 id → 节点索引
   let lastVP = null;               // 最近一帧的 MVP 矩阵（点击拾取要用）
@@ -203,6 +313,10 @@
 
   const CORE_R = 0.44;             // 内核半径（对齐预览版 ② 的 0.44）
   const CORTEX_R = 0.95;           // 外皮层半径
+  /* 星图整体缩放（2026-09-13 用户：把神经网络弄小点）。
+     1 = 撑满舞台；<1 整体缩小（相机推远）。拾取复用 lastVP，
+     点击命中会自动跟着缩，无需另改 pick。0.78 ≈ 画面上小一圈并留白。 */
+  const BRAIN_SCALE = 0.78;
   /* 点数下限由"轮廓平滑度"决定，不是随手取的。
    *
    * 球面点投影到 2D 后，只有靠近轮廓的一圈点决定视觉边缘。
@@ -330,7 +444,7 @@
     data = data || {};
     const ents = data.entities || [];
     const mems = data.memories || [];
-    nodes = []; edges = []; nameToIdx.clear(); memToIdx.clear();
+    nodes = []; edges = []; semEdges = []; nameToIdx.clear(); memToIdx.clear(); hoverIdx = -1;
 
     /* ═══ 内核：双星核心 ═══ */
     nodes.push({ p: [-0.17, 0, 0], sz: 4.4, name: '你', kind: 'core' });
@@ -367,6 +481,7 @@
        之前实体是 `hub.p + [cos*rad, sin*rad*0.85, sin*rad*0.7]`，
        直接在笛卡尔空间加偏移量，半径完全失控
        （实测 spread 0.239，从 0.205 到 0.444）—— 这是"内圈不是圆形"的主因。 */
+    galHubIdx = hubIdx;   // STAGE1/3????????? + ??????
     const entIdx = {};
     const perGal = {};
     let entSeq = 0;                             // 全局序号，用于打散经度
@@ -483,6 +598,30 @@
     });
     mems.filter(m => !GALAXIES.includes(m.category || 'event')).forEach(m => ordered.push(m));
 
+    /* STAGE5 ??????????? id ??????????????
+     * ??????????????????????????????????
+     * ?? 100 ? + ??????"?????????"??????
+     * ??????????????????????? */
+    const CAT_CAP = 100;
+    const SLOT_CAP = CAT_CAP * GALAXIES.length + 20;   // 520
+    let slotOfMem = null;
+    if (window.STARPLUS) {
+      const byCat = {};
+      ordered.forEach(m => {
+        const g = GALAXIES.includes(m.category) ? m.category : 'event';
+        (byCat[g] = byCat[g] || []).push(m.id);
+      });
+      let overflow = false;
+      slotOfMem = new Map();
+      GALAXIES.forEach((g, gi) => {
+        const ids = byCat[g] || [];
+        if (ids.length > CAT_CAP) { overflow = true; return; }
+        const m2 = window.STARPLUS.assignSlots(ids, CAT_CAP);
+        ids.forEach(id => slotOfMem.set(id, gi * CAT_CAP + m2.get(id)));
+      });
+      if (overflow) slotOfMem = null;
+    }
+
     ordered.forEach((m, i) => {
       const g = GALAXIES.includes(m.category) ? m.category : 'event';
       const st = m.strength == null ? 0.5 : m.strength;
@@ -490,7 +629,7 @@
       // 半径恒定 —— strength 只影响亮度和点大小，不影响几何位置。
       const idx = nodes.length;
       nodes.push({
-        p: cortexPos(i, Math.max(1, ordered.length)),
+        p: slotOfMem ? cortexPos(slotOfMem.get(m.id), SLOT_CAP) : cortexPos(i, Math.max(1, ordered.length)),
         sz: 0.95 + st * 2.0,
         kind: 'memory', memId: m.id, entity: m.entity || null,
         cat: m.category, strength: st,
@@ -502,6 +641,9 @@
         retention: m.retention == null ? null : m.retention,
       });
       memToIdx.set(m.id, idx);
+      /* STAGE1 ??????? -> ??????? -> ??????
+         ????????????? BFS ????? */
+      semEdges.push([idx, entIdx[m.entity] != null ? entIdx[m.entity] : hubIdx[g]]);
       /* 语义归属（记忆 → 实体/中枢）**不再画成几何连线**。
        *
        * 这里原本是 `edges.push([idx, entIdx[m.entity] ?? hubIdx[g]])`，
@@ -539,7 +681,18 @@
     };
 
     // 重排：把已放好的记忆节点按 total 重新分配槽位，再插入占位点
-    if (fill > 0) {
+    if (fill > 0 && slotOfMem) {
+      /* ??????????????????????????????
+         ?????????????????????????? */
+      const usedSlots = new Set(slotOfMem.values());
+      const freeSlots = [];
+      for (let gi = 0; gi < SLOT_CAP; gi++) if (!usedSlots.has(gi)) freeSlots.push(gi);
+      const fstep = freeSlots.length / fill;
+      for (let k = 0; k < fill; k++) {
+        const s = freeSlots[Math.min(freeSlots.length - 1, Math.floor(k * fstep))];
+        nodes.push({ p: cortexPos(s, SLOT_CAP), sz: 0.72, kind: 'filler' });
+      }
+    } else if (fill > 0) {
       const used = new Set();
       for (let k = 0; k < ordered.length; k++) {
         let gi = slotOf(k);
@@ -605,9 +758,11 @@
     act = new Float32Array(N);
     hues = new Float32Array(N);
     rings = new Float32Array(N);
+    baseAct = new Float32Array(N);   // 各节点底光缓存（按需渲染判定用，避免每帧重算）
     nodes.forEach((n, i) => {
       nPos[i*3]=n.p[0]; nPos[i*3+1]=n.p[1]; nPos[i*3+2]=n.p[2]; sizes[i]=n.sz;
       act[i] = baseGlow(n);
+      baseAct[i] = act[i];
       hues[i] = nodeHue(n);
       rings[i] = (n.mergedCount > 0) ? 1 : 0;
     });
@@ -637,7 +792,7 @@
     if (!bPos) { bPos=gl.createBuffer(); bAct=gl.createBuffer(); bSz=gl.createBuffer();
                  bHue=gl.createBuffer(); bRing=gl.createBuffer();
                  bEA=gl.createBuffer(); bEB=gl.createBuffer();
-                 bESide=gl.createBuffer(); bEEnd=gl.createBuffer(); bEAct=gl.createBuffer(); }
+                 bESide=gl.createBuffer(); bEEnd=gl.createBuffer(); bEAct=gl.createBuffer(); bDim=gl.createBuffer(); bEDim=gl.createBuffer(); }
     gl.bindBuffer(gl.ARRAY_BUFFER,bPos); gl.bufferData(gl.ARRAY_BUFFER,nPos,gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER,bSz);  gl.bufferData(gl.ARRAY_BUFFER,sizes,gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER,bHue); gl.bufferData(gl.ARRAY_BUFFER,hues,gl.STATIC_DRAW);
@@ -646,11 +801,17 @@
     gl.bindBuffer(gl.ARRAY_BUFFER,bEB);  gl.bufferData(gl.ARRAY_BUFFER,eB,gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER,bESide);gl.bufferData(gl.ARRAY_BUFFER,eSide,gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER,bEEnd); gl.bufferData(gl.ARRAY_BUFFER,eEnd,gl.STATIC_DRAW);
+    /* STAGE1 ??????? 1????????????? 1.0/0.45/0.12 ?? */
+    dimArr = new Float32Array(N).fill(1);
+    eDimArr = new Float32Array(E * 6).fill(1);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bDim); gl.bufferData(gl.ARRAY_BUFFER,dimArr,gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bEDim); gl.bufferData(gl.ARRAY_BUFFER,eDimArr,gl.DYNAMIC_DRAW);
 
     let maxR = 0.5;
     nodes.forEach(n => { if (n.kind !== 'dust')
       maxR = Math.max(maxR, Math.hypot(n.p[0], n.p[1], n.p[2])); });
     contentR = maxR;
+    wake('build');   // 重建（新记忆/新星）后把画面重新画出来
   }
 
   /** 每类节点的底光（不会衰减到全黑） */
@@ -682,8 +843,8 @@
    * 现在色相承载真实语义，不是随机上色：
    *
    *   0.00 冷蓝  正在变淡的记忆（retention < 0.6）
-   *   0.20 蓝绿  正常记忆
-   *   0.35 青绿  新鲜记忆（retention >= 0.9）
+   *   0.20 蓝青  正常记忆
+   *   0.35 青    新鲜记忆（retention >= 0.9）
    *   0.60 琥珀  实体（人/项目/地点）
    *   0.85 金    星系（五大类别）
    *   1.00 金白  核心
@@ -747,6 +908,7 @@
       if (e[0] === i) act[e[1]] = Math.max(act[e[1]], 0.72);
       if (e[1] === i) act[e[0]] = Math.max(act[e[0]], 0.72);
     });
+    wake('activate');
   }
 
   /** 按记忆 id 点亮（比实体更精确） */
@@ -759,9 +921,16 @@
       if (e[0] === i) act[e[1]] = Math.max(act[e[1]], 0.66);
       if (e[1] === i) act[e[0]] = Math.max(act[e[0]], 0.66);
     });
+    wake('activateMemory');
   }
 
-  function setState(s) { if (S[s]) tgt = S[s]; }
+  function setState(s) {
+    if (!S[s]) return;
+    tgt = S[s];
+    wake('state');
+    // 非待命时给 body 打标记，CSS 让星图从 0.92 回到不透明（轻微，不抢读数）
+    document.body.classList.toggle('st-active', s !== 'idle');
+  }
 
   /* ═══════════ 点击拾取 ═══════════
    *
@@ -843,6 +1012,7 @@
       warm:   1 + v * 0.30,            // 心境好 → 更暖
       spread: 1 - im * 0.18,           // 沉浸高 → 聚拢
     };
+    wake('mood');
   }
   function num(x, d) { return (typeof x === 'number' && isFinite(x)) ? x : d; }
   function clampf(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -855,25 +1025,101 @@
 
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
 
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
   let T = 0, ry = 0.35, rx = -0.16, drag = false, lx = 0, ly = 0;
-  cv.addEventListener('pointerdown', e => { drag = true; lx = e.clientX; ly = e.clientY; });
-  addEventListener('pointerup', () => drag = false);
+  cv.addEventListener('pointerdown', e => { drag = true; lx = e.clientX; ly = e.clientY; wake('drag'); });
+  addEventListener('pointerup', () => { if (drag) { drag = false; wake('dragend'); } });
   addEventListener('pointermove', e => {
     if (!drag) return;
     ry += (e.clientX - lx) * 0.006;
     rx = Math.max(-1.2, Math.min(1.2, rx + (e.clientY - ly) * 0.004));
     lx = e.clientX; ly = e.clientY;
+    wake('drag');
   });
+
+  /* ── 鼠标视差（idle 时球轻微"看向"指针）──
+     不改拖拽用的 ry/rx，而是叠加一个独立的小角度 px/py，松手/移出自动回中。
+     幅度克制（±0.16/±0.10 rad），带缓动；拖拽或减弱动效时不启用。 */
+  let px = 0, py = 0, pxT = 0, pyT = 0, parOn = false;
+  const PAR_Y = 0.16, PAR_X = 0.10;
+  if (!reduceMotion) {
+    cv.addEventListener('pointerenter', () => { parOn = true; wake('par'); });
+    cv.addEventListener('pointerleave', () => { parOn = false; pxT = 0; pyT = 0; wake('par'); });
+    cv.addEventListener('pointermove', ev => {
+      if (drag) return;
+      const r = cv.getBoundingClientRect();
+      const nx = ((ev.clientX - r.left) / r.width) * 2 - 1;   // -1..1
+      const ny = ((ev.clientY - r.top) / r.height) * 2 - 1;
+      pxT = Math.max(-1, Math.min(1, nx)) * PAR_Y;
+      pyT = Math.max(-1, Math.min(1, ny)) * PAR_X;
+      parOn = true; wake('par');
+    });
+  }
 
   // 窗口失焦降频，省电
   let focused = true;
-  addEventListener('blur', () => focused = false);
-  addEventListener('focus', () => focused = true);
+  addEventListener('blur', () => { focused = false; });
+  addEventListener('focus', () => { focused = true; wake('focus'); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) wake('visible');
+  });
   let lastDraw = 0;
 
+  /* ══════════ 按需渲染（第三层：氛围层省电关键）══════════
+   *
+   * 原来无条件 requestAnimationFrame 永转：哪怕待命、页面静止，GPU 也一直在
+   * 画这张上千节点的网。改成"动才画、静下来就停"：
+   *   - 对话非 idle（思考/说话…）、情绪在变、有节点高亮在衰减、正在拖拽、
+   *     刚 build/activate、reduced-motion 下的一次性绘制 → 持续画
+   *   - 一切收敛到 idle 且高亮衰减到底后，停止调度，GPU 占用归零
+   *   - 任何外部变化走 wake() 重新拉起；停之前会再补一帧，保证最后状态正确。
+   * 拾取只依赖 lastVP 矩阵，停转后点击照样有效（矩阵停在最后一帧）。 */
+  let rafOn = false;         // 当前是否已排了 rAF
+  let forceFrames = 0;       // 唤醒后至少再画的帧数（确保状态变化被呈现）
+  let lastStateKey = '';
+
+  function wake(reason) {
+    forceFrames = Math.max(forceFrames, 6);
+    if (!rafOn) { rafOn = true; requestAnimationFrame(frame); }
+  }
+
+  /* 是否仍有"非画不可"的动态：判定逻辑抽到 ui/animgate.js（纯函数、可单测）。*/
+  function stillAnimating() {
+    if (!window.AnimGate) {
+      // 兜底：脚本没加载时退回到内联保守判断（宁可不省电也不停在半帧）
+      if (drag) return true;
+      if (tgt !== S.idle) return true;
+      return false;
+    }
+    return window.AnimGate.shouldAnimate({
+      dragging: drag,
+      forceFrames: 0,
+      cur, tgt,
+      targetIsIdle: tgt === S.idle,
+      act,
+      baseGlow: baseAct,
+    });
+  }
+  schedulerReady = true;
+
+  /* idle 慢转：待机时让球以极慢速度持续自转，但用极低帧率（~11fps），
+     GPU 开销远小于满帧。失焦/隐藏/reduced-motion/开场播放中不启用。 */
+  const IDLE_SPIN_MS = 50;          // idle 慢转帧间隔（≈20fps，顺滑且省电）
+  function idleDrifting() {
+    return focused && !reduceMotion && !drag && !wakeActive && focTZ === 1 && focZ === 1 &&
+           tgt === S.idle && cur.glow - tgt.glow < 0.004 && cur.glow - tgt.glow > -0.004;
+  }
+
   function frame(ts) {
-    requestAnimationFrame(frame);
-    if (ts - lastDraw < (focused ? 0 : 100)) return;   // 失焦 ~10 FPS
+    rafOn = true;
+    // 失焦 100ms 节流；聚焦但纯待机慢转时用 90ms 低帧，其余满帧
+    const minGap = !focused ? 100 : (idleDrifting() && forceFrames <= 0 ? IDLE_SPIN_MS : 0);
+    if (ts - lastDraw < minGap) {
+      // 节流跳过的这一帧也要判断该不该停，否则失焦静止时会永远空转
+      if (forceFrames > 0 || stillAnimating() || idleDrifting()) requestAnimationFrame(frame);
+      else rafOn = false;
+      return;
+    }
     lastDraw = ts;
 
     for (const k in cur) cur[k] = lerp(cur[k], tgt[k], 0.055);
@@ -892,7 +1138,17 @@
       flow:   clampf(cur.flow == null ? 0.08 : cur.flow, 0.0, 1.2),
     };
 
-    if (!drag) ry += 0.0020 * eff.spin * 6;
+    if (!drag && !reduceMotion) {
+      if (idleDrifting()) {
+        /* idle 慢转：用独立的清晰转速，不复用被压到 0.1 的对话 spin。
+           约 36s 一圈，肉眼明确可见但仍从容；低帧下保持恒定。 */
+        ry += 0.009;
+      } else {
+        ry += 0.0020 * eff.spin * 6;
+      }
+    }
+    // 鼠标视差缓动跟随（拖拽中冻结视差）
+    if (!drag) { px += (pxT - px) * 0.08; py += (pyT - py) * 0.08; }
 
     if (!act) return;
     // 激活衰减，但各类节点保留自己的底光
@@ -912,7 +1168,12 @@
     });
     gl.bindBuffer(gl.ARRAY_BUFFER, bEAct); gl.bufferData(gl.ARRAY_BUFFER, eAct, gl.DYNAMIC_DRAW);
 
-    let M = mul(rY(ry), rX(rx));
+    /* STAGE2 ?????????0.045 ? 2s ??????????? */
+    focRy += (focTRy - focRy) * 0.045;
+    focRx += (focTRx - focRx) * 0.045;
+    focZ  += (focTZ  - focZ)  * 0.045;
+
+    let M = mul(rY(ry + px + focRy), rX(rx + py + focRx));
     /* 相机距离：让内容球正好填满画面（不乘 spread，着色器已用 uSpread 缩放坐标）
      *
      * 之前写死 `1.15 + 1.55 * contentR`，没考虑画布宽高比。
@@ -927,17 +1188,37 @@
      * 形状系数从 y*0.82 改成 y*0.95 后，球的垂直尺寸增大约 16%，
      * 8% 余量不够，上下被裁掉了。contentR 取的是最大半径（水平方向），
      * 垂直方向虽然略小但点还有自身像素尺寸，需要更多留白。 */
-    const fit = contentR / Math.tan(FOVY / 2) * 1.18;
+    const fit = contentR / Math.tan(FOVY / 2) * 1.18 / BRAIN_SCALE * focZ;
     M = mul(tr(0, 0, -fit), M);
     const VP = mul(persp(FOVY, cv.width / cv.height, 0.1, 20), M);
     lastVP = VP;                 // 供点击拾取使用（见 pick）
     lastSpread = eff.spread;
 
+    // 推进苏醒波 0→1（ease-out）。开场期间保持渲染；到 1 后不再变化。
+    if (wakeActive) {
+      const k = Math.min(1, (ts - wakeStart) / WAKE_MS);
+      wakeVal = 1 - Math.pow(1 - k, 2.2);     // easeOutQuint 风
+      if (k >= 1) wakeActive = false;
+    }
+    /* 开场期间给波前一个引燃增益（中段最亮、收尾平滑回到常态 glow）；
+       非开场 wakeVal 恒为 1，增益为 0。 */
+    {
+      const intro = wakeActive ? Math.sin(Math.min(1, wakeVal) * Math.PI) : 0; // 0→1→0
+      eff.glow = clampf(eff.glow + intro * 0.45, 0.0, 1.8);
+    }
+
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+
+    /* ????????? + vignette??? GL ??????? Canvas/rAF */
+    gl.useProgram(PB);
+    gl.uniform2f(gl.getUniformLocation(PB,'uRes'), cv.width, cv.height);
+    gl.uniform1f(gl.getUniformLocation(PB,'uT'), T);
+    gl.uniform1f(gl.getUniformLocation(PB,'uWarm'), eff.warm);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     gl.useProgram(PL);
     attr(PL,'aA',bEA,3); attr(PL,'aB',bEB,3);
-    attr(PL,'aSide',bESide,1); attr(PL,'aEnd',bEEnd,1); attr(PL,'act',bEAct,1);
+    attr(PL,'aSide',bESide,1); attr(PL,'aEnd',bEEnd,1); attr(PL,'act',bEAct,1); attr(PL,'dim',bEDim,1);
     gl.uniformMatrix4fv(gl.getUniformLocation(PL,'uMVP'),false,new Float32Array(VP));
     gl.uniform1f(gl.getUniformLocation(PL,'uGlow'),eff.glow);
     gl.uniform1f(gl.getUniformLocation(PL,'uWarm'),eff.warm);
@@ -949,25 +1230,135 @@
     /* 能量流强度：思考/说话时明显，待机时几乎关闭。
      * 待机也流的话画面会一直很吵，反而看不出"什么时候在干活"。 */
     gl.uniform1f(gl.getUniformLocation(PL,'uFlow'), eff.flow);
+    gl.uniform1f(gl.getUniformLocation(PL,'uWake'), wakeVal);
     gl.drawArrays(gl.TRIANGLES, 0, edges.length * 6);
 
     gl.useProgram(PN);
     attr(PN,'pos',bPos,3); attr(PN,'act',bAct,1); attr(PN,'sz',bSz,1);
-    attr(PN,'hue',bHue,1); attr(PN,'ring',bRing,1);
+    attr(PN,'hue',bHue,1); attr(PN,'ring',bRing,1); attr(PN,'dim',bDim,1);
     gl.uniformMatrix4fv(gl.getUniformLocation(PN,'uMVP'),false,new Float32Array(VP));
     gl.uniform1f(gl.getUniformLocation(PN,'uT'),T);
     gl.uniform1f(gl.getUniformLocation(PN,'uPulse'),eff.pulse);
     gl.uniform1f(gl.getUniformLocation(PN,'uGlow'),eff.glow);
     gl.uniform1f(gl.getUniformLocation(PN,'uWarm'),eff.warm);
     gl.uniform1f(gl.getUniformLocation(PN,'uSpread'),eff.spread);
+    gl.uniform1f(gl.getUniformLocation(PN,'uWake'), wakeVal);
     gl.drawArrays(gl.POINTS, 0, nodes.length);
+
+    /* ── 决定下一帧是否还画 ──
+       强制帧数没耗完（刚被唤醒）、或画面仍有动态 → 继续；
+       reduced-motion 下只在有强制帧时画，绝不持续自转。
+       否则停止调度：补到这里的最后一帧就是静止的正确画面。 */
+    if (forceFrames > 0) forceFrames--;
+    const gate = window.AnimGate;
+    const keepGoing = wakeActive || idleDrifting() || focAnimating() || (gate
+      ? gate.scheduleNext({
+          forceFrames, reduceMotion, dragging: drag,
+          cur, tgt, targetIsIdle: tgt === S.idle,
+          act, baseGlow: baseAct,
+        })
+      : (forceFrames > 0 || stillAnimating()));
+    if (keepGoing) requestAnimationFrame(frame);
+    else rafOn = false;
   }
 
   build({});
-  requestAnimationFrame(frame);
+
+  /* ── 苏醒开场 ──
+     每次加载播放一次"核心先亮→光沿网络向外扩散点亮整球"，约 1.9s 后回落待机。
+     reduced-motion / 无 rAF：直接终态，不播。 */
+  if (prefersReducedMotion()) {
+    wakeVal = 1;
+  } else {
+    wakeStart = performance.now();
+    wakeActive = true;
+  }
+  wake('boot');   // 首屏画几帧；wakeActive 期间持续渲染，结束后待机自动停转
+
+  /* STAGE1 ?????????????+?? 1.0 / ?? 0.45 / ?? 0.12 */
+  function hover(px, py) {
+    let idx = -1;
+    if (typeof px === 'number' && px >= 0) {
+      const hit = pick(px, py);
+      if (hit) idx = hit.nodeIndex;
+    }
+    if (idx === hoverIdx) return;
+    hoverIdx = idx;
+    applyDepthFocus(idx);
+  }
+  function applyDepthFocus(idx) {
+    if (!dimArr || !eDimArr) return;
+    if (idx == null || idx < 0 || !window.STARPLUS) {
+      dimArr.fill(1); eDimArr.fill(1);
+    } else {
+      const lv = window.STARPLUS.neighborLevels(nodes.length, edges, idx, semEdges);
+      for (let i = 0; i < dimArr.length; i++)
+        dimArr[i] = lv.l1.has(i) ? 1.0 : (lv.l2.has(i) ? 0.45 : 0.12);
+      edges.forEach((e, i) => {
+        const a1 = lv.l1.has(e[0]), b1 = lv.l1.has(e[1]);
+        const a2 = lv.l2.has(e[0]), b2 = lv.l2.has(e[1]);
+        const v = (a1 && b1) ? 1.0 : ((a1 || b1 || (a2 && b2)) ? 0.45 : 0.12);
+        for (let k = 0; k < 6; k++) eDimArr[i * 6 + k] = v;
+      });
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, bDim); gl.bufferData(gl.ARRAY_BUFFER, dimArr, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, bEDim); gl.bufferData(gl.ARRAY_BUFFER, eDimArr, gl.DYNAMIC_DRAW);
+    wake('hover');
+  }
+
+  /* STAGE2 ???? + ??????? = ????? - ????????? */
+  function focus(nodeIndex) {
+    const n = nodes[nodeIndex];
+    if (!n || !window.STARPLUS) return;
+    const t = window.STARPLUS.cameraTarget(n.p);
+    const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+    focTRy = wrap(t.ry - ry - px);
+    focTRx = wrap(t.rx - rx - py);
+    focTZ = 0.55;
+    wake('focus');
+  }
+  function unfocus() {
+    focTRy = 0; focTRx = 0; focTZ = 1;
+    wake('unfocus');
+  }
+  function focAnimating() {
+    return Math.abs(focRy - focTRy) > 0.002 || Math.abs(focRx - focTRx) > 0.002 ||
+           Math.abs(focZ - focTZ) > 0.004;
+  }
+
+  /* STAGE3 ?????????????????????=?????????????? */
+  function pulseAlong(idxs, strength) {
+    if (!idxs || !idxs.length || !act) return;
+    const offs = window.STARPLUS ? window.STARPLUS.pulseOffsets(idxs.length)
+                                 : idxs.map((_, i) => i * 260);
+    idxs.forEach((ni, i) => {
+      setTimeout(() => {
+        if (ni >= 0 && ni < act.length) { act[ni] = Math.max(act[ni], strength); wake('pulse'); }
+      }, offs[i]);
+    });
+  }
+  function entityPath(entityName) {
+    const ei = nameToIdx.get(entityName);
+    if (ei == null) return null;
+    const n = nodes[ei];
+    const hub = (n && galHubIdx[n.cat] != null) ? galHubIdx[n.cat] : null;
+    const path = [1];
+    if (hub != null) path.push(hub);
+    path.push(ei);
+    return path;
+  }
+  function pulseWrite(entityName)  { const p = entityPath(entityName); if (p) pulseAlong(p, 1.35); }
+  function pulseRecall(entityName) { const p = entityPath(entityName); if (p) pulseAlong(p.slice().reverse(), 1.35); }
 
   window.STAR = {
     build, activate, activateMemory, setState, setMood,
+    hover, focus, unfocus, pulseWrite, pulseRecall,
+    /** 重播苏醒开场（调试/演示用） */
+    replayWake: () => {
+      if (prefersReducedMotion()) { wakeVal = 1; return; }
+      wakeVal = 0; wakeStart = performance.now(); wakeActive = true;
+      wake('boot');
+    },
     pick, select,
     /** 记忆 id → 节点索引（面板高亮用） */
     nodeIndexOfMemory: (memId) => memToIdx.has(memId) ? memToIdx.get(memId) : -1,

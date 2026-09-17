@@ -1,205 +1,718 @@
 <!DOCTYPE html>
 <!--
-  JARVIS · 认知界面
-  中央形象 = ⑤星云团簇，但语义已升级为「双星核心 + 五星系」：
-    中心双星 = 你 + 贾维斯
-    五星系   = 人物 / 地点 / 事件 / 兴趣 / 项目
-    星座     = 一个实体（来自 entities 表）
-    节点     = 一条记忆（来自 memories 表）
-    激活扩散 = 真实检索命中（不是随机）
-  真 3D：透视 + 深度 + 自转 + 拖动旋转
+  JARVIS · 认知界面 v3
+  三栏控制台布局：左面板(236px) | 中央舞台+对话区 | 右面板(236px)
+  比例：星图 60% / 聊天区 40%，底部对齐中间列
+  保留全部原有交互：SSE 对话、WebGL2 星图、语音唤醒、数据源健康灯、意识五轴
 -->
-<html lang="zh-CN"><head><meta charset="utf-8"><title>JARVIS</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JARVIS</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#070b11; --panel:rgba(16,24,36,.62); --line:rgba(150,175,215,.16);
-  --txt:#e8eef6; --dim:#8492a4; --faint:#5b6675; --warm:#ff9f1c; --cool:#4f8cff;
+  /* ② 深蓝驾驶舱：海军蓝底 + 蓝色玻璃，与中央星图融为一体。
+     语义色（红涨绿跌/暖橙/金）保持不变，只调中性底与面板蓝调。 */
+  --bg:#0a1320; --panel:rgba(24,38,58,.60); --line:rgba(140,175,225,.20);
+  --hairline:rgba(140,175,225,.20); --hairline-strong:rgba(150,185,230,.32);
+  --txt:#eaf1fa; --dim:#9fb0c6; --faint:#8ba0b8;
+  /* 2026-09-17 改值 --faint #7888a0 → #8ba0b8（rgb 120,136,160 → 139,160,184）：
+     §8 #3 对比度抽测（scripts/check-contrast.js）发现 24 处 10-11px 元数据标签
+     在 --panel bg 上仅 3.44:1，低于 WCAG 4.5:1。--faint 全局只承载元数据
+     （徽章/时间戳/caption/HUD/坐标轴刻度），正文档禁用，故整 token 提亮安全：
+     对 --panel bg（rgb 34,53,80）3.44→4.70:1，对 --bg（rgb 10,19,32）5.16→7.07:1。 */
+  /* 唯一强调色（青蓝）：交互/焦点/核心状态。--cy 为权威名，--accent 保留为别名（§9） */
+  --cy:#3fd0ff; --accent:var(--cy); --accent-soft:rgba(63,208,255,.35);
+  /* 语义色：暖橙仅表「用户/警告/主动」，冷蓝仅表「信息」，不再作装饰强调 */
+  --warm:#ff9f1c; --cool:#4f8cff;
+  /* 风控/警示金：DESIGN.md §1 权威值。用于风控结论、退潮期、炸板率、限标签。
+     2026-09-17 补齐：原代码硬编码 #ffcf6b ×4，属 §9 漂移，现统一收敛为 var(--gd)。
+     与 §1.1 反向纪律无冲突——金非红绿，不承载涨跌语义。 */
+  --gd:#f2b23e;
+  /* 涨跌：--rd/--gn 为权威名，--up/--down 保留为别名（§9）
+     2026-09-16 改值 #f23645→#f0485e：灰度亮度 111.9→124.7，与 --down(106.9) 的
+     Δ 由 5.0 升至 17.8（3.6 倍），色盲场景的明度通道更宽（§1.1 双通道） */
+  --rd:#f0485e; --up:var(--rd); --up-soft:rgba(240,72,94,.14);
+  --gn:#089981; --down:var(--gn); --down-soft:rgba(8,153,129,.15);
+  --up-text:#ff5650; --down-text:#26c79f;
+  /* 香槟金：极少点缀，仅品牌字 / 发送键两个视觉锚点（冷调，不土黄） */
+  --gold:#e6c478; --gold-bright:#f2d48f;
+  --ok:#3fd48a; --warn:#ff9f1c; --bad:#ff5c5c; --info:#4f8cff;
+  --fs-xs:11px; --fs-sm:12px; --fs-base:13.5px; --fs-lg:15px;
+  --num:"SF Mono",Consolas,"Roboto Mono",monospace;
+  --tnum:tabular-nums lining-nums;
 }
 html,body{height:100%}
-body{background:var(--bg);color:var(--txt);overflow:hidden;
-  font:12px/1.65 "Microsoft YaHei",system-ui,sans-serif}
+body{background:
+    radial-gradient(ellipse 90% 70% at 50% 0%,rgba(46,92,150,.18) 0%,transparent 62%),
+    radial-gradient(ellipse 70% 50% at 50% 100%,rgba(34,70,130,.13) 0%,transparent 60%),
+    linear-gradient(180deg,#0c1524,#080e18);
+  background-attachment:fixed;
+  color:var(--txt);overflow:hidden;
+  font:var(--fs-base)/1.65 "Microsoft YaHei",system-ui,sans-serif;
+  /* 全局等宽数字：font 简写会重置 font-variant，故必须写在简写之后。
+     统一保证 §8#4「数字 tabular-nums」；只改变数字进宽，不影响排版换行 */
+  font-variant-numeric:var(--tnum);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 /* 扫描线 + 暗角 */
 body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
   background:repeating-linear-gradient(0deg,rgba(255,255,255,.016) 0 1px,transparent 1px 3px)}
 body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
   background:radial-gradient(ellipse at 50% 45%,transparent 52%,rgba(0,0,0,.55) 100%)}
 
-/* 星图舞台：用一个普通 div 定位，canvas 填满它。
-   为什么要包一层：canvas 是替换元素，JS 设了 cv.width=1297（DPR2 缓冲尺寸）后，
-   浏览器把 1297/2=649px 当成它的固有 CSS 宽度，position+left/right 撑出的盒子
-   会被这个固有尺寸覆盖 → 画布缩到 649px 且偏左 83px。这是"位置不对"的真正原因。
-   包一层 div 定位、canvas 用 width/height:100% 填充，布局与缓冲尺寸就彻底解耦。 */
-/* 星图舞台：用 div 定位，canvas 填满它。
-   为什么包一层：canvas 是替换元素，JS 设了 cv.width（DPR 缩放缓冲尺寸）后，
-   浏览器把属性值/DPR 当固有 CSS 宽度，position+left/right 撑出的盒子被覆盖
-   → 画布缩成 649px 且偏左 83px。这就是"位置不对"的真正原因。
-   包一层 div 定位、canvas 用 100% 填充，布局与缓冲尺寸彻底解耦。 */
-#stage{position:fixed;left:220px;right:220px;top:42px;height:46%;z-index:0;
-  pointer-events:auto;
-  background:radial-gradient(ellipse at 50% 50%,rgba(79,140,255,.05) 0%,transparent 62%)}
-#graph{display:block;width:100%;height:100%}
-
-/* 顶栏 */
-#top{position:fixed;left:0;right:0;top:0;height:34px;z-index:5;
-  display:flex;align-items:center;gap:12px;padding:0 12px;
-  background:rgba(9,14,21,.80);border-bottom:1px solid var(--line);
-  backdrop-filter:blur(14px)}
-#top .brand{font-size:12px;font-weight:800;letter-spacing:2.2px;color:var(--warm)}
-#top .st{font-size:9.5px;letter-spacing:1.4px;color:var(--dim);
-  padding:1px 7px;border:1px solid var(--line);border-radius:4px}
+/* ════════ 顶栏 ════════ */
+#top{position:fixed;left:0;right:0;top:0;height:36px;z-index:5;
+  display:flex;align-items:center;gap:10px;padding:0 12px;
+  background:linear-gradient(180deg,rgba(22,36,56,.92),rgba(13,22,38,.82));
+  border-bottom:1px solid var(--hairline);
+  backdrop-filter:blur(16px) saturate(1.15);-webkit-backdrop-filter:blur(16px) saturate(1.15);
+  box-shadow:0 1px 0 rgba(200,225,255,.06)}
+#top .brand{font-size:var(--fs-sm);font-weight:800;letter-spacing:2.5px;color:var(--gold);flex:none;
+  text-shadow:0 0 12px rgba(230,196,120,.35)}
+#state{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-xs);
+  letter-spacing:.4px;color:var(--dim);padding:2px 9px;
+  border:1px solid var(--line);border-radius:20px;background:rgba(255,255,255,.02);flex:none}
+#state::before{content:'';width:7px;height:7px;border-radius:50%;background:#5d6b7e;flex:none}
+/* 指标块 */
+.metrics{display:flex;align-items:center;gap:0;flex:none}
+.mt{display:flex;flex-direction:column;line-height:1.25;padding:2px 10px;
+  border-right:1px solid rgba(150,175,215,.1);min-width:58px}
+.mt:last-of-type{border-right:none}
+.mt .k{font-size:10px;letter-spacing:1px;color:var(--faint)}
+.mt .v{font-size:var(--fs-sm);font-family:var(--num);font-variant-numeric:var(--tnum);
+  color:var(--txt);white-space:nowrap}
+.mt .v small{font-size:10px;color:var(--dim)}
+#model{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-xs);
+  color:var(--ok);letter-spacing:.6px;padding:0 8px;flex:none}
+#model::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 6px rgba(63,212,138,.8)}
 #top .sp{flex:1}
-#top .m{font-size:9.5px;color:var(--faint)}
-#wave{width:52px;height:14px}
+#top .m{font-size:var(--fs-xs);color:var(--dim);font-variant-numeric:var(--tnum);flex:none}
+#wave{width:52px;height:14px;flex:none}
 
-/* 浮动面板 */
-.panel{position:fixed;top:42px;bottom:60px;width:196px;z-index:4;
-  background:var(--panel);border:1px solid var(--line);border-radius:14px;
-  backdrop-filter:blur(18px);overflow:hidden;display:flex;flex-direction:column}
-#pl{left:12px} #pr{right:12px}
-.ph{padding:7px 11px;font-size:9px;font-weight:700;letter-spacing:1.5px;
-  color:var(--warm);border-bottom:1px solid var(--line);flex-shrink:0}
-.pb{flex:1;overflow-y:auto;padding:8px 11px}
-.pb::-webkit-scrollbar{width:4px}
-.pb::-webkit-scrollbar-thumb{background:rgba(150,175,215,.22);border-radius:2px}
+/* 数据源健康灯 */
+#srcs{display:inline-flex;align-items:center;gap:5px;margin:0 5px;cursor:default;flex:none}
+#srcs .s{width:6px;height:6px;border-radius:50%;flex:none;
+  background:#3a4658;transition:background .3s,box-shadow .3s}
+#srcs .s.ok  {background:#3fd48a;box-shadow:0 0 5px rgba(63,212,138,.7)}
+#srcs .s.deg {background:#ff9f1c;box-shadow:0 0 5px rgba(255,159,28,.7)}
+#srcs .s.down{background:#ff5c5c;box-shadow:0 0 6px rgba(255,92,92,.85)}
+#srcs .s.down.crit{animation:srcAlarm 1.1s ease-in-out infinite}
+@keyframes srcAlarm{0%,100%{opacity:1}50%{opacity:.32}}
 
-/* 对话区在星图下方。
-   顶部留 10px 间隙并加渐变遮罩：不留的话滚动中的气泡会正好卡在
-   舞台与对话区的接缝处露出半截（实测截图里"A股量化交易"被切一半）。 */
-#chat{position:fixed;left:220px;right:220px;top:calc(42px + 46% + 10px);bottom:60px;z-index:3;
-  overflow-y:auto;padding:10px 16px 10px;display:flex;flex-direction:column;gap:9px;
-  mask-image:linear-gradient(to bottom,transparent 0,#000 14px,#000 100%);
-  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 14px,#000 100%)}
-#chat::-webkit-scrollbar{width:4px}
-#chat::-webkit-scrollbar-thumb{background:rgba(150,175,215,.20);border-radius:2px}
-.msg{max-width:88%;padding:7px 11px;border-radius:10px;font-size:12px;
-  white-space:pre-wrap;word-break:break-word;animation:in .22s ease-out}
-@keyframes in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
-.msg.u{align-self:flex-end;background:rgba(79,140,255,.15);
-  border:1px solid rgba(79,140,255,.34)}
-.msg.a{align-self:flex-start;background:rgba(20,30,44,.78);border:1px solid var(--line)}
-.msg.e{align-self:center;background:rgba(255,90,90,.12);
-  border:1px solid rgba(255,90,90,.4);color:#ffb0b0;font-size:11px}
-.msg .lbl{font-size:8.5px;letter-spacing:1.2px;color:var(--faint);
-  display:block;margin-bottom:2px}
+/* ════════ 顶栏汉堡菜单（方案①，DESIGN.md §8 #8 / §13 B4）════════
+   用途：≤900px 时把 6 项指标 + #model + #meta 从主栏收进右侧浮层，
+   释放主栏空间让 #srcs 数据源灯绝对可见——「数据源降级必须显性化」是硬纪律，
+   窄屏裁切把它切掉等于"假的可用比明确不可用更危险"要挡的事。
+   关闭走 #ops 同款：click 外部 / Esc / 再次点击。颜色全走现有 token，零新色相。 */
+#tbmenu{display:none;background:rgba(16,26,40,.55);border:1px solid var(--hairline);
+  color:var(--dim);width:30px;height:22px;padding:0;border-radius:6px;cursor:pointer;
+  flex:none;align-items:center;justify-content:center;flex-direction:column;gap:3px;
+  transition:color .18s,border-color .18s,background .18s,box-shadow .18s}
+#tbmenu i{display:block;width:12px;height:1.5px;background:currentColor;border-radius:1px}
+#tbmenu:hover{color:var(--accent);border-color:var(--accent);
+  box-shadow:0 0 12px rgba(63,208,255,.18)}
+#tbmenu[aria-expanded="true"]{color:var(--accent);border-color:var(--accent);
+  background:rgba(63,208,255,.06)}
+#tbmenu:focus-visible{outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 2px rgba(63,208,255,.35)}
 
-/* 工具调用气泡：比普通消息更窄更淡，是"过程"不是"内容" */
-.msg.t{align-self:flex-start;background:rgba(16,24,36,.6);
-  border:1px solid rgba(120,160,220,.22);color:#9fb6d4;
-  font-size:11px;padding:5px 10px;max-width:70%;
-  display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.msg.t .lbl{color:#6d8cb0;display:inline;margin:0}
-/* 调用中：左侧一道扫描线表示"正在跑" */
-.msg.t::before{content:'';width:2px;height:12px;border-radius:1px;
-  background:#4f8cff;opacity:.85;animation:tscan 1.05s ease-in-out infinite}
-@keyframes tscan{0%,100%{opacity:.25;transform:scaleY(.5)}50%{opacity:1;transform:scaleY(1)}}
-/* 已完成就停止动画 */
-.msg.t.tok::before,.msg.t.terr::before{animation:none}
-.msg.t.tok::before{background:#4ad991;opacity:1}
-.msg.t.terr::before{background:#ff6b6b;opacity:1}
-.msg.t .targs{font-family:Consolas,monospace;font-size:10px;color:#7d97b8;
-  background:rgba(0,0,0,.25);padding:1px 5px;border-radius:3px}
-.msg.t .tres{font-size:9.5px;letter-spacing:.5px;margin-left:auto;color:#6d8cb0}
-.msg.t.tok .tres{color:#4ad991}
-.msg.t.terr .tres{color:#ff8a8a}
+#tbmenuPanel{display:none;position:fixed;top:42px;right:8px;z-index:6;
+  min-width:240px;max-width:min(320px,calc(100vw - 16px));padding:11px 13px;border-radius:12px;
+  background:rgba(12,20,32,.94);border:1px solid var(--hairline);
+  backdrop-filter:blur(18px) saturate(1.1);-webkit-backdrop-filter:blur(18px) saturate(1.1);
+  box-shadow:0 8px 30px rgba(0,0,0,.5),inset 0 1px 0 rgba(190,222,255,.06)}
+#tbmenuPanel.open{display:block}
 
-/* 底部输入 */
-#bottom{position:fixed;left:12px;right:12px;bottom:12px;height:38px;z-index:6;
-  display:flex;gap:8px;align-items:center;
-  background:rgba(12,18,27,.88);border:1px solid var(--line);
-  border-radius:10px;padding:0 10px;backdrop-filter:blur(18px)}
-#inp{flex:1;background:none;border:none;outline:none;color:var(--txt);
-  font:12px "Microsoft YaHei",sans-serif}
-#inp::placeholder{color:var(--faint)}
-#send{background:rgba(255,159,28,.18);border:1px solid var(--warm);color:#ffbe6b;
-  font-size:10.5px;padding:3px 13px;border-radius:6px;cursor:pointer}
-#send:hover{background:rgba(255,159,28,.3)}
-#send:disabled{opacity:.4;cursor:default}
+.tbm-model{display:flex;align-items:center;gap:5px;padding-bottom:8px;margin-bottom:8px;
+  border-bottom:1px solid var(--hairline);font-size:var(--fs-xs);color:var(--ok);
+  letter-spacing:.6px}
+.tbm-model::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 6px rgba(63,212,138,.8);flex:none}
 
-/* 语音按钮：图标式，激活时用颜色+呼吸表示状态 */
-#mic,#spk{background:none;border:1px solid var(--line);color:var(--faint);
-  font-size:13px;line-height:1;padding:4px 7px;border-radius:6px;cursor:pointer;
-  transition:color .18s,border-color .18s,background .18s}
-#mic:hover,#spk:hover{color:var(--txt);border-color:var(--dim)}
-/* 麦克风常听中：蓝色呼吸 */
-#mic.on{color:#7fb4ff;border-color:rgba(79,140,255,.55);
-  background:rgba(79,140,255,.12);animation:micPulse 2.1s ease-in-out infinite}
-@keyframes micPulse{0%,100%{box-shadow:0 0 0 0 rgba(79,140,255,.30)}
-  50%{box-shadow:0 0 0 4px rgba(79,140,255,0)}}
-/* 已唤醒、正在听指令：橙色高亮 */
-#mic.awake{color:#ffbe6b;border-color:var(--warm);
-  background:rgba(255,159,28,.18);animation:micPulse .9s ease-in-out infinite}
-/* 朗读开启 */
-#spk.on{color:#ffbe6b;border-color:var(--warm);background:rgba(255,159,28,.14)}
+.tbm-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:16px;row-gap:8px}
+.tbm-cell{display:flex;flex-direction:column;line-height:1.25}
+.tbm-cell .k{font-size:10px;letter-spacing:1px;color:var(--faint)}
+.tbm-cell .v{font-size:var(--fs-sm);font-family:var(--num);font-variant-numeric:var(--tnum);
+  color:var(--txt);white-space:nowrap}
+.tbm-cell .v small{font-size:10px;color:var(--dim)}
 
-/* 记忆条目 */
-.it{font-size:10.5px;padding:5px 7px;margin-bottom:5px;border-radius:6px;
-  background:rgba(30,42,60,.5);border-left:2px solid var(--cool);color:#c3ceda}
-.it .meta{font-size:8.5px;color:var(--faint);margin-top:2px}
-.it.hot{border-left-color:var(--warm);background:rgba(255,159,28,.10)}
-.gal{font-size:9.5px;color:var(--dim);display:flex;justify-content:space-between;
-  padding:3px 0;border-bottom:1px solid rgba(150,175,215,.07)}
-.gal b{color:var(--txt);font-weight:600}
-.empty{font-size:10px;color:var(--faint);text-align:center;padding:16px 4px;line-height:1.9}
+.tbm-meta{margin-top:9px;padding-top:8px;border-top:1px solid var(--hairline);
+  font-size:10.5px;color:var(--dim);letter-spacing:.3px;line-height:1.5}
 
-/* ── 五轴意识状态条 ── */
-#mindbox{padding:7px 11px 9px;flex-shrink:0}
-.ax{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:9.5px}
-.ax .n{width:22px;color:var(--dim);flex-shrink:0}.ax .bar{flex:1;height:3px;background:rgba(150,175,215,.10);border-radius:2px;
+/* ════════ 预警横幅 ════════ */
+#srcbanner{display:none;position:fixed;left:50%;transform:translateX(-50%);
+  top:40px;z-index:7;max-width:70%;font-size:var(--fs-xs);
+  align-items:center;gap:8px;padding:5px 12px;border-radius:8px;
+  background:rgba(60,20,18,.92);border:1px solid rgba(242,73,75,.5);
+  color:#ffc4c4;box-shadow:0 6px 20px rgba(0,0,0,.5)}
+#srcbanner.show{display:flex}
+#srcbanner.degraded{background:rgba(46,32,12,.94);border-color:rgba(255,159,28,.5);color:#ffd9a0}
+#srcbanner .sb-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--up)}
+#srcbanner.degraded .sb-dot{background:var(--warm)}
+#srcbanner .sb-time{color:var(--dim);font-family:var(--num);font-variant-numeric:var(--tnum);white-space:nowrap}
+
+/* ════════ 设置入口按钮（固定在左下角）════════
+ * 固定定位而非跟随左栏滚动：这是个随时要能点到的入口，
+ * 尤其在"连不上模型"时——那种时候界面其它部分都在报错，
+ * 用户更不该再去滚动找按钮。
+ * bottom 与 #bottom 底栏对齐（10px + 82px 高 + 8px 间隔）。 */
+#btnSettings{position:fixed;left:10px;bottom:10px;width:252px;z-index:7;
+  background:rgba(20,30,44,.94);border:1px solid var(--line);color:var(--dim);
+  font-size:var(--fs-sm);padding:9px 12px;border-radius:9px;cursor:pointer;
+  text-align:left;backdrop-filter:blur(18px);
+  transition:color .15s,border-color .15s,background .15s}
+#btnSettings:hover{color:var(--txt);border-color:rgba(150,175,215,.45);
+  background:rgba(30,44,64,.96)}
+@media (max-width:1180px){#btnSettings{width:200px}}
+@media (max-width:900px){#btnSettings{display:none}}
+
+/* ════════ 设置弹窗 ════════ */
+#setmask{display:none;position:fixed;inset:0;z-index:40;
+  background:rgba(4,7,12,.72);backdrop-filter:blur(4px);
+  align-items:center;justify-content:center;padding:24px}
+#setmask.show{display:flex}
+#setwin{width:min(640px,100%);max-height:min(86vh,760px);display:flex;flex-direction:column;
+  background:rgba(13,20,31,.98);border:1px solid rgba(150,175,215,.28);
+  border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.7);overflow:hidden}
+.set-hd{display:flex;align-items:center;padding:12px 16px;flex:none;
+  border-bottom:1px solid var(--line);font-size:var(--fs-lg);font-weight:600}
+.set-hd button{margin-left:auto;background:none;border:none;color:var(--dim);
+  font-size:16px;cursor:pointer;line-height:1;padding:2px 6px;border-radius:6px}
+.set-hd button:hover{color:var(--txt);background:rgba(255,255,255,.06)}
+.set-tabs{display:flex;gap:4px;padding:8px 12px 0;flex:none;border-bottom:1px solid var(--line)}
+.st-tab{background:none;border:none;color:var(--faint);font-size:var(--fs-sm);
+  padding:7px 12px;cursor:pointer;border-radius:7px 7px 0 0;border-bottom:2px solid transparent}
+.st-tab:hover{color:var(--dim)}
+.st-tab.on{color:var(--txt);border-bottom-color:var(--accent,#3fd0ff);background:rgba(255,255,255,.04)}
+.set-pane{display:none;padding:14px 16px;overflow-y:auto;min-height:0}
+.set-pane.on{display:block}
+.set-pane::-webkit-scrollbar{width:5px}
+.set-pane::-webkit-scrollbar-thumb{background:rgba(150,175,215,.22);border-radius:3px}
+.set-note{font-size:var(--fs-sm);color:var(--dim);line-height:1.7;margin-bottom:12px;
+  padding:9px 11px;background:rgba(79,140,255,.07);border-left:2px solid rgba(79,140,255,.4);
+  border-radius:0 7px 7px 0}
+.set-note code{font-family:var(--num);font-size:11px;color:#9fc0ff;
+  background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px}
+.set-f{display:flex;align-items:center;gap:10px;margin-bottom:9px}
+.set-f>span{width:74px;flex:none;font-size:var(--fs-sm);color:var(--dim);text-align:right}
+.set-f input,.set-f select{flex:1;min-width:0;background:rgba(8,13,20,.9);
+  border:1px solid var(--line);color:var(--txt);border-radius:7px;padding:8px 10px;
+  font:var(--fs-sm)/1.4 "Microsoft YaHei",sans-serif;outline:none}
+.set-f input:focus,.set-f select:focus{border-color:rgba(79,140,255,.6)}
+.set-f input::placeholder{color:var(--faint)}
+.set-hint{font-size:11px;color:var(--faint);line-height:1.6;margin:-4px 0 11px 84px}
+.set-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;
+  padding-top:12px;border-top:1px solid var(--line)}
+.btn-ghost,.btn-main{font-size:var(--fs-sm);padding:8px 18px;border-radius:8px;cursor:pointer}
+.btn-ghost{background:none;border:1px solid var(--line);color:var(--dim)}
+.btn-ghost:hover{color:var(--txt);border-color:var(--dim)}
+.btn-main{background:rgba(255,159,28,.2);border:1px solid var(--warm);color:#ffbe6b;font-weight:600}
+.btn-main:hover{background:rgba(255,159,28,.32)}
+.btn-main:disabled,.btn-ghost:disabled{opacity:.5;cursor:not-allowed}
+.set-msg{margin-top:10px;font-size:var(--fs-sm);line-height:1.6;min-height:1.3em}
+.set-msg.ok{color:var(--ok)}.set-msg.bad{color:#ff9b9b}.set-msg.wait{color:var(--dim)}
+.set-list{display:flex;flex-direction:column;gap:5px}
+.set-row{display:flex;align-items:baseline;gap:9px;padding:6px 9px;border-radius:7px;
+  background:rgba(30,42,60,.45);font-size:var(--fs-xs)}
+.set-row .nm{font-family:var(--num);color:#9fc0ff;font-size:11px;flex:none}
+.set-row .ds{color:var(--faint);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.set-row .tag{font-size:10px;padding:1px 7px;border-radius:10px;flex:none}
+.tag-ok{color:var(--ok);background:rgba(63,212,138,.14)}
+.tag-cd{color:#ffc978;background:rgba(255,159,28,.14)}
+
+/* ════════ 主区三栏 Grid ════════
+ * 侧栏 236 → 252px：236 时"41 星座 · 66 记忆"这类行在 1600 宽下会挤，
+ * 研究实证舒适区 245-280，取 252 兼顾窄屏。*/
+#main{position:fixed;left:10px;right:10px;top:44px;bottom:96px;z-index:1;
+  display:grid;grid-template-columns:330px minmax(0,1fr) 330px;gap:0px}
+@media (max-width:1180px){#main{grid-template-columns:250px minmax(0,1fr) 250px}}
+@media (max-width:900px){#main{grid-template-columns:1fr}}
+
+/* ── 可折叠面板 ── */
+.panel{display:flex;flex-direction:column;min-height:0;
+  background:linear-gradient(180deg,rgba(30,46,70,.68),rgba(17,28,46,.62));
+  border:1px solid var(--hairline);border-radius:12px;
+  backdrop-filter:blur(20px) saturate(1.15);-webkit-backdrop-filter:blur(20px) saturate(1.15);
+  box-shadow:inset 0 1px 0 rgba(200,225,255,.10), 0 6px 22px rgba(8,18,38,.5);
+  overflow:hidden;transition:border-color .2s ease,box-shadow .2s ease}
+.panel:hover{border-color:rgba(140,185,240,.32);
+  box-shadow:inset 0 1px 0 rgba(200,225,255,.13), 0 10px 30px rgba(8,18,38,.55)}
+.ph{display:flex;align-items:center;gap:6px;padding:9px 12px;cursor:pointer;
+  font-size:var(--fs-xs);font-weight:700;letter-spacing:1.4px;color:var(--dim);
+  border-bottom:1px solid var(--line);flex-shrink:0;user-select:none;
+  background:linear-gradient(180deg,rgba(120,165,230,.09),transparent)}
+.ph .en{font-weight:400;letter-spacing:.8px;color:var(--faint);font-size:10px}
+.ph .fold{margin-left:auto;color:var(--dim);font-size:11px;transition:transform .2s;
+  font-family:var(--num)}
+.panel.collapsed .ph .fold{transform:rotate(-90deg)}
+.panel.collapsed{box-shadow:inset 0 1px 0 rgba(200,225,255,.07)}
+.panel.collapsed .pb{display:none}
+.ph:hover{background:linear-gradient(180deg,rgba(63,208,255,.09),transparent);color:var(--accent)}
+/* 嵌套滚动修复：面板内容不内部滚动，高度自适应，
+ * 整个左栏只保留 #pl 一个滚动条（滚轮行为单一可预期）。
+ * 右栏 #pr 的数据列（召回/历史/日志）在下方单独放开内部滚动。 */
+.pb{flex:1;padding:8px 10px;overflow:visible}
+/* 面板高度由内容决定（配合外层 #pl/#pr 单一滚动），
+ * 去掉 max-height:100% 限制，避免长面板被截断 */
+.panel{max-height:none}
+
+/* 左栏 */
+/* padding-bottom 给固定在左下角的 ⚙ 设置按钮让位，
+   否则最后一个面板会被压在按钮下面看不全 */
+#pl{display:flex;flex-direction:column;gap:12px;min-height:0;overflow-y:auto;
+  padding-bottom:46px}
+#pl::-webkit-scrollbar{width:4px}
+#pl::-webkit-scrollbar-thumb{background:rgba(150,175,215,.22);border-radius:2px}
+#pl .panel{flex:0 1 auto;min-height:0}
+#pl .panel:nth-child(1){flex:0 0 auto}
+#pl .panel:nth-child(2){flex:0 0 auto}
+#pl .panel:nth-child(3){flex:0 0 auto}
+#pl .panel:nth-child(4){flex:0 0 auto}
+#pl .panel:nth-child(5){flex:0 0 auto}
+
+/* 五星系条目 */
+.gal{display:flex;justify-content:space-between;align-items:center;
+  padding:5px 2px;border-bottom:1px solid rgba(150,175,215,.07);font-size:var(--fs-xs)}
+.gal:last-child{border-bottom:none}
+.gal b{color:var(--txt);font-weight:600;font-variant-numeric:var(--tnum)}
+.gal .n{color:var(--dim)}
+/* 记忆占比条 */
+.ratio{margin:6px 0}
+.ratio .rk{display:flex;justify-content:space-between;font-size:var(--fs-xs);
+  color:var(--dim);margin-bottom:3px}
+.ratio .bar{height:5px;border-radius:3px;background:rgba(150,175,215,.1);overflow:hidden}
+.ratio .bar i{display:block;height:100%;border-radius:3px;
+  background:linear-gradient(90deg,#63738c,#93a5bd);opacity:.6}
+/* 数据条用中性蓝灰，不再用装饰青 —— 让真正的红涨绿跌成为画面里唯一的高饱和色，
+   扫读行情时眼睛只被语义色吸引。品牌青保留给交互/焦点/意识五轴。 */
+/* 意识状态五轴 */
+.ax{display:flex;align-items:center;gap:6px;margin:6px 0;font-size:var(--fs-xs)}
+.ax .n{width:26px;color:var(--dim);flex-shrink:0}
+.ax .bar{flex:1;height:4px;background:rgba(150,175,215,.1);border-radius:2px;
   position:relative;overflow:hidden}
-/* 双极轴（-1~1）零点在中间，用一条竖线标出 */
-.ax .bar.bi::before{content:'';position:absolute;left:50%;top:-1px;bottom:-1px;
-  width:1px;background:rgba(150,175,215,.22)}
 .ax .fill{position:absolute;top:0;bottom:0;border-radius:2px;
-  transition:left .5s ease,width .5s ease,background .5s ease}
-.ax .v{width:34px;text-align:right;color:var(--faint);
-  font-variant-numeric:tabular-nums;flex-shrink:0}
-#mood{color:var(--txt);font-weight:400;letter-spacing:0;margin-left:4px}
-/* 主动消息气泡：和普通回复区分开，用暖色左边框 */
-.msg.pro{border-left:2px solid var(--warm);background:rgba(255,159,28,.055)}
-.msg.pro .lbl{color:var(--warm)}
+  background:var(--accent);
+  transition:width .5s ease}
+.ax .v{width:36px;text-align:right;color:var(--dim);font-family:var(--num);
+  font-variant-numeric:var(--tnum);flex-shrink:0}
+/* 工具状态卡 */
+.trow{display:flex;align-items:center;gap:7px;padding:5px 7px;margin-bottom:4px;
+  border-radius:7px;background:rgba(30,42,60,.5);font-size:var(--fs-xs)}
+.trow .dn{font-family:var(--num);color:#c9d6e8;font-size:11px;flex:1;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.trow .st{width:6px;height:6px;border-radius:50%;flex:none}
+.trow .st.ok{background:var(--ok);box-shadow:0 0 5px rgba(63,212,138,.7)}
+.trow .st.deg{background:var(--warn);box-shadow:0 0 5px rgba(255,159,28,.7)}
+.trow .st.down{background:var(--bad)}
+/* 任务队列 */
+.task .pr{display:flex;justify-content:space-between;font-size:var(--fs-xs);
+  color:var(--dim);margin-bottom:3px}
+.task .bar{height:5px;border-radius:3px;background:rgba(150,175,215,.1);overflow:hidden}
+.task .bar i{display:block;height:100%;width:46%;border-radius:3px;
+  background:var(--accent);opacity:.8}
 
-/* 巡视发现的条目：按严重度标色 */
-.pfind{margin-top:6px;display:flex;flex-direction:column;gap:3px}
-.pfrow{font-size:11px;padding:3px 8px;border-radius:4px;border-left:2px solid transparent;
-  background:rgba(0,0,0,.22);color:#b8c6d8}
-.pfrow.sev-high{border-left-color:#ff6b6b;color:#ffc4c4;background:rgba(255,90,90,.1)}
-.pfrow.sev-medium{border-left-color:var(--warm);color:#ffd9a8;background:rgba(255,159,28,.08)}
-.pfrow.sev-low{border-left-color:#4a5a72}
-/* 贾维斯自己在干活时的提示 */
-#doing{position:fixed;left:50%;transform:translateX(-50%);
-  top:calc(42px + 46% - 26px);z-index:4;
-  font-size:9.5px;letter-spacing:.6px;color:var(--warm);opacity:0;
-  transition:opacity .6s ease;pointer-events:none;
-  background:rgba(10,14,22,.72);padding:3px 10px;border-radius:9px;
-  border:1px solid rgba(255,159,28,.22)}
-#doing.on{opacity:.9}
+/* ════════ 大盘定时机面板（缠论阶段 + 崩溃冰点） ════════ */
+#mpbox{padding:0}
+.mp-sec{padding:9px 12px;border-bottom:1px solid var(--hairline2)}
+.mp-sec:last-child{border-bottom:none}
+.mp-phase{font-size:16px;font-weight:800;letter-spacing:2px;line-height:1.2}
+.mp-struc{font-size:10.5px;color:var(--dim);margin-top:5px;line-height:1.5;font-family:var(--num);font-variant-numeric:var(--tnum)}
+.mp-fear{display:flex;align-items:center;gap:7px;margin-top:7px;font-size:11px;font-weight:700}
+.mp-dot{width:7px;height:7px;border-radius:50%;flex:none}
+.mp-ings{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.mp-ing{font-size:9px;padding:1px 6px;border-radius:8px;border:1px solid var(--hairline);color:var(--dim);font-family:var(--num)}
+.mp-ing.hit{background:rgba(255,91,91,.14);color:#ff7a7a;border-color:rgba(255,91,91,.4)}
+.mp-ing.unk{color:var(--faint);border-style:dashed}
+.mp-note{font-size:9.5px;color:var(--faint);margin-top:7px;line-height:1.5}
 
-/* ── 星图图例 ──
-   色相现在承载语义（新鲜/正常/变淡/实体/合并过），
-   但用户不知道颜色代表什么就等于没做。放舞台左下角，克制不抢戏。 */
+/* ════════ 收盘扫描面板（左栏盯盘主场） ════════ */
+.scan-time{margin-left:auto;font-size:9px;color:var(--faint);font-family:var(--num);font-weight:400}
+#scanbox{padding:0}
+.scan-sec{padding:9px 12px;border-bottom:1px solid var(--hairline2)}
+.scan-sec:last-child{border-bottom:none}
+/* ① 时机 */
+.tim-stance{font-size:16px;font-weight:800;letter-spacing:2px;line-height:1.2}
+.tim-pos{color:var(--up-text)}.tim-mid{color:var(--accent)}.tim-neg{color:var(--down-text)}.tim-def{color:var(--faint)}
+.tim-reason{font-size:10.5px;color:var(--dim);margin-top:4px;line-height:1.5}
+.tim-idx{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+.tim-idx span{font-size:9.5px;font-family:var(--num);font-variant-numeric:var(--tnum);color:var(--dim)}
+/* 时点/覆盖警告 */
+.scan-warn{margin:0;padding:6px 12px;background:rgba(255,159,28,.12);border-bottom:1px solid rgba(255,159,28,.3);
+  font-size:10px;color:var(--warn);line-height:1.5}
+/* ② 板块卡 */
+.scard{border:1px solid var(--hairline2);border-radius:8px;background:rgba(24,34,50,.4);
+  margin:8px 10px;overflow:hidden}
+.scard .hd{display:flex;align-items:center;gap:6px;padding:6px 9px;cursor:pointer}
+.scard .hd:hover{background:rgba(63,208,255,.05)}
+.scard .rk{font-family:var(--num);font-size:10px;color:var(--faint);width:14px;flex:none}
+.scard .nm{font-size:12px;font-weight:700;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scard .kd{font-size:8.5px;color:var(--faint);flex:none}
+.badge{font-size:8.5px;padding:1px 6px;border-radius:8px;letter-spacing:.5px;flex:none;font-weight:700}
+.b-main{background:rgba(242,178,62,.16);color:var(--gd);border:1px solid rgba(242,178,62,.4)}
+.b-strong{background:var(--accent-dim);color:var(--accent);border:1px solid rgba(63,208,255,.35)}
+.b-watch{background:rgba(150,175,215,.12);color:var(--dim);border:1px solid var(--hairline)}
+.b-emo{background:rgba(255,159,28,.13);color:var(--warn);border:1px solid rgba(255,159,28,.35)}
+.scard .sc{display:flex;align-items:center;gap:6px;padding:0 9px 5px}
+.scard .scbar{flex:1;height:3px;background:rgba(150,175,215,.1);border-radius:2px;overflow:hidden}
+.scard .scbar i{display:block;height:100%;border-radius:2px;background:linear-gradient(90deg,#6d7e97,#96a8bf)}
+.scard .scnum{font-family:var(--num);font-size:12px;color:var(--dim);font-variant-numeric:var(--tnum);width:26px;text-align:right}
+.scard .fl{display:flex;gap:4px;padding:0 9px 6px}
+.scard .fl .f{flex:1;min-width:0}
+.scard .fl .fl-l{font-size:8.5px;color:var(--faint);display:flex;justify-content:space-between;font-family:var(--num);margin-bottom:2px}
+.scard .fl .fb{position:relative;height:3px;background:rgba(150,175,215,.1);border-radius:2px;overflow:hidden}
+/* 中轴＝0 线。DESIGN.md §5 位置双通道：净流入条占据右半轨（从中轴向右侧长），
+   净流出条占据左半轨（从中轴向左侧长）。条宽最多占半轨（48%），两半互为镜像。 */
+.scard .fl .fb::before{content:'';position:absolute;left:50%;top:-1px;bottom:-1px;width:1px;
+  background:rgba(150,175,215,.3)}
+.scard .fl .fb i{position:absolute;top:0;bottom:0;border-radius:2px}
+/* 2026-09-17 重写（DESIGN.md §1.1 反向纪律 + §1 使用纪律）：
+   资金流是「资金方向」，不是涨跌——原来用 var(--down) 绿表"流出"属跨语义混用，
+   且正负都从左端画起、只靠颜色区分，是单通道。改为：
+   方向通道 = 位置(中轴左右) + 色相(流入青 --cy / 流出中性灰蓝)，全程零红绿；
+   时间通道(10日/5日/今日) 只走明度深浅，不与方向争用色相。
+   数值本身带正负号（flowBar），构成第三条通道。
+   灰蓝取页面既有值 #5d6b7e/#7888a0，青取 --cy 同值 #3fd0ff，不新增漂移色。
+   2026-09-17 追加修正：初版把正值锚在 right:50%（占左半轨），语义与 §5「净流入右向」
+   反了。现正值锚 left:50%（占右半轨）、负值锚 right:50%（占左半轨），与 §5 一致。
+   几何判据：正值条 barLeft ≈ 轨宽/2 且 barRight ≈ 轨宽；负值条 barRight ≈ 轨宽/2 且 barLeft ≈ 0。 */
+.f10.f-pos i{left:50%;background:rgba(63,208,255,.30)}
+.f5.f-pos i{left:50%;background:rgba(63,208,255,.58)}
+.f1.f-pos i{left:50%;background:#3fd0ff}
+.f10.f-neg i{right:50%;background:rgba(93,107,126,.45)}
+.f5.f-neg i{right:50%;background:rgba(93,107,126,.70)}
+.f1.f-neg i{right:50%;background:#7888a0}
+.scard .ld{display:flex;align-items:center;gap:6px;padding:5px 9px;border-top:1px dashed var(--hairline2);cursor:pointer}
+.scard .ld:hover{background:rgba(63,208,255,.05)}
+.scard .ld .lt{font-size:8.5px;color:var(--faint);letter-spacing:1px;flex:none}
+.scard .ld .ln{font-size:11.5px;font-weight:700}
+.scard .ld .lc{font-size:9px;color:var(--faint);font-family:var(--num)}
+.scard .ld .lp{margin-left:auto;font-family:var(--num);font-size:11.5px;font-weight:700;font-variant-numeric:var(--tnum)}
+.lp-up{color:var(--up-text)}.lp-dn{color:var(--down-text)}.lp-limit{color:var(--gd);text-shadow:0 0 8px rgba(242,178,62,.4)}
+.scard .det{display:none;padding:6px 9px 8px;border-top:1px solid var(--hairline2);background:rgba(16,24,36,.4)}
+.scard.open .det{display:block}
+.scard .rsn{font-size:9.5px;color:var(--dim);line-height:1.6}
+.scard .rsn li{list-style:none;padding-left:9px;position:relative}
+.scard .rsn li::before{content:'·';position:absolute;left:1px;color:var(--accent)}
+.scan-err{padding:12px;font-size:11px;color:var(--warn);line-height:1.6}
+.scan-off{padding:12px;font-size:10.5px;color:var(--faint);line-height:1.6}
+
+/* ════════ 龙头个股面板（右栏） ════════ */
+/* 内部独立滚动：龙头可能多于 5 只，右列又被下方遥测面板占满无法整列滚动，
+   故给列表一个最大高度（约 5 行）+ 自身滚动条，确保能看完所有领涨股。 */
+#leaderbox{padding:4px 0;max-height:210px;flex-shrink:0;overflow-y:auto;overscroll-behavior:contain}
+/* 龙头面板按内容撑高、不被右列其余面板压缩，保证内部 ~5 行可视 + 滚动。
+   选择器用 .panel[data-panel] 提权，压过下方 #pr .panel{flex:0 1 auto}。 */
+#pr .panel[data-panel="leaders"]{flex:0 0 auto}
+#leaderbox::-webkit-scrollbar{width:4px}
+#leaderbox::-webkit-scrollbar-thumb{background:rgba(150,175,215,.25);border-radius:2px}
+#leaderbox::-webkit-scrollbar-track{background:transparent}
+.lrow{display:flex;align-items:center;gap:10px;padding:8px 12px;
+  border-bottom:1px solid var(--hairline2);cursor:pointer;transition:background .15s}
+.lrow:last-child{border-bottom:none}
+.lrow:hover{background:rgba(63,208,255,.05)}
+.lrow .lsec{font-size:9px;color:var(--faint);width:64px;flex:none;line-height:1.3;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrow .lmain{flex:1;min-width:0}
+.lrow .lname{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrow .lcode{font-size:9.5px;color:var(--faint);font-family:var(--num);margin-top:1px}
+.lrow .lpct{margin-left:auto;font-family:var(--num);font-size:14px;font-weight:700;
+  font-variant-numeric:var(--tnum);flex:none;display:flex;align-items:center}
+.lp-up{color:var(--up-text)}.lp-dn{color:var(--down-text)}
+.lp-limit{color:var(--gd);text-shadow:0 0 10px rgba(242,178,62,.5)}
+.limtag{font-size:8px;background:rgba(242,178,62,.18);color:var(--gd);
+  padding:1px 5px;border-radius:4px;margin-left:5px;text-shadow:none}
+
+/* ════════ 中央区 ════════ */
+#center{display:flex;flex-direction:column;min-width:0;min-height:0;gap:0px}
+/* 星图 60% / 聊天 40%（用户定的 3:2）*/
+#stage{position:relative;flex:0 0 60%;min-height:180px;border-radius:12px;
+  border:1px solid var(--hairline);
+  /* 冷色星空氛围：外围冷青星云（球浮在深蓝微光里）+ 四角暗角收边。
+     不做中心暖光晕——散光会糊成"黄雾"，能量核由 WebGL 里的 core 双星承担。 */
+  background:
+    radial-gradient(ellipse 74% 92% at 50% 50%,transparent 52%,rgba(0,0,0,.42) 100%),
+    radial-gradient(ellipse 70% 94% at 50% 50%,rgba(56,128,235,.16) 0%,rgba(40,96,200,.06) 48%,transparent 76%),
+    radial-gradient(ellipse at 50% 46%,rgba(63,208,255,.05) 0%,transparent 62%),
+    #05080e;
+  overflow:hidden}
+/* 全息舷窗：顶部一道极淡内高光，让球形容器有玻璃厚度 */
+#stage::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:2;
+  box-shadow:inset 0 1px 0 rgba(190,222,255,.08), inset 0 0 80px rgba(40,90,160,.10)}
+#graph{display:block;width:100%;height:100%;pointer-events:auto;opacity:.92;transition:opacity .4s ease}
+body.st-active #graph{opacity:1}
+
+/* 无 WebGL2 降级 */
+#gl-fallback{display:none;position:absolute;inset:0;place-items:center;pointer-events:none}
+#gl-fallback .glf-ring{position:absolute;border:1px solid rgba(120,150,200,.22);border-radius:50%}
+#gl-fallback .glf-r1{width:46%;aspect-ratio:1;border-color:rgba(120,150,200,.18);
+  box-shadow:inset 0 0 60px rgba(79,140,255,.10)}
+#gl-fallback .glf-r2{width:24%;aspect-ratio:1;border-color:rgba(255,159,28,.20)}
+#gl-fallback .glf-core{position:absolute;width:7px;height:7px;border-radius:50%;
+  background:#7fa6e0;box-shadow:0 0 18px rgba(79,140,255,.7)}
+#gl-fallback .glf-note{position:absolute;bottom:8%;font-size:var(--fs-xs);color:var(--faint);
+  text-align:center;line-height:1.6}
+body.no-webgl #graph{display:none}
+body.no-webgl #gl-fallback{display:grid}
+
+/* HUD 环 */
+#hud{position:absolute;inset:8px;border:1px solid rgba(120,160,220,.14);border-radius:50%;
+  pointer-events:none}
+#hud::after{content:'';position:absolute;inset:18px;
+  border:1px dashed rgba(120,160,220,.10);border-radius:50%}
+#hud .hud-m{position:absolute;font-size:10px;font-family:var(--num);
+  /* 2026-09-17 改色 rgba(160,190,230,.55) → var(--faint)：原内联 rgba 属 §9 主题漂移，
+     且在 --panel bg 上仅 3.75:1 不达 WCAG 4.5:1。改后 4.70:1 达标；同时清掉青色调漂移。 */
+  color:var(--faint);letter-spacing:.5px}
+#hud .hud-m.h1{top:6px;left:50%;transform:translateX(-50%)}
+#hud .hud-m.h2{top:50%;right:2px;transform:translateY(-50%)}
+#hud .hud-m.h3{bottom:6px;left:50%;transform:translateX(-50%)}
+
+/* 图例 */
 #legend{position:absolute;left:14px;bottom:12px;z-index:6;
-  font-size:10.5px;line-height:1.75;letter-spacing:.04em;
-  color:rgba(190,208,232,.60);pointer-events:none;user-select:none}
-#legend .lg-t{font-size:9.5px;color:rgba(150,172,204,.5);
-  letter-spacing:.16em;margin-bottom:3px}
+  font-size:var(--fs-sm);line-height:1.8;letter-spacing:.04em;
+  color:rgba(200,216,238,.72);pointer-events:none;user-select:none}
+#legend .lg-t{font-size:var(--fs-xs);color:var(--faint);
+  /* 2026-09-17 改色 rgba(160,180,210,.62) → var(--faint)：同上，清主题漂移 + 达 WCAG 4.5:1 */
+  letter-spacing:.14em;margin-bottom:3px}
 #legend .lg-r{display:flex;align-items:center;gap:6px}
 #legend .lg-d{width:7px;height:7px;border-radius:50%;flex:none;
   box-shadow:0 0 6px currentColor;background:currentColor}
-/* 颜色严格对应着色器 nodeHue 的输出值（实测校准）：
-   event 0.093 / place ~0.13 / interest 0.229 / project 0.292 / person 0.362
-   着色器在 hue<0.35 时插值 fade(0.42,0.55,0.92) → fresh(0.44,0.93,0.74) */
-#legend .lg-d.c-person {color:#71ecbb}   /* hue 0.36 → 接近 fresh 绿 */
-#legend .lg-d.c-project{color:#68d3c4}   /* hue 0.29 */
-#legend .lg-d.c-interest{color:#5fbcd0}  /* hue 0.23 */
-#legend .lg-d.c-place  {color:#57a5da}   /* hue 0.13 */
-#legend .lg-d.c-event  {color:#5090e2}   /* hue 0.09 → 接近 fade 蓝 */
-#legend .lg-d.c-ent    {color:#ffbd57}   /* 实体 hue 0.60 琥珀 */
-#legend .lg-d.c-fade   {color:#6b8cea}   /* retention<0.6 → hue 0.02 冷蓝 */
+/* 2026-09-16 改值（DESIGN.md §1.1 反向纪律：红绿禁止出现在非涨跌语义）：
+   原 c-person #71ecbb 色相 156°、c-project #68d3c4 色相 172°，都落在绿带 [120°,180°] 内 ——
+   在金融仪表盘里会被读成"跌色"。整条色带改用青→蓝（色相 190°→214°，明度 200→134），
+   后三项本就在此区间，这里只把前两项接入同一色带。 */
+#legend .lg-d.c-person {color:#86e1f3}
+#legend .lg-d.c-project{color:#6acaf0}
+#legend .lg-d.c-interest{color:#5fbcd0}
+#legend .lg-d.c-place  {color:#57a5da}
+#legend .lg-d.c-event  {color:#5090e2}
+#legend .lg-d.c-ent    {color:#ffbd57}
+#legend .lg-d.c-fade   {color:#6b8cea}
 #legend .lg-d.c-ring   {color:#ffd9a0;box-shadow:0 0 0 2px rgba(255,217,160,.42),0 0 8px currentColor}
 
-/* ── 记忆详情卡 ──
-   点击星图节点弹出。星图之前是纯展示，一堆匿名光点点了没反应。 */
+/* 操作按钮排 */
+#ops{position:absolute;right:14px;bottom:12px;z-index:5;display:flex;flex-direction:column;
+  align-items:flex-end;gap:6px}
+#ops-toggle{background:rgba(16,26,40,.55);border:1px solid var(--hairline);color:var(--faint);
+  font-size:11px;letter-spacing:.5px;padding:4px 11px;border-radius:20px;cursor:pointer;white-space:nowrap;
+  backdrop-filter:blur(10px);transition:color .18s,border-color .18s,background .18s,box-shadow .18s;
+  opacity:.55}
+#ops:hover #ops-toggle,#ops.open #ops-toggle{opacity:1;color:var(--dim)}
+#ops-toggle:hover{color:var(--accent)!important;border-color:var(--accent);
+  box-shadow:0 0 12px rgba(63,208,255,.18)}
+#ops-menu{display:none;flex-direction:row-reverse;flex-wrap:wrap;gap:6px;justify-content:flex-end;
+  max-width:340px;padding:8px;border-radius:12px;
+  background:rgba(12,20,32,.72);border:1px solid var(--hairline);backdrop-filter:blur(18px);
+  box-shadow:0 8px 30px rgba(0,0,0,.45), inset 0 1px 0 rgba(190,222,255,.06)}
+#ops.open #ops-menu{display:flex}
+#ops-menu button{background:rgba(20,30,44,.72);border:1px solid var(--line);color:var(--dim);
+  font-size:11px;padding:3px 9px;border-radius:6px;cursor:pointer;white-space:nowrap;
+  transition:color .15s,border-color .15s,background .15s}
+#ops-menu button:hover{color:var(--accent);border-color:var(--accent);background:rgba(63,208,255,.06)}
+
+/* 消息区：心流一列（统一左对齐 + 左光轨节点），保留气泡功能语义 */
+#chat{flex:0 0 40%;overflow-y:auto;display:flex;flex-direction:column;gap:12px;
+  padding:10px 14px 10px 20px;border-radius:12px;
+  background:var(--panel);border:1px solid var(--hairline);
+  mask-image:linear-gradient(to bottom,transparent 0,#000 12px,#000 100%);
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 12px,#000 100%)}
+#chat::-webkit-scrollbar{width:4px}
+#chat::-webkit-scrollbar-thumb{background:rgba(150,175,215,.2);border-radius:2px}
+.msg{position:relative;max-width:92%;align-self:flex-start;
+  padding:7px 13px 7px 20px;border-radius:9px;border:1px solid var(--hairline);
+  background:rgba(18,27,40,.55);
+  font-size:var(--fs-base);white-space:pre-wrap;word-break:break-word;
+  animation:in .22s ease-out}
+@keyframes in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+/* 左侧光轨节点：每条消息一个节点，表达"心流" */
+.msg::before{content:'';position:absolute;left:7px;top:11px;width:6px;height:6px;
+  border-radius:50%;background:var(--accent);opacity:.85;box-shadow:0 0 6px var(--accent-soft)}
+.msg .ts{display:block;font-size:10px;color:var(--faint);letter-spacing:.4px;
+  margin-top:4px;font-family:var(--num);font-variant-numeric:var(--tnum)}
+/* 用户：暖橙语义（角色色），仅节点与边框点出，不整片染色 */
+.msg.u{background:rgba(255,159,28,.06);border-color:rgba(255,159,28,.28)}
+.msg.u::before{background:var(--warm);box-shadow:0 0 6px rgba(255,159,28,.5)}
+.msg.a{background:rgba(18,27,40,.9)}
+.msg.a .lbl{display:block;font-size:var(--fs-xs);letter-spacing:1px;color:var(--dim);
+  margin-bottom:2px}
+.msg.e{align-self:flex-start;background:rgba(255,90,90,.12);
+  border:1px solid rgba(255,90,90,.4);color:#ffb0b0;font-size:var(--fs-sm)}
+.msg.e::before{background:var(--bad);box-shadow:0 0 6px rgba(255,92,92,.6)}
+.msg .lbl{font-size:var(--fs-xs);letter-spacing:1px;color:var(--dim);
+  display:block;margin-bottom:2px}
+/* 主动消息气泡：暖橙语义左边条 */
+.msg.pro{border-left:2px solid var(--warm);background:rgba(255,159,28,.055)}
+.msg.pro .lbl{color:var(--warm)}
+/* 思考中 */
+.msg.thinking{background:rgba(16,24,36,.6);
+  border:1px solid rgba(120,160,220,.22);color:#9fc0df;font-size:var(--fs-sm);
+  padding:9px 13px 9px 20px;display:inline-flex;align-items:center;gap:7px;max-width:80%}
+.msg.thinking::before{background:var(--accent);animation:thinkDot 1.2s ease-in-out infinite}
+.msg.thinking .dots{display:inline-flex;gap:4px}
+.msg.thinking .dots i{width:5px;height:5px;border-radius:50%;background:#6f93c4;
+  animation:thinkDot 1.2s ease-in-out infinite}
+.msg.thinking .dots i:nth-child(2){animation-delay:.18s}
+.msg.thinking .dots i:nth-child(3){animation-delay:.36s}
+@keyframes thinkDot{0%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+
+/* 工具调用气泡：去独立扫描线，统一走光轨节点（绿色） */
+.msg.t{background:rgba(16,24,36,.6);
+  border:1px solid rgba(120,160,220,.22);color:#a9c0dc;
+  font-size:var(--fs-sm);padding:6px 11px 6px 20px;max-width:86%;
+  display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.msg.t::before{background:#4f8cff;animation:tscan 1.05s ease-in-out infinite}
+.msg.t .lbl{color:#7f9dc2;display:inline;margin:0}
+@keyframes tscan{0%,100%{opacity:.25}50%{opacity:1}}
+.msg.t.tok::before,.msg.t.terr::before{animation:none}
+.msg.t.tok::before{background:var(--ok);box-shadow:0 0 6px rgba(63,212,138,.6)}
+.msg.t.terr::before{background:#ff6b6b;box-shadow:0 0 6px rgba(255,107,107,.6)}
+.msg.t .targs{font-family:var(--num);font-size:var(--fs-xs);color:#8fa8c8;
+  background:rgba(0,0,0,.25);padding:1px 6px;border-radius:4px;font-variant-numeric:var(--tnum)}
+.msg.t .tres{font-size:var(--fs-xs);letter-spacing:.4px;margin-left:auto;color:#7f9dc2}
+.msg.t.tok .tres{color:var(--ok)}
+.msg.t.terr .tres{color:#ff8a8a}
+
+/* 摘要卡 */
+.summary{align-self:center;width:92%;font-size:var(--fs-xs);color:var(--dim);
+  display:flex;align-items:center;gap:10px;padding:5px 12px;border-radius:8px;
+  background:rgba(255,159,28,.06);border:1px solid rgba(255,159,28,.22);flex-wrap:wrap}
+.summary b{color:var(--warm);font-weight:600;font-variant-numeric:var(--tnum)}
+
+/* 工具折叠卡片 */
+.toolwrap{align-self:flex-start;max-width:86%;width:86%}
+.toolbar{display:flex;align-items:center;gap:8px;padding:6px 11px;cursor:pointer;
+  background:rgba(16,24,36,.6);border:1px solid rgba(120,160,220,.22);
+  border-radius:9px;font-size:var(--fs-sm);color:#a9c0dc;user-select:none}
+.toolbar .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 5px rgba(63,212,138,.7);flex:none}
+.toolbar .nm{color:#7f9dc2;font-family:var(--num);font-size:11px}
+.toolbar .args{color:#8fa8c8;font-size:10px;flex:1;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.toolbar .res{color:var(--dim);font-size:11px;font-family:var(--num)}
+.toolbar .arr{color:var(--dim);font-size:10px;transition:transform .2s;font-family:var(--num)}
+.toolbody{display:none;margin-top:4px;padding:8px 11px;font-size:var(--fs-sm);
+  color:var(--dim);background:rgba(10,16,24,.6);border:1px solid var(--line);
+  border-radius:9px;white-space:pre-wrap;word-break:break-word}
+.toolwrap.open .toolbody{display:block}
+.toolwrap.open .toolbar .arr{transform:rotate(90deg)}
+
+/* 工具步骤条 */
+.toolsteps{align-self:flex-start;display:flex;flex-direction:column;gap:0;
+  max-width:78%;margin:2px 0;padding-left:2px}
+.toolsteps .msg.t{max-width:100%;margin-bottom:4px;position:relative}
+
+/* 光标 */
+.caret{display:inline-block;width:7px;height:1em;vertical-align:-.12em;margin-left:1px;
+  background:var(--warm);animation:caretBlink 1s steps(1) infinite}
+@keyframes caretBlink{0%,50%{opacity:1}51%,100%{opacity:0}}
+
+/* 巡视发现 */
+.pfind{margin-top:6px;display:flex;flex-direction:column;gap:3px}
+.pfrow{font-size:var(--fs-sm);padding:4px 9px;border-radius:5px;border-left:2px solid transparent;
+  background:rgba(0,0,0,.22);color:#c2cfdf;line-height:1.5}
+.pfrow.sev-high{border-left-color:#ff6b6b;color:#ffc9c9;background:rgba(255,90,90,.1)}
+.pfrow.sev-medium{border-left-color:var(--warm);color:#ffd9a8;background:rgba(255,159,28,.08)}
+.pfrow.sev-low{border-left-color:#5a6c86}
+
+/* 记忆条目 */
+.it{font-size:var(--fs-sm);padding:6px 8px;margin-bottom:6px;border-radius:7px;
+  background:rgba(30,42,60,.5);border-left:2px solid var(--cool);color:#cdd8e6;line-height:1.5}
+.it .meta{font-size:var(--fs-xs);color:var(--dim);margin-top:3px;font-variant-numeric:var(--tnum)}
+.it.hot{border-left-color:var(--accent);background:rgba(63,208,255,.07)}
+.empty{font-size:var(--fs-xs);color:var(--dim);text-align:center;padding:14px 4px;line-height:1.9}
+
+/* ════════ 右栏 ════════ */
+/* padding-bottom：最后一个面板（系统遥测，含活跃度 spark 画布）原来到此贴边，
+   滚到底时底部内容像被切掉；留出与左栏一致的呼吸空间。 */
+#pr{display:flex;flex-direction:column;gap:12px;min-height:0;overflow-y:auto;
+  padding-bottom:24px}
+#pr::-webkit-scrollbar{width:4px}
+#pr::-webkit-scrollbar-thumb{background:rgba(150,175,215,.22);border-radius:2px}
+/* 面板按内容定高，不允许压缩到比内容矮（否则 overflow:hidden 会把底部内容
+   直接裁掉且不产生滚动——遥测面板的"活跃度"图就是这样被切掉、且滚不到的）。
+   flex:none 让 #pr 真正溢出 → 由 #pr 的 overflow-y:auto 出滚动条。 */
+#pr .panel{flex:0 0 auto;min-height:0}
+/* 召回 */
+.rhit{padding:6px 8px;margin-bottom:5px;border-radius:7px;font-size:var(--fs-sm);
+  background:rgba(30,42,60,.5);border-left:2px solid var(--cool);color:#cdd8e6;line-height:1.5}
+.rhit .meta{font-size:var(--fs-xs);color:var(--dim);margin-top:3px;
+  font-variant-numeric:var(--tnum)}
+.rhit.hot{border-left-color:var(--accent);background:rgba(63,208,255,.07)}
+/* 检索历史 / 日志 */
+.lrow{font-size:var(--fs-xs);color:var(--dim);padding:4px 2px;
+  border-bottom:1px solid rgba(150,175,215,.07);display:flex;gap:8px}
+.lrow .t{color:var(--faint);font-family:var(--num);font-variant-numeric:var(--tnum);flex:none}
+.logrow{font-size:var(--fs-xs);padding:4px 6px;margin-bottom:4px;border-radius:6px;
+  background:rgba(255,255,255,.03);color:#c2cfdf;display:flex;gap:8px;line-height:1.5}
+.logrow .t{color:var(--faint);font-family:var(--num);font-variant-numeric:var(--tnum);flex:none}
+.logrow .lv{flex:none;font-size:10px;padding:0 5px;border-radius:4px;line-height:1.5}
+.logrow .lv.info{color:#7fb4ff;background:rgba(79,140,255,.12)}
+.logrow .lv.warn{color:#ffd9a8;background:rgba(255,159,28,.12)}
+
+/* ════════ 底部栏 ════════ */
+/* 底栏与中央列对齐：252(侧栏) + 10(main 左边距) = 262
+ * 两行布局：上排快捷指令、下排麦克风+输入+发送。
+ * 原来单行 42px 时输入框被 chips 挤得很窄（用户反馈"太窄"）。 */
+#bottom{position:fixed;left:340px;right:340px;bottom:10px;height:82px;z-index:6;
+  display:flex;flex-direction:column;justify-content:center;gap:7px;padding:8px 12px;
+  background:linear-gradient(180deg,rgba(28,44,68,.72),rgba(15,25,42,.78));
+  border:1px solid var(--hairline);border-radius:14px;
+  backdrop-filter:blur(20px) saturate(1.15);-webkit-backdrop-filter:blur(20px) saturate(1.15);
+  box-shadow:inset 0 1px 0 rgba(200,225,255,.10), 0 10px 34px rgba(6,14,30,.5);
+  transition:border-color .2s ease,box-shadow .25s ease}
+#bottom:focus-within{border-color:rgba(63,208,255,.45);
+  box-shadow:inset 0 1px 0 rgba(190,222,255,.10), 0 0 0 1px rgba(63,208,255,.12),
+             0 10px 34px rgba(0,0,0,.42), 0 0 22px rgba(63,208,255,.10)}
+#bottom .inprow{display:flex;align-items:center;gap:8px;min-width:0}
+@media (max-width:1180px){#bottom{left:260px;right:260px}}
+@media (max-width:900px){#bottom{left:10px;right:10px}}
+
+/* 语音回复后的"可以继续说"提示条。
+ * 浮在输入框上方，默认透明不可见，.on 时淡入。
+ * 作用：让 30 秒连续对话窗口变得可见 —— 后端一直开着，
+ * 但用户看不见就只能每句重新喊唤醒词。 */
+.listen-hint{position:fixed;left:50%;bottom:102px;transform:translateX(-50%) translateY(6px);
+  z-index:8;padding:7px 15px;border-radius:18px;font-size:var(--fs-sm);
+  color:var(--txt);background:rgba(14,22,34,.94);border:1px solid var(--accent);
+  box-shadow:0 4px 22px rgba(0,0,0,.4);backdrop-filter:blur(12px);
+  opacity:0;pointer-events:none;
+  transition:opacity .22s ease,transform .22s ease;white-space:nowrap}
+.listen-hint.on{opacity:1;transform:translateX(-50%) translateY(0)}
+@media (max-width:900px){.listen-hint{bottom:102px;font-size:var(--fs-xs)}}
+#mic,#spk{background:none;border:1px solid var(--line);color:var(--dim);
+  font-size:var(--fs-base);line-height:1;min-width:32px;min-height:32px;
+  border-radius:7px;cursor:pointer;flex:none;
+  display:flex;align-items:center;justify-content:center;
+  transition:color .18s,border-color .18s,background .18s}
+/* 图标内联 SVG：currentColor 跟随 .on/.awake 状态色（emoji 会忽略 color，状态色失效） */
+#mic svg,#spk svg{width:15px;height:15px;flex:none}
+#mic:hover,#spk:hover{color:var(--txt);border-color:var(--dim)}
+#mic.on{color:var(--accent);border-color:var(--accent);
+  background:rgba(63,208,255,.12);animation:micPulse 2.1s ease-in-out infinite}
+@keyframes micPulse{0%,100%{box-shadow:0 0 0 0 rgba(63,208,255,.30)}
+  50%{box-shadow:0 0 0 4px rgba(63,208,255,0)}}
+#mic.awake{color:var(--accent);border-color:var(--accent);
+  background:rgba(63,208,255,.18);animation:micPulse .9s ease-in-out infinite}
+#spk.on{color:var(--accent);border-color:var(--accent);background:rgba(63,208,255,.14)}
+#inp{flex:1;background:none;border:none;color:var(--txt);min-width:0;
+  font:var(--fs-base) "Microsoft YaHei",sans-serif;padding:6px 2px}
+#inp::placeholder{color:var(--faint)}
+#inp:focus-visible{outline:none;border-bottom:1px solid var(--accent)}
+.chips{display:flex;gap:6px;flex:none;overflow-x:auto}
+.chips::-webkit-scrollbar{display:none}
+.chips button{background:rgba(63,208,255,.08);border:1px solid rgba(63,208,255,.26);
+  color:#9fd8f5;font-size:var(--fs-xs);padding:5px 10px;border-radius:15px;
+  cursor:pointer;white-space:nowrap;transition:background .15s}
+.chips button:hover{background:rgba(63,208,255,.2)}
+#send{background:linear-gradient(180deg,var(--gold-bright),var(--gold));
+  border:1px solid var(--gold);color:#231a08;font-weight:700;
+  font-size:var(--fs-sm);padding:6px 18px;border-radius:8px;cursor:pointer;flex:none;
+  transition:background .18s,box-shadow .18s,transform .08s}
+#send:hover{background:linear-gradient(180deg,#f8e0a4,#eccf86);border-color:#f2d48f;
+  box-shadow:0 0 16px rgba(230,196,120,.4)}
+#send:active{transform:scale(.96)}
+#send:disabled{opacity:.4;cursor:default;box-shadow:none;transform:none}
+
+/* ════════ 记忆详情卡 ════════ */
 #memcard{position:fixed;z-index:12;width:286px;max-width:calc(100vw - 24px);
   background:rgba(11,17,26,.94);border:1px solid rgba(150,175,215,.26);
   border-radius:12px;backdrop-filter:blur(10px);
@@ -207,122 +720,852 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
   opacity:0;transform:translateY(5px) scale(.97);pointer-events:none;
   transition:opacity .16s ease,transform .16s ease}
 #memcard.on{opacity:1;transform:none;pointer-events:auto}
-.mc-h{display:flex;align-items:center;gap:7px;padding:8px 10px;
+.mc-h{display:flex;align-items:center;gap:7px;padding:9px 11px;
   border-bottom:1px solid var(--line)}
-.mc-cat{font-size:9px;letter-spacing:1.1px;color:var(--warm);
-  border:1px solid rgba(255,159,28,.3);border-radius:4px;padding:1px 6px}
-.mc-id{font-size:9px;color:var(--faint);letter-spacing:.5px}
-.mc-x{margin-left:auto;color:var(--faint);cursor:pointer;font-size:11px;
-  line-height:1;padding:2px 3px;border-radius:4px}
+.mc-cat{font-size:var(--fs-xs);letter-spacing:1px;color:var(--warm);
+  border:1px solid rgba(255,159,28,.3);border-radius:4px;padding:2px 7px}
+.mc-id{font-size:var(--fs-xs);color:var(--dim);letter-spacing:.4px;font-variant-numeric:var(--tnum)}
+.mc-x{margin-left:auto;color:var(--dim);cursor:pointer;font-size:var(--fs-sm);
+  line-height:1;padding:3px 5px;border-radius:4px}
 .mc-x:hover{color:var(--txt);background:rgba(255,255,255,.07)}
-.mc-body{padding:9px 10px 11px}
-.mc-txt{font-size:11.5px;line-height:1.62;color:var(--txt);margin-bottom:9px;
+.mc-body{padding:10px 11px 12px}
+.mc-txt{font-size:var(--fs-sm);line-height:1.66;color:var(--txt);margin-bottom:10px;
   word-break:break-word}
-.mc-meta{display:flex;flex-wrap:wrap;gap:4px 5px;margin-bottom:8px}
-.mc-tag{font-size:8.5px;letter-spacing:.5px;color:var(--dim);
-  border:1px solid var(--line);border-radius:4px;padding:1.5px 5px;white-space:nowrap}
-.mc-tag b{color:var(--txt);font-weight:600}
-/* 衰减状态：三档一眼可辨 */
-.mc-tag.fresh {border-color:rgba(80,220,150,.36);color:#7fe3b0}
-.mc-tag.normal{border-color:rgba(140,170,220,.32);color:#9db4d6}
+.mc-meta{display:flex;flex-wrap:wrap;gap:5px 6px;margin-bottom:9px}
+.mc-tag{font-size:var(--fs-xs);letter-spacing:.4px;color:var(--dim);
+  border:1px solid var(--line);border-radius:4px;padding:2px 6px;white-space:nowrap}
+.mc-tag b{color:var(--txt);font-weight:600;font-variant-numeric:var(--tnum)}
+.mc-tag.fresh {border-color:rgba(63,212,138,.36);color:var(--ok)}
+.mc-tag.normal{border-color:rgba(140,170,220,.32);color:#a9bedc}
 .mc-tag.fading{border-color:rgba(255,140,90,.36);color:#ffb08a}
-/* 强度条 */
-.mc-bar{height:3px;background:rgba(255,255,255,.07);border-radius:2px;
-  overflow:hidden;margin-bottom:3px}
-.mc-bar i{display:block;height:100%;border-radius:2px;
-  background:linear-gradient(90deg,var(--cool),var(--warm))}
-.mc-cap{font-size:8.5px;color:var(--faint);letter-spacing:.4px;margin-bottom:8px}
-/* 合并历史 */
-.mc-merge{margin-top:9px;padding-top:8px;border-top:1px solid var(--line)}
-.mc-mh{font-size:8.5px;letter-spacing:1px;color:var(--warm);margin-bottom:6px}
-.mc-mrow{font-size:9.5px;line-height:1.5;color:var(--dim);
-  padding:5px 7px;margin-bottom:4px;border-radius:6px;
+.mc-bar{height:4px;background:rgba(255,255,255,.07);border-radius:2px;
+  overflow:hidden;margin-bottom:4px}
+.mc-bar i{display:block;height:100%;border-radius:2px;background:var(--accent);opacity:.8}
+.mc-cap{font-size:var(--fs-xs);color:var(--dim);letter-spacing:.3px;margin-bottom:9px}
+.mc-merge{margin-top:10px;padding-top:9px;border-top:1px solid var(--line)}
+.mc-mh{font-size:var(--fs-xs);letter-spacing:.9px;color:var(--warm);margin-bottom:7px}
+.mc-mrow{font-size:var(--fs-xs);line-height:1.55;color:var(--dim);
+  padding:6px 8px;margin-bottom:5px;border-radius:6px;
   background:rgba(255,255,255,.035);border-left:2px solid rgba(255,159,28,.4)}
 .mc-mrow .d{color:var(--faint);text-decoration:line-through}
-.mc-mrow .w{color:var(--faint);font-size:8.5px;display:block;margin-top:2px}
-.mc-empty{font-size:9.5px;color:var(--faint)}
+.mc-mrow .w{color:var(--dim);font-size:var(--fs-xs);display:block;margin-top:2px}
+.mc-empty{font-size:var(--fs-xs);color:var(--dim)}
 
-/* ── 顶栏数据源健康灯 ──
-   3 个关键数据源（腾讯行情 / 东财板块 / 资金流）的状态原来完全不上界面。
-   东财实测会被 IP 风控（连续 socket hang up），一挂用户毫无察觉，
-   只会觉得"贾维斯今天答得不对" —— 而错的行情比没有行情更危险。 */
-#srcs{display:inline-flex;align-items:center;gap:5px;margin:0 5px;cursor:default}
-#srcs .s{width:6px;height:6px;border-radius:50%;flex:none;
-  background:#3a4658;transition:background .3s,box-shadow .3s}
-#srcs .s.ok  {background:#3fd48a;box-shadow:0 0 5px rgba(63,212,138,.7)}
-#srcs .s.deg {background:#ff9f1c;box-shadow:0 0 5px rgba(255,159,28,.7)}
-#srcs .s.down{background:#ff5c5c;box-shadow:0 0 6px rgba(255,92,92,.85)}
-/* 关键源挂掉时呼吸闪烁 —— 这种情况必须被看见，不能安静地错 */
-#srcs .s.down.crit{animation:srcAlarm 1.1s ease-in-out infinite}
-@keyframes srcAlarm{0%,100%{opacity:1}50%{opacity:.32}}
+/* ════════ 状态机 ════════ */
+#state.st-idle::before{background:#5d6b7e}
+#state.st-think{color:#9fc0ff;border-color:rgba(79,140,255,.4)}
+#state.st-think::before{background:#4f8cff;box-shadow:0 0 7px rgba(79,140,255,.8);
+  animation:stPulse 1.1s ease-in-out infinite}
+#state.st-tool{color:#ffce85;border-color:rgba(255,159,28,.42)}
+#state.st-tool::before{background:var(--warm);box-shadow:0 0 7px rgba(255,159,28,.8);
+  animation:stPulse 1.1s ease-in-out infinite}
+#state.st-speak{color:var(--ok);border-color:rgba(63,212,138,.4)}
+#state.st-speak::before{background:#3fd48a;box-shadow:0 0 7px rgba(63,212,138,.8)}
+#state.st-listen{color:#ffce85;border-color:rgba(255,159,28,.42)}
+#state.st-listen::before{background:var(--warm);box-shadow:0 0 8px rgba(255,159,28,.9);
+  animation:stPulse .85s ease-in-out infinite}
+#state.st-alert{color:#ff9c9c;border-color:rgba(242,73,75,.5)}
+#state.st-alert::before{background:var(--up);box-shadow:0 0 8px rgba(242,73,75,.9)}
+@keyframes stPulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ════════ Markdown 样式 ════════ */
+.msg{font-variant-numeric:var(--tnum)}
+.md p{margin:0 0 7px}.md p:last-child{margin-bottom:0}
+.md strong{color:#fff;font-weight:700}
+.md em{color:#d7e2f0}
+.md code{font-family:var(--num);font-size:.92em;background:rgba(0,0,0,.32);
+  border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#cfe0f5}
+.md ul,.md ol{margin:4px 0 7px;padding-left:0;list-style-position:inside}
+.md li{margin:2px 0}
+.md h1,.md h2,.md h3,.md h4{font-size:var(--fs-base);margin:9px 0 5px;color:#fff;font-weight:700}
+.md hr{border:none;border-top:1px solid var(--line);margin:9px 0}
+.md blockquote{border-left:2px solid var(--warm);padding:2px 0 2px 10px;margin:6px 0;
+  color:var(--dim);background:rgba(255,159,28,.05);border-radius:0 5px 5px 0}
+.md table{margin:7px 0}
+.msg.a.md{white-space:normal}
+.msg table{border-collapse:collapse;width:100%;margin:4px 0;font-size:var(--fs-sm)}
+.msg th,.msg td{padding:3px 7px;text-align:right;border-bottom:1px solid rgba(150,175,215,.10);
+  font-variant-numeric:var(--tnum)}
+.msg th:first-child,.msg td:first-child{text-align:left}
+.msg thead th{color:var(--dim);font-weight:600;font-size:var(--fs-xs)}
+.up,.pos{color:var(--up-text)} .down,.neg{color:var(--down-text)}
+.num,code,kbd,samp{font-family:var(--num);font-variant-numeric:var(--tnum)}
+
+/* ════════ 贾维斯干活提示 ════════ */
+#doing{position:absolute;left:50%;transform:translateX(-50%);
+  bottom:14px;z-index:4;
+  font-size:var(--fs-sm);letter-spacing:.5px;color:#ffcf8f;opacity:0;
+  transition:opacity .6s ease;pointer-events:none;
+  background:rgba(10,14,22,.82);padding:5px 13px;border-radius:9px;
+  border:1px solid rgba(255,159,28,.3)}
+#doing.on{opacity:.95}
+
+/* ════════ 声纹（候选A 中线波形）════════
+   置于星图底部横带，待机细微波 / 聆听中幅 / 说话大幅。
+   语言与星图轨道线、心流光轨同源：单线。 */
+#voiceline{position:absolute;left:0;right:0;bottom:0;width:100%;height:38px;
+  pointer-events:none;z-index:5;opacity:.9}
+
+/* ════════ 声波粒子喷泉 ════════
+   置于星图底部横带之上，由真实语音振幅 amp 驱动：
+   待机少量粒子低喷（呼吸感）/ 聆听冷蓝中喷 / 说话翠绿高喷，
+   Canvas2D 加法混合，零依赖。 */
+#fountain{position:absolute;left:0;right:0;bottom:0;width:100%;height:130px;
+  pointer-events:none;z-index:4;opacity:.9}
+
+/* ════════ 语音晶核（融合形态：晶体核 + 声核粒子）════════
+   星图右下角，独立 WebGL2 overlay。pointer-events:none 永不挡操作。
+   待机淡（晶体+一层薄粒子），聆听/说话由真实状态与麦声压点亮。 */
+#voicecore{position:absolute;right:26px;bottom:18px;width:172px;height:172px;
+  z-index:6;pointer-events:none;
+  opacity:.22;transition:opacity .4s ease}
+#voicecore.live{opacity:.95}
+#voicecore.listen{opacity:1}
+#voicecore-canvas{width:100%;height:100%;display:block}
+
+/* ════════ 系统遥测（右栏）════════ */
+.viz{display:flex;flex-direction:column;gap:8px;padding:8px 10px}
+.viz .vt{font-size:10px;letter-spacing:1px;color:var(--faint);display:flex;
+  align-items:center;gap:5px;padding:0 1px}
+.viz .vt b{color:var(--accent);font-weight:600}
+.viz canvas{display:block;width:100%;border-radius:8px;
+  background:rgba(6,10,16,.55);border:1px solid rgba(150,175,215,.10)}
+.viz .vat{color:var(--dim);font-family:var(--num);font-size:10px;
+  font-variant-numeric:var(--tnum)}
+
+/* ════════ 无后端提示 ════════ */
+#backend-tip{position:fixed;inset:0;z-index:20;display:none;place-items:center;
+  background:rgba(7,11,17,.92);backdrop-filter:blur(6px)}
+#backend-tip.show{display:grid}
+#backend-tip .tip-box{text-align:center;padding:30px 40px;border-radius:14px;
+  border:1px solid var(--line);background:rgba(16,24,36,.8);max-width:420px}
+#backend-tip .tip-box h3{color:var(--warm);font-size:var(--fs-lg);margin-bottom:10px;letter-spacing:1px}
+#backend-tip .tip-box p{color:var(--dim);font-size:var(--fs-sm);line-height:1.7;margin-bottom:16px}
+#backend-tip .tip-box code{font-family:var(--num);color:var(--txt);
+  background:rgba(0,0,0,.35);padding:3px 8px;border-radius:4px;border:1px solid var(--line)}
+#backend-tip .tip-box .sub{color:var(--faint);font-size:var(--fs-xs);margin-top:12px}
+
+/* ════════ 可访问性 ════════ */
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+#inp:focus-visible{outline:none;border-bottom:1px solid var(--warm)}
+
+/* ════════ 毛玻璃降级 ════════ */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))){
+  .panel{background:#15243c}
+  #top{background:#101b2e}
+  #bottom{background:#16263f}
+  .msg.a,.msg.t{background:#16263c}
+}
+/* 面板统一描边 */
+.panel{border-color:rgba(255,255,255,.08)}
+.msg.a{background:rgba(18,27,40,.9)}
+
+/* ════════ 响应式 ════════ */
+@media (max-width:900px){
+  /* 布局断点：三列改单列。1180 已先收窄侧栏至 250px（见上 #main 规则），
+     900 以下单列才能容纳主区面板。此处仅管布局，不管顶栏。 */
+  #pl,#pr{display:none}
+  #bottom{left:10px;right:10px}
+}
+@media (max-width:1024px){
+  /* 顶栏收折（方案① 汉堡菜单，DESIGN.md §8 #8 / §13 B4）：
+     旧方案 `.metrics .mt{display:none} .metrics .mt:nth-child(-n+3){display:flex}`
+     实测 375/768/1024 三档溢出 490/97/26px，#srcs 数据源灯被 overflow 硬裁成直截断线，
+     用户看不出行情已降级——"假的可用比明确不可用更危险"要挡的事。
+     现方案：6 指标 + #model + #meta 全部收进右侧浮层 #tbmenuPanel，
+     主栏只留 brand + state + wave + #srcs + 汉堡按钮，#srcs 绝对可见。
+     断点用 1024 而非 900 是为了同时覆盖 1024 档的 26px #meta 裁切；
+     900-1024 区间布局仍保持 3 列（250px 侧栏），仅顶栏折叠，主区不变。 */
+  #top .metrics,#top #model,#top #meta{display:none}
+  #tbmenu{display:inline-flex}
+}
+@media (prefers-reduced-motion:reduce){
+  .msg{animation:none}
+  .ph .fold,.toolbar .arr{transition:none}
+  #mic.on,#mic.awake{animation:none}
+  .msg.t::before{animation:none}
+  #srcs .s.down.crit{animation:none}
+  #state.st-think::before,#state.st-tool::before,#state.st-listen::before{animation:none}
+  .msg.thinking .dots i{animation:none}
+  .sk-bar::after,.sk-line::after{animation:none}
+}
+
+/* ════ 骨架屏（数据加载占位，克制的扫光，不用全屏 spinner）════
+   用法：容器内放 <div class="sk"> + 若干 .sk-line / .sk-bar，
+   数据到达后整块 innerHTML 替换即自动移除。颜色取自既有 token，
+   不引入新色相，符合"装饰去饱和"原则。 */
+.sk{padding:10px 4px;display:flex;flex-direction:column;gap:9px}
+.sk-line{position:relative;height:9px;border-radius:5px;overflow:hidden;
+  background:rgba(150,175,215,.10)}
+.sk-bar{position:relative;height:22px;border-radius:7px;overflow:hidden;
+  background:rgba(150,175,215,.08)}
+.sk-line::after,.sk-bar::after{content:"";position:absolute;inset:0;
+  transform:translateX(-100%);
+  background:linear-gradient(90deg,transparent,rgba(238,243,250,.07),transparent);
+  animation:skShimmer 1.25s ease-in-out infinite}
+.sk-w90{width:90%}.sk-w75{width:75%}.sk-w60{width:60%}.sk-w45{width:45%}
+@keyframes skShimmer{100%{transform:translateX(100%)}}
 </style></head><body>
 
-<div id="stage"><canvas id="graph"></canvas>
-  <!-- 图例：颜色有含义但用户不知道就等于没做。
-       注意色相表达的是**类别**而非新鲜度 —— 实测所有记忆都还是 fresh，
-       按新鲜度上色会退化成一种颜色。图例必须说真话。 -->
-  <div id="legend">
-    <div class="lg-t">记忆类别</div>
-    <div class="lg-r"><i class="lg-d c-person"></i>人物</div>
-    <div class="lg-r"><i class="lg-d c-project"></i>项目</div>
-    <div class="lg-r"><i class="lg-d c-interest"></i>兴趣</div>
-    <div class="lg-r"><i class="lg-d c-place"></i>地点</div>
-    <div class="lg-r"><i class="lg-d c-event"></i>事件</div>
-    <div class="lg-t" style="margin-top:6px">其他</div>
-    <div class="lg-r"><i class="lg-d c-ent"></i>实体骨架</div>
-    <div class="lg-r"><i class="lg-d c-fade"></i>已褪色</div>
-    <div class="lg-r"><i class="lg-d c-ring"></i>合并过</div>
+<!-- ═══ 顶栏 ═══ -->
+<div id="top">
+  <span class="brand">J.A.R.V.I.S</span>
+  <span class="st st-idle" id="state">待命</span>
+  <canvas id="wave"></canvas>
+  <!-- 指标块：全部由 app.js 从 /api/status 与星图实测填充。
+       占位一律写 "—" 而不是好看的假数字 ——
+       写 408/1045/63MB 这类编造值，接口一挂就会以假乱真地继续显示。 -->
+  <div class="metrics">
+    <div class="mt"><span class="k">CLUSTER</span><span class="v" id="mesh">—<small>节点</small></span></div>
+    <div class="mt"><span class="k">EDGES</span><span class="v" id="mtEdges">—</span></div>
+    <div class="mt"><span class="k">MEM</span><span class="v" id="mtMem">—<small>条</small></span></div>
+    <div class="mt"><span class="k">ENTITY</span><span class="v" id="mtEnt">—</span></div>
+    <div class="mt"><span class="k">TOKENS</span><span class="v" id="mtTok">—</span></div>
+    <div class="mt"><span class="k">CALLS</span><span class="v" id="mtCalls">—</span></div>
+  </div>
+  <span id="model">MODEL ONLINE</span>
+  <span class="sp"></span>
+  <span id="srcs" title="数据源状态"><i class="s ok"></i><i class="s ok"></i><i class="s ok"></i></span>
+  <span class="m" id="meta">—</span>
+  <!-- 顶栏汉堡按钮（≤900px 显示）：#srcs 硬纪律要求绝对可见，
+       6 指标 + #model + #meta 收进右侧浮层 #tbmenuPanel。
+       结构与 #ops 同构（i×3 横条 + aria-expanded + click-outside/Esc 关） -->
+  <button id="tbmenu" type="button" aria-label="展开顶栏信息" aria-expanded="false" aria-controls="tbmenuPanel">
+    <i></i><i></i><i></i>
+  </button>
+</div>
+
+<!-- ═══ 顶栏浮层面板（#tbmenu 展开用，≤900px 生效）═══
+     内容由 JS 在打开时从 live DOM 克隆一次（sync 函数），
+     不做持续同步——顶栏数据是慢变量，每次点开重取更简单。
+     面板不写死数值，占位一律用 em-dash 与主栏同源，避免假数据。 -->
+<div id="tbmenuPanel" role="menu" aria-hidden="true">
+  <div class="tbm-model" id="tbmModel">MODEL ONLINE</div>
+  <div class="tbm-grid">
+    <div class="tbm-cell"><span class="k">CLUSTER</span><span class="v" id="tbmMesh">—<small>节点</small></span></div>
+    <div class="tbm-cell"><span class="k">EDGES</span><span class="v" id="tbmEdges">—</span></div>
+    <div class="tbm-cell"><span class="k">MEM</span><span class="v" id="tbmMem">—<small>条</small></span></div>
+    <div class="tbm-cell"><span class="k">ENTITY</span><span class="v" id="tbmEnt">—</span></div>
+    <div class="tbm-cell"><span class="k">TOKENS</span><span class="v" id="tbmTok">—</span></div>
+    <div class="tbm-cell"><span class="k">CALLS</span><span class="v" id="tbmCalls">—</span></div>
+  </div>
+  <div class="tbm-meta" id="tbmMeta">—</div>
+</div>
+
+<!-- ═══ 预警横幅 ═══ -->
+<div id="srcbanner" role="status" aria-live="assertive">
+  <i class="sb-dot"></i><span id="srcbanner-txt"></span><span class="sb-time" id="srcbanner-time"></span>
+</div>
+
+<!-- ═══ 主区三栏 ═══ -->
+<div id="main">
+
+  <!-- ── 左栏 ── -->
+  <div id="pl">
+    <!-- 大盘定时机：缠论生命阶段 + 散户崩溃冰点（未标定·仅供观察） -->
+    <section class="panel" data-panel="marketphase">
+      <div class="ph">大盘定时机 <span class="en">MARKET PHASE</span> <span id="mpTime" class="scan-time"></span><span class="fold">▾</span></div>
+      <div class="pb" id="mpbox"><div class="empty">读取中…</div></div>
+    </section>
+    <!-- 板块定方向：指数判时机 + 主线板块扫描（盯盘主场） -->
+    <section class="panel" data-panel="closescan">
+      <div class="ph">板块定方向 <span class="en">MAINLINE</span> <span id="scanTime" class="scan-time"></span><span class="fold">▾</span></div>
+      <div class="pb" id="scanbox"><div class="empty">读取中…</div></div>
+    </section>
+
+    <section class="panel" data-panel="galaxies">
+      <div class="ph">五星系 <span class="en">GALAXIES</span><span class="fold">▾</span></div>
+      <div class="pb" id="galaxies"><div class="empty">还没有记忆。<br>说点什么，我会开始记住。</div></div>
+    </section>
+
+    <section class="panel" data-panel="mind">
+      <div class="ph">意识状态 <span class="en">MIND</span> <span id="mood"></span><span class="fold">▾</span></div>
+      <div class="pb" id="mindbox"></div>
+    </section>
+
+    <section class="panel" data-panel="tools">
+      <div class="ph">工具状态 <span class="en">TOOLS</span><span class="fold">▾</span></div>
+      <div class="pb" id="toolbox"><div class="empty">读取中…</div></div>
+    </section>
+
+    <section class="panel" data-panel="tasks">
+      <div class="ph">任务队列 <span class="en">TASK QUEUE</span><span class="fold">▾</span></div>
+      <div class="pb" id="taskbox"><div class="empty">读取中…</div></div>
+    </section>
+  </div>
+
+  <!-- ── 中央：星图 + 聊天区 ── -->
+  <div id="center">
+    <div id="stage">
+      <canvas id="graph" aria-label="星图：点击节点查看记忆详情"></canvas>
+      <div id="gl-fallback" aria-hidden="true">
+        <div class="glf-ring glf-r1"></div>
+        <div class="glf-ring glf-r2"></div>
+        <div class="glf-core"></div>
+        <div class="glf-note">3D 记忆星图需要 WebGL2<br>当前环境使用静态示意，功能（对话/记忆）不受影响</div>
+      </div>
+      <div id="hud">
+        <span class="hud-m h1">NODES —</span>
+        <span class="hud-m h2">EDGES —</span>
+        <span class="hud-m h3">ACTIVE —</span>
+      </div>
+      <div id="legend">
+        <div class="lg-t">记忆类别</div>
+        <div class="lg-r"><i class="lg-d c-person"></i>人物</div>
+        <div class="lg-r"><i class="lg-d c-project"></i>项目</div>
+        <div class="lg-r"><i class="lg-d c-interest"></i>兴趣</div>
+        <div class="lg-r"><i class="lg-d c-place"></i>地点</div>
+        <div class="lg-r"><i class="lg-d c-event"></i>事件</div>
+        <div class="lg-t" style="margin-top:6px">其他</div>
+        <div class="lg-r"><i class="lg-d c-ent"></i>实体骨架</div>
+        <div class="lg-r"><i class="lg-d c-fade"></i>已褪色</div>
+        <div class="lg-r"><i class="lg-d c-ring"></i>合并过</div>
+      </div>
+      <div id="ops">
+        <button id="ops-toggle" type="button" aria-expanded="false" title="运维 / 调试">⋯ 运维</button>
+        <div id="ops-menu">
+          <button>切换执行模式</button><button>重启</button><button>重置记忆</button>
+          <button>检定记忆</button><button>检查渠道</button><button>预览</button>
+          <button>检查</button><button>执行</button>
+        </div>
+      </div>
+      <div id="doing" aria-live="polite"></div>
+      <canvas id="voiceline" aria-hidden="true"></canvas>
+      <canvas id="fountain" aria-hidden="true"></canvas>
+      <!-- 语音晶核（融合形态）：独立 WebGL2 overlay，右下角，不拦截鼠标 -->
+      <div id="voicecore" aria-hidden="true">
+        <canvas id="voicecore-canvas"></canvas>
+      </div>
+    </div>
+
+    <div id="chat" aria-live="polite" aria-atomic="false"></div>
+  </div>
+
+  <!-- ── 右栏 ── -->
+  <div id="pr">
+    <!-- 龙头个股：主线板块的领涨股（盯盘主场右半，与左栏板块分离） -->
+    <section class="panel" data-panel="leaders">
+      <div class="ph">龙头个股 <span class="en">LEADERS</span> <span id="leaderTime" class="scan-time"></span><span class="fold">▾</span></div>
+      <div class="pb" id="leaderbox"><div class="empty">读取中…</div></div>
+    </section>
+
+    <section class="panel" data-panel="recall">
+      <div class="ph">本轮召回 <span class="en">RECALL</span><span class="fold">▾</span></div>
+      <div class="pb" id="recall"><div class="empty">尚无检索</div></div>
+    </section>
+
+    <section class="panel" data-panel="hist">
+      <div class="ph">检索历史 <span class="fold">▾</span></div>
+      <div class="pb" id="history">
+        <div class="empty">更多历史待展开</div>
+      </div>
+    </section>
+
+    <section class="panel" data-panel="log">
+      <div class="ph">系统日志 <span class="en">LOG</span><span class="fold">▾</span></div>
+      <div class="pb" id="log">
+        <div class="empty">等待系统启动…</div>
+      </div>
+    </section>
+
+    <section class="panel" data-panel="telemetry">
+      <div class="ph">系统遥测 <span class="en">TELEMETRY</span><span class="fold">▾</span></div>
+      <div class="pb viz">
+        <div class="vt"><b>◉</b> 节点球 · GLOBE</div>
+        <canvas id="globe" aria-hidden="true"></canvas>
+        <div class="vt"><b>◉</b> 雷达 · RADAR <span class="vat" id="radar-stat">…</span></div>
+        <canvas id="radar" aria-hidden="true"></canvas>
+        <div class="vt"><b>◉</b> 活跃度 · ENERGY <span class="vat" id="spark-stat">—</span></div>
+        <canvas id="spark" aria-hidden="true"></canvas>
+      </div>
+    </section>
   </div>
 </div>
 
-<!-- 记忆详情卡：点击星图节点时弹出。
-     用悬浮卡而不是固定面板，因为左右两栏已经占满，
-     再加固定面板会把星图挤成一条缝。 -->
-<div id="memcard">
+<!-- ═══ 记忆详情卡 ═══ -->
+<div id="memcard" role="dialog" aria-modal="true" aria-labelledby="mc-cat">
   <div class="mc-h">
     <span class="mc-cat" id="mc-cat">—</span>
     <span class="mc-id" id="mc-id"></span>
-    <span class="mc-x" id="mc-x">✕</span>
+    <span class="mc-x" id="mc-x" role="button" tabindex="0" aria-label="关闭">✕</span>
   </div>
   <div class="mc-body" id="mc-body"></div>
 </div>
 
-<div id="top">
-  <span class="brand">J.A.R.V.I.S</span>
-  <span class="st" id="state">IDLE</span>
-  <canvas id="wave"></canvas>
-  <span class="sp"></span>
-  <span class="m" id="mesh">CLUSTER</span>
-  <!-- 数据源健康灯：3 个关键源的状态原来界面上完全看不到，
-       东财被封（实测会 socket hang up）时用户毫无察觉，
-       只会觉得"贾维斯今天答得不对"。 -->
-  <span class="srcs" id="srcs" title="数据源状态"></span>
-  <span class="m" id="meta">—</span>
+<!-- 左下角设置入口。
+     必须放在 #pl 之外：#pl 是 overflow-y:auto 的滚动列，
+     按钮放里面会被面板挤到视口外，不滚动就看不见（实测踩过）。 -->
+<button id="btnSettings" title="设置（模型接入、技能、语音）">⚙ 设置</button>
+
+<!-- ═══ 设置弹窗 ═══ -->
+<div id="setmask" role="dialog" aria-modal="true" aria-label="设置">
+  <div id="setwin">
+    <div class="set-hd">
+      <span>设置</span>
+      <button id="setClose" title="关闭">✕</button>
+    </div>
+    <div class="set-tabs">
+      <button class="st-tab on" data-tab="llm">模型接入</button>
+      <button class="st-tab" data-tab="skills">技能 / 工具</button>
+      <button class="st-tab" data-tab="tasks">巡视任务</button>
+      <button class="st-tab" data-tab="about">关于</button>
+    </div>
+
+    <!-- ── 模型接入 ── -->
+    <div class="set-pane on" data-pane="llm">
+      <div class="set-note">
+        换了 API Key 就在这里改，保存后<b>立即生效，不用重启</b>。
+        密钥只写入本机 <code>.env</code>，不上传、不写日志、界面只显示掩码。
+      </div>
+
+      <label class="set-f"><span>快速填充</span>
+        <select id="setPreset"><option value="">— 选择接入预设 —</option></select>
+      </label>
+      <div class="set-hint" id="setPresetNote"></div>
+
+      <label class="set-f"><span>API Key</span>
+        <input id="setKey" type="password" placeholder="留空表示不修改（当前已配置）" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="set-hint" id="setKeyNow"></div>
+
+      <label class="set-f"><span>接口地址</span>
+        <input id="setBase" placeholder="https://ark.cn-beijing.volces.com/api/plan/v3" spellcheck="false">
+      </label>
+      <label class="set-f"><span>对话模型</span>
+        <input id="setModel" placeholder="ark-code-latest" spellcheck="false">
+      </label>
+      <label class="set-f"><span>向量模型</span>
+        <input id="setEmbed" placeholder="doubao-embedding-vision" spellcheck="false">
+      </label>
+      <div class="set-hint">向量模型用于记忆检索。留空或不支持时，记忆会退化为关键词匹配。</div>
+
+      <div class="set-actions">
+        <button id="setTest" class="btn-ghost">测试连接</button>
+        <button id="setSave" class="btn-main">保存并生效</button>
+      </div>
+      <div id="setMsg" class="set-msg"></div>
+    </div>
+
+    <!-- ── 技能 / 工具 ── -->
+    <div class="set-pane" data-pane="skills">
+      <div class="set-note">贾维斯当前可调用的工具（由后端注册表实时读取）。</div>
+      <div id="setTools" class="set-list"><div class="empty">读取中…</div></div>
+    </div>
+
+    <!-- ── 巡视任务 ── -->
+    <div class="set-pane" data-pane="tasks">
+      <div class="set-note">后台巡视任务与冷却状态。冷却中表示还没到下次可执行时间。</div>
+      <div id="setTasks" class="set-list"><div class="empty">读取中…</div></div>
+    </div>
+
+    <!-- ── 关于 ── -->
+    <div class="set-pane" data-pane="about">
+      <div class="set-note">
+        <p style="margin:0 0 8px">核心方法论：<b>用大盘来定买卖时机，版块定方向</b>。</p>
+        <p style="margin:0 0 8px">数据来源全部为公开行情接口；预警仅供观察，不构成买卖建议。</p>
+        <p style="margin:0">配置文件：<code>.env</code>（保存时自动备份为 <code>.env.bak</code>）</p>
+      </div>
+      <div id="setAbout" class="set-list"></div>
+    </div>
+  </div>
 </div>
 
-<div class="panel" id="pl">
-  <div class="ph">五星系 · GALAXIES</div>
-  <div class="pb" id="galaxies"></div>
-  <div class="ph" style="border-top:1px solid var(--line)">意识状态 · MIND <span id="mood"></span></div>
-  <div id="mindbox"></div>
-</div>
-
-<div id="chat"></div>
-<div id="doing"></div>
-
-<div class="panel" id="pr">
-  <div class="ph">本轮召回 · RECALL</div>
-  <div class="pb" id="recall"><div class="empty">尚无检索</div></div>
-</div>
-
+<!-- ═══ 底部栏 ═══ -->
 <div id="bottom">
-  <button id="mic" title="语音输入（唤醒词：贾维斯）">🎙</button>
-  <input id="inp" placeholder="对贾维斯说…（Enter 发送）" autocomplete="off">
-  <button id="spk" title="朗读回复">🔊</button>
-  <button id="send">发送</button>
+  <!-- 快捷指令只填输入框，不自动发送 ——
+       原来带 send.click() 会一键直发，与「未经批准不推送、不自动执行」相抵触；
+       而且误触即触发一轮真实工具调用。改为填入后由用户自己按发送。 -->
+  <div class="chips">
+    <button onclick="var i=document.getElementById('inp');i.value='扫描大盘';i.focus()">扫描大盘</button>
+    <button onclick="var i=document.getElementById('inp');i.value='资金流';i.focus()">资金流</button>
+    <button onclick="var i=document.getElementById('inp');i.value='生成周报';i.focus()">生成周报</button>
+    <button onclick="var i=document.getElementById('inp');i.value='数据源体检';i.focus()">数据源体检</button>
+  </div>
+  <div class="inprow">
+    <button id="mic" title="语音输入（唤醒词：贾维斯）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2.5" width="6" height="11.5" rx="3"/><path d="M5 11.5a7 7 0 0 0 14 0"/><path d="M12 18.5v3"/></svg></button>
+    <button id="spk" title="朗读回复"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9.5h3l5-4v13l-5-4H4z"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a8.5 8.5 0 0 1 0 12"/></svg></button>
+    <input id="inp" placeholder="对贾维斯说…（Enter 发送）" autocomplete="off">
+    <button id="send">发送</button>
+  </div>
 </div>
+
+<!-- ═══ 无后端提示 ═══ -->
+<div id="backend-tip">
+  <div class="tip-box">
+    <h3>J.A.R.V.I.S 未连接</h3>
+    <p>后端服务未启动，无法获取记忆星图与对话数据。<br>请在项目目录下运行：</p>
+    <code>node src/server.js</code>
+    <div class="sub">启动后刷新本页面即可</div>
+  </div>
+</div>
+
+<script>
+/* ── 面板折叠：点击头部折叠/展开，状态持久化到 localStorage ── */
+(function () {
+  'use strict';
+  const KEY = 'jarvis_layout_folded';
+  /* 盯盘主场定位：这几个面板日常不看，默认折叠成一行标题。
+   * 用户手动展开过（localStorage 有记录）则尊重用户选择。 */
+  const DEFAULT_FOLDED = ['galaxies', 'tools', 'tasks'];
+  let state = {};
+  try { state = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) {}
+  document.querySelectorAll('.panel').forEach(function (p) {
+    const id = p.dataset.panel;
+    /* 默认折叠：仅当 localStorage 从未记录过该面板时折叠；
+     * 一旦用户点过（无论展开或折叠），就以用户选择为准。 */
+    if (id && DEFAULT_FOLDED.indexOf(id) >= 0 && !(id in state)) {
+      p.classList.add('collapsed');
+    } else if (id && state[id]) {
+      p.classList.add('collapsed');
+    }
+    const ph = p.querySelector('.ph');
+    if (!ph) return;
+    ph.addEventListener('click', function () {
+      p.classList.toggle('collapsed');
+      if (id) {
+        if (p.classList.contains('collapsed')) state[id] = 1;
+        else delete state[id];
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+      }
+    });
+  });
+})();
+</script>
+<script>
+/* ── 收盘扫描面板：指数判时机 → 板块定方向 → 龙头选个股 ──
+ *
+ * 数据来自 /api/closescan（close_scan.scan 的结构化字段）。
+ * 交易日盘后每 5 分钟自动刷新；非交易时段显示上次数据 + 时点。
+ * 全程如实呈现 staleWarning / 覆盖率 / 错误，不美化、不编造。 */
+(function () {
+  'use strict';
+  const box = document.getElementById('scanbox');
+  const timeEl = document.getElementById('scanTime');
+  if (!box) return;
+
+  const STANCE_CLS = { 积极: 'tim-pos', 中性: 'tim-mid', 谨慎: 'tim-neg', 防守: 'tim-def' };
+  const G2CLS = g => g === '主线候选' ? 'b-main'
+    : (g && g.indexOf('情绪') >= 0) ? 'b-emo'
+    : g === '强势板块' ? 'b-strong' : 'b-watch';
+  const G2TXT = g => g === '主线候选' ? '主线'
+    : (g && g.indexOf('情绪') >= 0) ? '情绪盘' : (g || '');
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const num = (v, d = 1) => (v == null || isNaN(v)) ? '—' : (+v).toFixed(d);
+  const pct = v => (v == null || isNaN(v)) ? '—' : (v >= 0 ? '▲ +' : '▼ ') + (+v).toFixed(2) + '%';
+
+  function render(d) {
+    if (!d || d.ok === false) {
+      box.innerHTML = '<div class="scan-err">⚠ 收盘扫描暂不可用<br>' + esc(d && d.error || '未知错误')
+        + '<br><span style="color:var(--faint);font-size:10px">数据源可能受限，稍后再试或在对话中让我手动扫描</span></div>';
+      return;
+    }
+    const secs = d.sectors || [];
+    const maxF = Math.max(1, ...secs.map(s => Math.abs(s.d10Yi || 0)));
+    let h = '';
+
+    /* 时点警告（顶格） */
+    if (d.staleWarning) h += '<div class="scan-warn">⚠ ' + esc(d.staleWarning) + '</div>';
+    else if (d.coverageComplete === false) h += '<div class="scan-warn">⚠ 板块未抓全，可能漏掉低位启动的主线</div>';
+
+    /* ① 指数判时机 */
+    if (d.timing) {
+      const t = d.timing;
+      h += '<div class="scan-sec">'
+        + '<div class="tim-stance ' + (STANCE_CLS[t.stance] || 'tim-mid') + '">' + esc(t.stance) + '</div>'
+        + '<div class="tim-reason">' + esc(t.reason) + '</div>'
+        + '<div class="tim-idx">' + (t.detail || []).map(x =>
+          '<span style="color:' + (x.pct >= 0 ? 'var(--up-text)' : 'var(--down-text)') + '">'
+          + esc(x.name) + ' ' + pct(x.pct) + '</span>').join('') + '</div>'
+        + '</div>';
+    }
+
+    /* ② 板块卡（含龙头） */
+    if (!secs.length) {
+      h += '<div class="scan-off">今日暂无板块数据<br>交易日收盘后自动更新</div>';
+    }
+    secs.forEach((s, i) => {
+      h += '<div class="scard" data-i="' + i + '">'
+        + '<div class="hd"><span class="rk">' + (i + 1) + '</span>'
+        + '<span class="nm">' + esc(s.name) + '</span>'
+        + '<span class="kd">' + (s.kind === 'concept' ? '概念' : '行业') + '</span>'
+        + '<span class="badge ' + G2CLS(s.grade) + '">' + esc(G2TXT(s.grade)) + '</span></div>'
+        + '<div class="sc"><div class="scbar"><i style="width:' + Math.min(100, s.score || 0) + '%"></i></div>'
+        + '<span class="scnum">' + (s.score || 0) + '</span></div>'
+        + '<div class="fl">'
+        + flowBar('f10', '10日', s.d10Yi, maxF, s.d10Yi < 0)
+        + flowBar('f5', '5日', s.d5Yi, maxF, s.d5Yi < 0)
+        + flowBar('f1', '今日', s.todayYi, maxF, s.todayYi < 0)
+        + '</div>'
+        /* 展开依据 */
+        + '<div class="det"><ul class="rsn">' + (s.reasons || []).map(r => '<li>' + esc(r) + '</li>').join('') + '</ul></div>'
+        + '</div>';
+    });
+    box.innerHTML = h;
+
+    /* 卡片点击展开依据 */
+    box.querySelectorAll('.scard .hd').forEach(hd => hd.addEventListener('click', () => {
+      hd.closest('.scard').classList.toggle('open');
+    }));
+    /* 板块卡数据共享给龙头面板渲染 */
+    if (window.__renderLeaders) window.__renderLeaders(d);
+  }
+
+  function flowBar(cls, label, val, max, neg) {
+    /* 中轴制：条宽最多占半轨（48%），从中轴向所在一侧延伸。
+       正数显式补 + 号 —— 与「位置左右」「色相青/灰蓝」构成三条独立通道，
+       任一条单独失效（色弱、灰度截图）仍能读出方向。 */
+    const w = Math.min(48, Math.abs(val || 0) / max * 48);
+    const sign = val > 0 ? '+' : '';
+    return '<div class="f ' + cls + (neg ? ' f-neg' : ' f-pos') + '">'
+      + '<div class="fl-l"><span>' + label + '</span><span>' + sign + num(val) + '亿</span></div>'
+      + '<div class="fb"><i style="width:' + w + '%"></i></div></div>';
+  }
+
+  /* 龙头点击 → 触发对话查询（若聊天输入框存在则填入） */
+  function askAbout(name, code) {
+    const inp = document.getElementById('inp');
+    if (inp) {
+      inp.value = name + '(' + code + ') 现在怎么样';
+      inp.focus();
+      if (typeof inp.dispatchEvent === 'function') inp.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+
+  /* 刷新：盘后 5 分钟一次，否则 30 分钟一次（非交易时段数据不变得不空转） */
+  let timer = null;
+  async function refresh() {
+    try {
+      const r = await fetch('/api/closescan?topN=8');
+      const d = await r.json();
+      render(d);
+      if (d.dataTime && timeEl) timeEl.textContent = d.dataTime;
+      const now = new Date();
+      const afterClose = now.getDay() >= 1 && now.getDay() <= 5 && now.getHours() >= 15;
+      timer = setTimeout(refresh, afterClose ? 5 * 60e3 : 30 * 60e3);
+    } catch (e) {
+      box.innerHTML = '<div class="scan-err">⚠ 无法连接服务<br><span style="color:var(--faint);font-size:10px">' + esc(e.message) + '</span></div>';
+      timer = setTimeout(refresh, 60e3);
+    }
+  }
+  refresh();
+})();
+</script>
+<script>
+/* ── 大盘定时机面板：缠论生命阶段 + 散户崩溃冰点 ──
+ * 数据来自 /api/market_phase（market_phase.assess 结构化字段）。
+ * 交易时段每 5 分钟刷新，非交易时段 30 分钟。
+ * 诚实口径：画法/阈值均未标定，卡片顶格标注"仅供观察"，绝不出现"可以买"。 */
+(function () {
+  'use strict';
+  const box = document.getElementById('mpbox');
+  const timeEl = document.getElementById('mpTime');
+  if (!box) return;
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  const PHASE_CLS = { 退潮期: 'tim-neg', 磨底期: 'tim-def', 筑底期: 'tim-mid', 启动期: 'tim-pos', 主升期: 'tim-pos', 高位震荡期: 'tim-mid' };
+  const FEAR_STYLE = {
+    extreme: { c: '#ff5b5b', t: '极端恐慌 · 左侧' },
+    normal:  { c: '#ff9f1c', t: '恐慌冰点 · 值得关注' },
+    watch:   { c: '#c792ea', t: '恐慌共振 · 只观察' },
+    none:    { c: 'var(--dim)', t: '无崩溃共振' },
+    unknown: { c: 'var(--faint)', t: '冰点无法判断' },
+  };
+
+  const TREND_TXT = { up: '上涨', down: '下跌', range: '震荡' };
+  function render(d) {
+    if (!d || d.ok === false) {
+      box.innerHTML = '<div class="scan-err">⚠ 大盘状态暂不可用<br><span style="color:var(--faint);font-size:10px">' + esc(d && d.error || '未知错误') + '</span></div>';
+      return;
+    }
+    let h = '<div class="mp-sec">';
+    h += '<div class="mp-phase ' + (PHASE_CLS[d.phase] || 'tim-def') + '">' + esc(d.phase === 'unknown' ? '待定' : d.phase) + '</div>';
+    const lv = d.chan && d.chan.levels && d.chan.levels.day;
+    if (lv) {
+      const posTxt = { above: '运行在中枢上方', below: '已跌到中枢下方', inside: '在中枢里来回' }[lv.pricePos] || '位置待定';
+      h += '<div class="mp-struc" style="font-family:inherit">' + esc(TREND_TXT[lv.trend] || '趋势待定') + ' · ' + posTxt
+        + '<br>笔 ' + (lv.strokeCount != null ? lv.strokeCount : '—')
+        + ' · 中枢 ' + (lv.segZoneCount != null ? lv.segZoneCount : '—')
+        + ' · 买卖点 ' + lv.pointCount + ' · 背驰 ' + lv.divergenceCount + '</div>';
+    }
+    if (d.chan && d.chan.reason) {
+      h += '<div class="mp-struc" style="font-family:inherit;color:var(--faint)">' + esc(d.chan.reason) + '</div>';
+    }
+    h += '</div>';
+
+    /* 散户情绪（冰点）：用人话解释，尤其在基准没攒够时 */
+    const f = d.fear;
+    h += '<div class="mp-sec">';
+    const need = 15;
+    if (!f || f.tier === 'unknown') {
+      const n = (f && f.sampleN) || 0;
+      h += '<div class="mp-fear"><span class="mp-dot" style="background:var(--faint)"></span>'
+        + '<span style="color:var(--dim)">情绪基准还在攒，先不下结论</span></div>';
+      h += '<div class="mp-note" style="margin-top:6px">判断"散户是否恐慌到极点"，要先知道平时的跌停数、炸板率大概多少，'
+        + '再拿今天去比。系统正在每个交易日自动攒这个基准，已攒 <b style="color:var(--dim)">' + n + '/' + need + '</b> 天；'
+        + '攒够 ' + need + ' 个交易日后这里才会给出冰点提示。现在看到今天数据也不当作"没事"，只是还没有比较的尺子。</div>';
+    } else {
+      const st = FEAR_STYLE[f.tier] || { c: 'var(--dim)', t: f.label };
+      h += '<div class="mp-fear"><span class="mp-dot" style="background:' + st.c + '"></span>'
+        + '<span style="color:' + st.c + '">' + esc(st.t) + '</span></div>';
+      h += '<div class="mp-ings">' + f.ingredients.map(i =>
+        '<span class="mp-ing ' + (i.unknown ? 'unk' : i.hit ? 'hit' : '') + '" title="' + esc(i.detail || '') + '">'
+        + (i.hit ? '●' : '○') + ' ' + esc(i.name) + '</span>').join('') + '</div>';
+      if (f.oversold && f.oversold.detail) h += '<div class="mp-struc" style="font-family:inherit;margin-top:5px">超跌参考：' + esc(f.oversold.detail) + '</div>';
+      if (f.reason) h += '<div class="mp-note" style="margin-top:6px">' + esc(f.reason) + '</div>';
+    }
+    const tech = d.shTechnical;
+    if (tech && tech.rsi14 != null) {
+      h += '<div class="mp-struc" style="font-family:inherit;margin-top:7px">上证 ' + num(tech.close, 0)
+        + ' · RSI14 ' + num(tech.rsi14, 1)
+        + ' · 价格在MA20' + (tech.aboveMa20 === true ? '上方' : tech.aboveMa20 === false ? '下方' : '附近') + '</div>';
+    }
+    h += '<div class="mp-note">结构信号与情绪冰点都还在观察期（未标定），只提示"值得关注"，不是买入建议。</div>';
+    h += '</div>';
+    box.innerHTML = h;
+  }
+  function num(v, d) { return (v == null || isNaN(v)) ? '—' : (+v).toFixed(d == null ? 1 : d); }
+
+  let timer = null;
+  async function refresh() {
+    try {
+      const r = await fetch('/api/market_phase');
+      render(await r.json());
+      if (timeEl) timeEl.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      const now = new Date();
+      const trading = now.getDay() >= 1 && now.getDay() <= 5 && now.getHours() >= 9 && now.getHours() < 15;
+      timer = setTimeout(refresh, trading ? 5 * 60e3 : 30 * 60e3);
+    } catch (e) {
+      box.innerHTML = '<div class="scan-err">⚠ 无法连接服务<br><span style="color:var(--faint);font-size:10px">' + esc(e.message) + '</span></div>';
+      timer = setTimeout(refresh, 60e3);
+    }
+  }
+  refresh();
+})();
+</script>
+<script>
+/* ── 龙头个股面板（右栏）：主线板块的领涨股 ──
+ * 数据与左栏板块面板同一份（window.__renderLeaders 由板块渲染处回调），
+ * 物理上与板块分离：左=定方向，右=选个股。 */
+(function () {
+  'use strict';
+  const box = document.getElementById('leaderbox');
+  const timeEl = document.getElementById('leaderTime');
+  if (!box) return;
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const pct = v => (v == null || isNaN(v)) ? '—' : (v >= 0 ? '▲ +' : '▼ ') + (+v).toFixed(2) + '%';
+
+  /* 由左栏板块渲染处回调（同一份 close_scan 数据） */
+  window.__renderLeaders = function (d) {
+    const secs = (d && d.sectors) || [];
+    if (!secs.length) {
+      box.innerHTML = '<div class="scan-off">今日暂无龙头数据<br>随板块扫描更新</div>';
+      return;
+    }
+    let h = '';
+    secs.forEach((s, i) => {
+      const lpCls = (s.leaderPct >= 9.8) ? 'lp-limit' : (s.leaderPct >= 0 ? 'lp-up' : 'lp-dn');
+      h += '<div class="lrow" data-code="' + esc(s.leaderCode || '') + '" data-name="' + esc(s.leader || '') + '">'
+        + '<div class="lsec">' + esc(s.name) + '</div>'
+        + '<div class="lmain"><div class="lname">' + esc(s.leader || '—') + '</div>'
+        + '<div class="lcode">' + esc(s.leaderCode || '') + '</div></div>'
+        + '<div class="lpct ' + lpCls + '">' + pct(s.leaderPct)
+        + (s.leaderPct >= 9.8 ? '<span class="limtag">涨停</span>' : '') + '</div>'
+        + '</div>';
+    });
+    box.innerHTML = h;
+    if (d.dataTime && timeEl) timeEl.textContent = d.dataTime;
+    /* 点击龙头 → 填入对话查询 */
+    box.querySelectorAll('.lrow').forEach(row => row.addEventListener('click', () => {
+      const name = row.dataset.name, code = row.dataset.code;
+      const inp = document.getElementById('inp');
+      if (inp && code) {
+        inp.value = name + '(' + code + ') 现在怎么样';
+        inp.focus();
+        if (typeof inp.dispatchEvent === 'function') inp.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }));
+  };
+})();
+</script>
+<script>
+/* ── 无后端检测：3 秒后若聊天区与星系都为空，提示启动服务端 ── */
+(function () {
+  'use strict';
+  setTimeout(function () {
+    var chat = document.getElementById('chat');
+    var gal = document.getElementById('galaxies');
+    var tip = document.getElementById('backend-tip');
+    if (!tip) return;
+    var chatEmpty = !chat || chat.children.length === 0;
+    var galEmpty = !gal || gal.querySelector('.empty');
+    if (chatEmpty && galEmpty) {
+      tip.classList.add('show');
+    }
+  }, 3500);
+})();
+</script>
 
 <script src="/pickmath.js"></script>
+<script src="/starplus.js"></script>
+<script src="/markdown.js"></script>
+<script src="/animgate.js"></script>
 <script src="/starfield.js"></script>
+<script src="/voicecore.js"></script>
 <script src="/app.js"></script>
+<script>
+/* 运维按钮抽屉：默认收起，只在需要时展开；点外部或 Esc 关闭 */
+(function(){
+  var ops=document.getElementById('ops'), t=document.getElementById('ops-toggle');
+  if(!ops||!t) return;
+  t.addEventListener('click',function(e){
+    e.stopPropagation();
+    var open=ops.classList.toggle('open');
+    t.setAttribute('aria-expanded',open?'true':'false');
+  });
+  document.addEventListener('click',function(e){ if(!ops.contains(e.target)) ops.classList.remove('open'); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape') ops.classList.remove('open'); });
+})();
+
+/* 顶栏汉堡菜单（≤900px 显示，DESIGN.md §8 #8 / §13 B4 方案①）：
+   窄屏把 6 指标 + #model + #meta 收进右侧浮层 #tbmenuPanel，
+   确保 #srcs 数据源灯在窄屏绝对可见（硬纪律：数据源降级必须显性化）。
+   与 #ops 同构：click 外部 / Esc / 再次点击关。
+   面板内容在打开时从 live DOM 克隆一次，不做持续同步——顶栏是慢变量，
+   每次点开重取更简单，也避免为面板额外维护同步钩子。 */
+(function(){
+  var btn=document.getElementById('tbmenu'), panel=document.getElementById('tbmenuPanel');
+  if(!btn||!panel) return;
+  /* 主栏 → 面板字段映射；顺序即视觉顺序，便于后续扩项 */
+  var MAP=[
+    ['mesh','tbmMesh'], ['mtEdges','tbmEdges'], ['mtMem','tbmMem'],
+    ['mtEnt','tbmEnt'], ['mtTok','tbmTok'], ['mtCalls','tbmCalls']
+  ];
+  function sync(){
+    MAP.forEach(function(pair){
+      var s=document.getElementById(pair[0]), d=document.getElementById(pair[1]);
+      if(s&&d) d.innerHTML=s.innerHTML;
+    });
+    var model=document.getElementById('model'), m1=document.getElementById('tbmModel');
+    if(model&&m1) m1.textContent=model.textContent;
+    var meta=document.getElementById('meta'), m2=document.getElementById('tbmMeta');
+    if(meta&&m2) m2.textContent=meta.textContent;
+  }
+  function setOpen(open){
+    panel.classList.toggle('open',open);
+    panel.setAttribute('aria-hidden',open?'false':'true');
+    btn.setAttribute('aria-expanded',open?'true':'false');
+    if(open) sync();
+  }
+  btn.addEventListener('click',function(e){
+    e.stopPropagation();
+    setOpen(!panel.classList.contains('open'));
+  });
+  document.addEventListener('click',function(e){
+    if(!panel.contains(e.target)&&!btn.contains(e.target)) setOpen(false);
+  });
+  document.addEventListener('keydown',function(e){
+    if(e.key==='Escape') setOpen(false);
+  });
+})();
+</script>
 </body></html>

@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>语音动态 3D 形态 · 方案集</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#070b11; --panel:rgba(16,24,36,.72); --line:rgba(150,175,215,.16);
+    --txt:#eef3fa; --dim:#9aa8ba; --faint:#74808f;
+    --accent:#3fd0ff; --warm:#ff9f1c; --ok:#3fd48a;
+    --num:"SF Mono",Consolas,"Roboto Mono",monospace;
+  }
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--txt);overflow:hidden;
+    font:13.5px/1.6 "Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
+    background:radial-gradient(ellipse at 50% 42%,transparent 50%,rgba(0,0,0,.6) 100%)}
+  #brain{position:fixed;inset:0;z-index:0}
+
+  /* 舞台：右下，跟正式界面位置一致 */
+  #stage{position:fixed;right:46px;bottom:34px;width:300px;height:300px;z-index:6}
+  .form{position:absolute;inset:0;opacity:0;transition:opacity .25s}
+  .form.on{opacity:1}
+  .form canvas{width:100%;height:100%;display:block}
+  .cap{position:absolute;left:0;right:0;bottom:-4px;text-align:center;
+    font:10px/1 var(--num);letter-spacing:2px;color:var(--faint);white-space:nowrap}
+  .cap b{color:var(--dim);font-weight:600;letter-spacing:1px}
+  .statetag{position:absolute;left:2px;top:2px;font:10px/1 var(--num);letter-spacing:1px}
+  .meter{position:absolute;right:2px;top:2px;font:10px/1 var(--num);color:var(--accent)}
+
+  /* 控制面板 */
+  #panel{position:fixed;left:18px;top:18px;z-index:20;width:272px;max-height:calc(100vh - 36px);
+    overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 14px 12px;backdrop-filter:blur(8px)}
+  #panel h1{font-size:13.5px;letter-spacing:1px;margin-bottom:2px}
+  #panel .sub{font:9px/1.4 var(--num);color:var(--faint);letter-spacing:1px;margin-bottom:12px}
+  .row{margin:11px 0}
+  .row .t{font-size:11px;color:var(--dim);margin-bottom:6px;letter-spacing:.5px}
+  .seg{display:flex;gap:6px}
+  .seg.three button{flex:1}
+  .seg button{background:rgba(63,208,255,.06);border:1px solid var(--line);
+    color:var(--dim);font-size:11px;padding:6px 0;border-radius:6px;cursor:pointer;
+    font-family:inherit;transition:all .15s}
+  .seg button.on{background:rgba(63,208,255,.2);border-color:var(--accent);color:#fff}
+  .seg button:hover{border-color:var(--accent)}
+  /* 形态选择列表 */
+  #forms{display:flex;flex-direction:column;gap:6px}
+  #forms button{display:flex;align-items:center;gap:9px;text-align:left;width:100%;
+    background:rgba(63,208,255,.05);border:1px solid var(--line);color:var(--dim);
+    font-size:11.5px;padding:8px 9px;border-radius:7px;cursor:pointer;font-family:inherit;transition:all .15s}
+  #forms button.on{background:rgba(63,208,255,.18);border-color:var(--accent);color:#fff}
+  #forms button:hover{border-color:var(--accent)}
+  #forms .ic{width:22px;height:22px;flex:none}
+  #forms .nm{font-weight:600}
+  #forms .ds{display:block;font-size:9.5px;color:var(--faint);font-weight:400;margin-top:1px}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  #micbtn{width:100%;margin-top:4px;background:rgba(63,212,138,.08);
+    border:1px solid rgba(63,212,138,.3);color:var(--ok);font-size:11px;
+    padding:8px 0;border-radius:6px;cursor:pointer;font-family:inherit}
+  #micbtn.on{background:rgba(63,212,138,.2);border-color:var(--ok)}
+  .hint{font-size:10px;color:var(--faint);line-height:1.55;margin-top:10px;
+    border-top:1px solid var(--line);padding-top:9px}
+</style></head>
+<body>
+<canvas id="brain"></canvas>
+
+<div id="stage">
+  <div class="form" data-form="core"><canvas id="c-core"></canvas>
+    <div class="statetag" id="t-core"></div><div class="meter" id="m-core"></div>
+    <div class="cap"><b>声核·呼吸光球</b> · CORE</div></div>
+  <div class="form" data-form="ripple"><canvas id="c-ripple"></canvas>
+    <div class="statetag" id="t-ripple"></div><div class="meter" id="m-ripple"></div>
+    <div class="cap"><b>声波涟漪环</b> · RIPPLE</div></div>
+  <div class="form" data-form="crystal"><canvas id="c-crystal"></canvas>
+    <div class="statetag" id="t-crystal"></div><div class="meter" id="m-crystal"></div>
+    <div class="cap"><b>声纹晶体</b> · CRYSTAL</div></div>
+  <div class="form" data-form="bars"><canvas id="c-bars"></canvas>
+    <div class="statetag" id="t-bars"></div><div class="meter" id="m-bars"></div>
+    <div class="cap"><b>3D 频谱柱阵</b> · SPECTRUM</div></div>
+  <div class="form" data-form="wave"><canvas id="c-wave"></canvas>
+    <div class="statetag" id="t-wave"></div><div class="meter" id="m-wave"></div>
+    <div class="cap"><b>粒子声波环</b> · ORBITAL</div></div>
+  <div class="form on" data-form="fusion"><canvas id="c-fusion"></canvas>
+    <div class="statetag" id="t-fusion"></div><div class="meter" id="m-fusion"></div>
+    <div class="cap"><b>融合 · 晶核</b> · FUSION（1+3）</div></div>
+</div>
+
+<div id="panel">
+  <h1>语音动态形态 · 方案集</h1>
+  <div class="sub">VOICE FORMS — PICK ONE</div>
+
+  <div class="row">
+    <div class="t">形态 FORM（6 选 1，融合在最上）</div>
+    <div id="forms">
+      <button data-f="fusion" class="on"><canvas class="ic" id="ic-fusion"></canvas>
+        <span><span class="nm">融合 · 晶核（1+3）</span><span class="ds">内核晶体 + 外层声核粒子，静是晶体动是声核</span></span></button>
+      <button data-f="core"><canvas class="ic" id="ic-core"></canvas>
+        <span><span class="nm">声核·呼吸光球</span><span class="ds">粒子球随声压呼吸，最像"活的助手"</span></span></button>
+      <button data-f="ripple"><canvas class="ic" id="ic-ripple"></canvas>
+        <span><span class="nm">声波涟漪环</span><span class="ds">声浪向外扩散，在听/在说一眼可辨</span></span></button>
+      <button data-f="crystal"><canvas class="ic" id="ic-crystal"></canvas>
+        <span><span class="nm">声纹晶体</span><span class="ds">棱面随音翻转生长，最有科技感</span></span></button>
+      <button data-f="bars"><canvas class="ic" id="ic-bars"></canvas>
+        <span><span class="nm">3D 频谱柱阵</span><span class="ds">环形光柱起伏，专业仪表感</span></span></button>
+      <button data-f="wave"><canvas class="ic" id="ic-wave"></canvas>
+        <span><span class="nm">粒子声波环</span><span class="ds">声纹粒子沿轨道跳动，轻盈</span></span></button>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="t">状态 STATE</div>
+    <div class="seg three" id="stateseg">
+      <button data-s="idle" class="on">待命</button>
+      <button data-s="listen">聆听</button>
+      <button data-s="speak">说话</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="t">模拟音量 ENERGY</div>
+    <input type="range" id="energy" min="0" max="100" value="8">
+  </div>
+
+  <button id="micbtn">用真实麦克风驱动</button>
+
+  <div class="hint">
+    五个形态共用同一组真实数据：状态机（待命/聆听/说话）+ 麦克风声压。<br>
+    点「用真实麦克风驱动」可让它们跟着你实际说话动。选定后我再把它接进正式界面右下角。
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ════════════════════════════════════════════════════════════
+   语音动态形态方案集
+   统一驱动：state('idle'|'listen'|'speak') + energy(0..1 平滑)
+   每个 form 暴露 { frame(t,E,state,col) }，切换只改显隐与 active
+   ════════════════════════════════════════════════════════════ */
+const DPR = Math.min(devicePixelRatio||1, 2);
+const SZ = 300;                          // 舞台逻辑尺寸
+
+/* 三态配色（所有形态共用，保证语义一致） */
+const PALETTE = {
+  idle:  { a:[0.14,0.40,0.72], b:[0.30,0.60,1.00], glow:0.10 },
+  listen:{ a:[0.18,0.70,0.96], b:[0.55,0.93,1.00], glow:0.42 },
+  speak: { a:[0.18,0.88,0.55], b:[1.00,0.62,0.18], glow:0.95 },
+};
+function mix(a,b,k){return [a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k];}
+function rgb(c,a){return 'rgba('+(c[0]*255|0)+','+(c[1]*255|0)+','+(c[2]*255|0)+','+a+')';}
+
+let state='idle', targetE=0.08, E=0.08;
+let cA=PALETTE.idle.a.slice(), cB=PALETTE.idle.b.slice();
+
+/* ── 通用工具 ── */
+function setup2D(id){
+  const cv=document.getElementById(id), x=cv.getContext('2d');
+  cv.width=SZ*DPR; cv.height=SZ*DPR;
+  return {cv,x};
+}
+function getGL(id){
+  const cv=document.getElementById(id);
+  const gl=cv.getContext('webgl2',{antialias:true,alpha:true});
+  if(gl){cv.width=SZ*DPR;cv.height=SZ*DPR;gl.viewport(0,0,cv.width,cv.height);
+    gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);}
+  return {cv,gl};
+}
+function shader(gl,t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);return o;}
+function program(gl,v,f){const p=gl.createProgram();
+  gl.attachShader(p,shader(gl,gl.VERTEX_SHADER,v));
+  gl.attachShader(p,shader(gl,gl.FRAGMENT_SHADER,f));
+  gl.linkProgram(p);return p;}
+const POINT_V=`#version 300 es
+precision highp float;
+uniform float uTime,uEnergy,uSize,uPersp,uDPR;
+uniform vec3 uAxis; uniform float uSpread;
+in vec3 aPos; in float aSeed;
+out float vSeed; out float vDepth;
+mat4 rotAxis(vec3 ax,float a){float c=cos(a),s=sin(a),t=1.0-c;vec3 n=normalize(ax);
+ return mat4(t*n.x*n.x+c,t*n.x*n.y-s*n.z,t*n.x*n.z+s*n.y,0.,
+ t*n.x*n.y+s*n.z,t*n.y*n.y+c,t*n.y*n.z-s*n.x,0.,
+ t*n.x*n.z-s*n.y,t*n.y*n.z+s*n.x,t*n.z*n.z+c,0.,0.,0.,0.,1.);}
+void main(){vSeed=aSeed;
+ float spin=uTime*(0.22+uEnergy*0.9);
+ mat4 R=rotAxis(uAxis,spin);
+ vec3 p=aPos;
+ float breath=uSpread*0.05*sin(uTime*1.4+aSeed);
+ float pulse=uEnergy*uSpread*(0.12+0.10*sin(uTime*9.+aSeed*6.2831));
+ float jit=uEnergy*0.05*sin(uTime*13.+aSeed*21.);
+ p=p*(1.0+breath+pulse)+normalize(aPos)*jit;
+ vec4 wp=R*vec4(p,1.); vDepth=wp.z;
+ float persp=1.0/(1.0+wp.z*uPersp);
+ gl_Position=vec4(wp.xy*0.60*persp,0.,1.);
+ gl_PointSize=uSize*uDPR*(1.+uEnergy*1.5+0.3*sin(uTime*9.+aSeed*6.28)*uEnergy)*(0.8+0.4*aSeed);
+}`;
+const POINT_F=`#version 300 es
+precision highp float;
+uniform vec3 uA,uB; uniform float uEnergy;
+in float vSeed; in float vDepth; out vec4 o;
+void main(){vec2 d=gl_PointCoord-.5;float r=length(d);if(r>.5)discard;
+ float core=smoothstep(.5,.05,r);
+ float df=.30+.70*clamp(vDepth+.9,0.,1.)/1.9;
+ vec3 col=mix(uA,uB,clamp(uEnergy*.9+vSeed*.15,0.,1.));
+ o=vec4(col*(.8+.6*core),core*df*(.5+.5*uEnergy));}`;
+const GLOW_V=`#version 300 es
+precision highp float;
+uniform float uTime,uEnergy,uScale,uDPR;
+void main(){gl_Position=vec4(0.,0.,0.,1.);
+ gl_PointSize=uScale*uDPR*(1.+uEnergy*.5+.03*sin(uTime*1.4));}`;
+const GLOW_F=`#version 300 es
+precision highp float;
+uniform vec3 uA,uB; uniform float uEnergy; out vec4 o;
+void main(){vec2 d=gl_PointCoord-.5;float r=length(d);if(r>.5)discard;
+ float g=pow(smoothstep(.5,0.,r),2.4);
+ vec3 col=mix(uA,uB,clamp(uEnergy,0.,1.));
+ o=vec4(col*1.2,g*(.09+.15*uEnergy));}`;
+
+/* 斐波那契球 */
+function fibSphere(n,radius){
+  const p=new Float32Array(n*3),s=new Float32Array(n),ga=Math.PI*(3-Math.sqrt(5));
+  for(let i=0;i<n;i++){const y=1-(i/(n-1))*2,rd=Math.sqrt(1-y*y),th=ga*i;
+    p[i*3]=Math.cos(th)*rd*radius;p[i*3+1]=y*radius;p[i*3+2]=Math.sin(th)*rd*radius;
+    s[i]=Math.random();}
+  return {p,s};
+}
+
+/* ══════════ 形态 1：声核·呼吸光球 ══════════ */
+function Core(){
+  const {cv,gl}=getGL('c-core'); if(!gl) return null;
+  const pp=program(gl,POINT_V,POINT_F), gp=program(gl,GLOW_V,GLOW_F);
+  const {p,s}=fibSphere(440,1);
+  const bp=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bp);gl.bufferData(gl.ARRAY_BUFFER,p,gl.STATIC_DRAW);
+  const bs=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bs);gl.bufferData(gl.ARRAY_BUFFER,s,gl.STATIC_DRAW);
+  const aP=gl.getAttribLocation(pp,'aPos'),aS=gl.getAttribLocation(pp,'aSeed');
+  const U={t:gl.getUniformLocation(pp,'uTime'),e:gl.getUniformLocation(pp,'uEnergy'),
+    sz:gl.getUniformLocation(pp,'uSize'),ax:gl.getUniformLocation(pp,'uAxis'),
+    sp:gl.getUniformLocation(pp,'uSpread'),pe:gl.getUniformLocation(pp,'uPersp'),
+    dpr:gl.getUniformLocation(pp,'uDPR'),
+    A:gl.getUniformLocation(pp,'uA'),B:gl.getUniformLocation(pp,'uB')};
+  const G={t:gl.getUniformLocation(gp,'uTime'),e:gl.getUniformLocation(gp,'uEnergy'),
+    sc:gl.getUniformLocation(gp,'uScale'),dpr:gl.getUniformLocation(gp,'uDPR'),
+    A:gl.getUniformLocation(gp,'uA'),B:gl.getUniformLocation(gp,'uB')};
+  return {frame(t){
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(gp);
+    gl.uniform1f(G.t,t);gl.uniform1f(G.e,E);gl.uniform1f(G.sc,118);
+    gl.uniform1f(G.dpr,DPR);
+    gl.uniform3fv(G.A,cA);gl.uniform3fv(G.B,cB);gl.drawArrays(gl.POINTS,0,1);
+    gl.useProgram(pp);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bp);gl.enableVertexAttribArray(aP);gl.vertexAttribPointer(aP,3,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bs);gl.enableVertexAttribArray(aS);gl.vertexAttribPointer(aS,1,gl.FLOAT,false,0,0);
+    gl.uniform1f(U.t,t);gl.uniform1f(U.e,E);gl.uniform1f(U.sz,3.0);
+    gl.uniform1f(U.sp,1);gl.uniform1f(U.pe,.18);gl.uniform1f(U.dpr,DPR);
+    gl.uniform3f(U.ax,.35,1,.2);gl.uniform3fv(U.A,cA);gl.uniform3fv(U.B,cB);
+    gl.drawArrays(gl.POINTS,0,440);
+  }};
+}
+
+/* ── 形态 2 ── */
+function Ripple(){
+  const {x}=setup2D('c-ripple');
+  const rings=[]; let lastEmit=0;
+  return {frame(t){
+    x.setTransform(DPR,0,0,DPR,0,0);
+    x.clearRect(0,0,SZ,SZ);
+    const cx=SZ/2,cy=SZ/2;
+    // 说话/聆听时按能量节奏发射涟漪
+    if(state!=='idle'){
+      const interval=0.42-E*0.30;             // 能量越高越密
+      if(t-lastEmit>interval){lastEmit=t;rings.push({r:18,life:1});}
+    }
+    x.globalCompositeOperation='lighter';
+    for(let i=rings.length-1;i>=0;i--){
+      const g=rings[i];
+      g.r+=(0.9+E*2.2)*2.2; g.life-=0.012+E*0.004;
+      if(g.life<=0||g.r>140){rings.splice(i,1);continue;}
+      x.beginPath();x.arc(cx,cy,g.r,0,7);
+      x.strokeStyle=rgb(mix(cA,cB,1-g.life),g.life*0.5);
+      x.lineWidth=1+E*2.2*g.life;x.stroke();
+    }
+    // 中心核：随能量脉动
+    const coreR=20+E*26;
+    const grd=x.createRadialGradient(cx,cy,1,cx,cy,coreR+18);
+    grd.addColorStop(0,rgb(mix(cA,cB,.5),.35+E*.3));
+    grd.addColorStop(1,rgb(cA,0));
+    x.fillStyle=grd;x.beginPath();x.arc(cx,cy,coreR+18,0,7);x.fill();
+    // 两圈轨道粒子
+    for(let ring=0;ring<2;ring++){
+      const base=46+ring*22, n=40+ring*16;
+      for(let i=0;i<n;i++){
+        const a=i/n*6.2831+t*(ring?.35:-.5);
+        const wob=1+0.12*Math.sin(t*3+i)*(0.3+E);
+        const rr=base*wob+E*10;
+        const px=cx+Math.cos(a)*rr, py=cy+Math.sin(a)*rr;
+        const tw=0.25+0.55*Math.abs(Math.sin(t*4+i*0.7))*(0.4+E);
+        x.fillStyle=rgb(mix(cA,cB,ring?0.3:0),tw);
+        x.beginPath();x.arc(px,py,1.1+E*1.6,0,7);x.fill();
+      }
+    }
+    x.globalCompositeOperation='source-over';
+  }};
+}
+
+/* ══════════ 形态 3：声纹晶体 ══════════ */
+function Crystal(){
+  const {cv,gl}=getGL('c-crystal'); if(!gl) return null;
+  // 二十面体顶点
+  const phi=(1+Math.sqrt(5))/2, V=[
+    [-1,phi,0],[1,phi,0],[-1,-phi,0],[1,-phi,0],
+    [0,-1,phi],[0,1,phi],[0,-1,-phi],[0,1,-phi],
+    [phi,0,-1],[phi,0,1],[-phi,0,-1],[-phi,0,1]];
+  const F=[[0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
+    [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+    [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
+    [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]];
+  // 展开成三角面顶点（每面 3 顶点）+ 一个面随机亮度
+  const verts=[],seed=[];
+  F.forEach((f,fi)=>{f.forEach(vi=>{
+    const v=V[vi],l=Math.hypot(...v);
+    verts.push(v[0]/l,v[1]/l,v[2]/l);seed.push((fi%7)/7+Math.random()*0.1);});});
+  const VS=`#version 300 es
+  precision highp float;
+  uniform float uTime,uEnergy; uniform vec3 uAxis;
+  in vec3 aPos; in float aSeed; out float vSeed; out float vZ; out vec3 vN;
+  mat4 rot(vec3 ax,float a){float c=cos(a),s=sin(a),t=1.-c;vec3 n=normalize(ax);
+   return mat4(t*n.x*n.x+c,t*n.x*n.y-s*n.z,t*n.x*n.z+s*n.y,0.,
+   t*n.x*n.y+s*n.z,t*n.y*n.y+c,t*n.y*n.z-s*n.x,0.,
+   t*n.x*n.z-s*n.y,t*n.y*n.z+s*n.x,t*n.z*n.z+c,0.,0.,0.,0.,1.);}
+  void main(){vSeed=aSeed;
+   // 晶体随能量"生长"：顶点沿法向向外 + 轻微震动
+   float grow=.55+uEnergy*.55+.05*sin(uTime*2.+aSeed*6.0);
+   vec3 p=aPos*grow;
+   p+=aPos*uEnergy*.06*sin(uTime*12.+aSeed*17.);
+   mat4 R=rot(uAxis,uTime*(.3+uEnergy*.7));
+   vec4 wp=R*vec4(p,1.);vZ=wp.z;vN=normalize(mat3(R)*aPos);
+   float persp=1./(1.+wp.z*.2);
+   gl_Position=vec4(wp.xy*.62*persp,0.,1.);}`;
+  const FS=`#version 300 es
+  precision highp float;
+  uniform vec3 uA,uB; uniform float uEnergy;
+  in float vSeed; in float vZ; in vec3 vN; out vec4 o;
+  void main(){
+   float light=.55+.45*max(dot(normalize(vN),normalize(vec3(.3,.5,.8))),0.);
+   vec3 base=mix(uA,uB,clamp(uEnergy*.7+vSeed*.25,0.,1.));
+   // 半透明发光棱面：加法混合下像能量晶体，不是实心石头
+   vec3 col=base*(.5+.7*light)+uA*0.3;
+   float alpha=.05+uEnergy*.12+light*.10;
+   o=vec4(col,alpha);}`;
+  const pp=program(gl,VS,FS);
+  const bp=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bp);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.STATIC_DRAW);
+  const bs=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bs);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(seed),gl.STATIC_DRAW);
+  const aP=gl.getAttribLocation(pp,'aPos'),aS=gl.getAttribLocation(pp,'aSeed');
+  const U={t:gl.getUniformLocation(pp,'uTime'),e:gl.getUniformLocation(pp,'uEnergy'),
+    ax:gl.getUniformLocation(pp,'uAxis'),A:gl.getUniformLocation(pp,'uA'),B:gl.getUniformLocation(pp,'uB')};
+  // 线框（描边让"晶体"读出来）：索引缓冲在下面配合独立线框着色器绘制
+  const edges=(function(){ // 每个三角面的三条线，索引到 verts
+    const idx=[];
+    for(let f=0;f<F.length;f++){const o=f*3;idx.push(o,o+1,o+1,o+2,o+2,o);}
+    return new Uint16Array(idx);
+  })();
+  const ib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,edges,gl.STATIC_DRAW);
+
+  // 棱（线框）着色器：发光描边
+  const LV=`#version 300 es
+  precision highp float;
+  uniform float uTime,uEnergy; uniform vec3 uAxis;
+  in vec3 aPos; out float vZ;
+  mat4 rot(vec3 ax,float a){float c=cos(a),s=sin(a),t=1.-c;vec3 n=normalize(ax);
+   return mat4(t*n.x*n.x+c,t*n.x*n.y-s*n.z,t*n.x*n.z+s*n.y,0.,
+   t*n.x*n.y+s*n.z,t*n.y*n.y+c,t*n.y*n.z-s*n.x,0.,
+   t*n.x*n.z-s*n.y,t*n.y*n.z+s*n.x,t*n.z*n.z+c,0.,0.,0.,0.,1.);}
+  void main(){
+   float grow=.55+uEnergy*.55+.05*sin(uTime*2.);
+   vec3 p=aPos*grow*(1.+uEnergy*.05*sin(uTime*12.+p.x*17.));
+   vec4 wp=rot(uAxis,uTime*(.3+uEnergy*.7))*vec4(p,1.);vZ=wp.z;
+   float persp=1./(1.+wp.z*.2);
+   gl_Position=vec4(wp.xy*.62*persp,0.,1.);}`;
+  const LF=`#version 300 es
+  precision highp float;
+  uniform vec3 uA,uB; uniform float uEnergy; in float vZ; out vec4 o;
+  void main(){float df=.45+.55*clamp(vZ+.9,0.,1.)/1.9;
+   vec3 col=mix(uB,uA,0.15)+uB*0.4;
+   o=vec4(col,df*(.55+uEnergy*.45));}`;
+  const lp=program(gl,LV,LF);
+  const lP=gl.getAttribLocation(lp,'aPos');
+  const LU={t:gl.getUniformLocation(lp,'uTime'),e:gl.getUniformLocation(lp,'uEnergy'),
+    ax:gl.getUniformLocation(lp,'uAxis'),A:gl.getUniformLocation(lp,'uA'),B:gl.getUniformLocation(lp,'uB')};
+
+  return {frame(t){
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+    // 半透明棱面
+    gl.useProgram(pp);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bp);gl.enableVertexAttribArray(aP);gl.vertexAttribPointer(aP,3,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bs);gl.enableVertexAttribArray(aS);gl.vertexAttribPointer(aS,1,gl.FLOAT,false,0,0);
+    gl.uniform1f(U.t,t);gl.uniform1f(U.e,E);gl.uniform3f(U.ax,.4,1,.15);
+    gl.uniform3fv(U.A,cA);gl.uniform3fv(U.B,cB);
+    gl.drawArrays(gl.TRIANGLES,0,verts.length/3);
+    // 发光棱线
+    gl.useProgram(lp);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bp);gl.enableVertexAttribArray(lP);
+    gl.vertexAttribPointer(lP,3,gl.FLOAT,false,0,0);
+    gl.uniform1f(LU.t,t);gl.uniform1f(LU.e,E);gl.uniform3f(LU.ax,.4,1,.15);
+    gl.uniform3fv(LU.A,cA);gl.uniform3fv(LU.B,cB);
+    gl.lineWidth(2);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);
+    gl.drawElements(gl.LINES,edges.length,gl.UNSIGNED_SHORT,0);
+  }};
+}
+
+/* ══════════ 形态 4：3D 频谱柱阵（环形辐射光柱）══════════ */
+function Bars(){
+  const {x}=setup2D('c-bars');
+  const NB=48, tilt=0.42;
+  const bands=new Array(NB).fill(0);
+  return {frame(t){
+    x.setTransform(DPR,0,0,DPR,0,0);x.clearRect(0,0,SZ,SZ);
+    const cx=SZ/2, groundY=SZ/2+26, R=58;
+    x.globalCompositeOperation='lighter';
+    const spin=t*(state==='idle'?0.15:0.4);
+    // 先按深度排序，画立柱（绕竖直轴排一圈，3/4 俯视）
+    const items=[];
+    for(let i=0;i<NB;i++){
+      const ang=i/NB*6.2831+spin, ca=Math.cos(ang), sa=Math.sin(ang);
+      const px=cx+ca*R, py=groundY+sa*R*tilt;
+      const depth=sa;                          // 近=1 远=-1
+      const spec=0.5+0.5*Math.cos((i/NB-0.5)*3.14);
+      const wob=0.55+0.45*Math.sin(t*6+i*0.9)*Math.sin(t*2.3+i*1.7);
+      const floor=state==='idle'?0.05:state==='listen'?0.16:0.1;
+      const target=(floor+E*spec)*wob;
+      bands[i]+=(target-bands[i])*(target>bands[i]?.4:.14);
+      items.push({px,py,depth,h:6+bands[i]*92,v:bands[i]});
+    }
+    items.sort((a,b)=>a.depth-b.depth);        // 远的先画
+    for(const it of items){
+      const k=(it.depth+1)/2;                  // 0..1
+      const front=0.28+0.72*k;
+      const col=mix(cA,cB,Math.min(1,it.v*1.3));
+      // 立柱：从地面向上长（真正竖直，非径向）→ 读得出 3D
+      const w=3+k*2.4;
+      const grd=x.createLinearGradient(0,it.py-it.h,0,it.py);
+      grd.addColorStop(0,rgb(mix(cA,cB,.9),(.7*front)));
+      grd.addColorStop(1,rgb(col,.12*front));
+      x.fillStyle=grd;
+      x.fillRect(it.px-w/2,it.py-it.h,w,it.h);
+      // 柱顶亮点
+      x.fillStyle=rgb(mix(cA,cB,.95),(.55+.45*it.v)*front);
+      x.beginPath();x.arc(it.px,it.py-it.h,1.4+it.v*2.4*k,0,7);x.fill();
+    }
+    // 地面椭圆轨道
+    x.beginPath();x.ellipse(cx,groundY,R,R*tilt,0,0,7);
+    x.strokeStyle=rgb(cA,.38);x.lineWidth=1;x.stroke();
+    x.globalCompositeOperation='source-over';
+  }};
+}
+
+/* ══════════ 形态 5：粒子声波环（轨道声纹粒子）══════════ */
+function Orbit(){
+  const {cv,gl}=getGL('c-wave'); if(!gl) return null;
+  // 三条同心声纹环：每粒子存（角度, 环半径），用 angle 编码进 xyz
+  const N=320, pos=new Float32Array(N*3), sd=new Float32Array(N);
+  const rings=[0.30,0.44,0.58];
+  for(let i=0;i<N;i++){
+    const ring=i%3;
+    pos[i*3]=Math.random()*6.2831;   // 初始角
+    pos[i*3+1]=rings[ring];          // 半径
+    pos[i*3+2]=ring;                 // 环编号
+    sd[i]=Math.random();
+  }
+  const VS=`#version 300 es
+  precision highp float;
+  uniform float uTime,uEnergy; in vec3 aPos; in float aSeed;
+  out float vSeed; out float vZ;
+  void main(){vSeed=aSeed;
+    float ang=aPos.x, rad=aPos.y, ring=aPos.z;
+    // 各环不同转向/转速
+    float dir=(ring>0.5)?1.0:-1.0;
+    float a=ang+uTime*dir*(0.25+0.2*(2.0-ring));
+    // 径向声纹：随能量，粒子沿半径方向脉动（每粒子错相位）
+    float pulse=uEnergy*0.10*sin(uTime*11.+aSeed*22.);
+    float r=rad+pulse;
+    vec3 p=vec3(cos(a)*r, 0.0, sin(a)*r);
+    // 少量纵向跳动（说话时粒子轻微离开环面，但保持环形）
+    p.y=uEnergy*0.035*sin(uTime*13.+aSeed*25.);
+    vZ=p.z;
+    // 俯倾 24 度呈 3D 椭圆，居中
+    float ti=0.42,cc=cos(ti),ss=sin(ti);
+    vec3 q=vec3(p.x, p.y*cc-p.z*ss, p.y*ss+p.z*cc);
+    gl_Position=vec4(q.xy*0.92,0.,1.);
+    gl_PointSize=(2.0+uEnergy*3.0*abs(sin(uTime*10.+aSeed*20.)))*${DPR.toFixed(2)};
+  }`;
+  const FS=`#version 300 es
+  precision highp float;
+  uniform vec3 uA,uB; uniform float uEnergy;
+  in float vSeed; in float vZ; out vec4 o;
+  void main(){vec2 d=gl_PointCoord-.5;float r=length(d);if(r>.5)discard;
+   float core=smoothstep(.5,0.,r);
+   float df=.5+.5*clamp(vZ+.6,0.,1.)/1.2;
+   vec3 col=mix(uA,uB,clamp(uEnergy+vSeed*.2,0.,1.));
+   o=vec4(col*1.5,core*df*(.55+.45*uEnergy));}`;
+  const pp=program(gl,VS,FS);
+  const bp=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bp);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW);
+  const bs=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,bs);gl.bufferData(gl.ARRAY_BUFFER,sd,gl.STATIC_DRAW);
+  const aP=gl.getAttribLocation(pp,'aPos'),aS=gl.getAttribLocation(pp,'aSeed');
+  const U={t:gl.getUniformLocation(pp,'uTime'),e:gl.getUniformLocation(pp,'uEnergy'),
+    A:gl.getUniformLocation(pp,'uA'),B:gl.getUniformLocation(pp,'uB')};
+  return {frame(t){
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(pp);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bp);gl.enableVertexAttribArray(aP);gl.vertexAttribPointer(aP,3,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER,bs);gl.enableVertexAttribArray(aS);gl.vertexAttribPointer(aS,1,gl.FLOAT,false,0,0);
+    gl.uniform1f(U.t,t);gl.uniform1f(U.e,E);gl.uniform3fv(U.A,cA);gl.uniform3fv(U.B,cB);
+    gl.drawArrays(gl.POINTS,0,N);
+  }};
+}
+
+/* ══════════ 形态 6：融合 · 晶核（1 声核 + 3 晶体）══════════
+   设计：内层发光二十面体晶体（贾维斯的"核"，安静时缓慢自转）+
+        外层声核粒子球（说话时随声压呼吸炸开，把声波"可视化"在核外）。
+   两者共用同一旋转轴，是一个物体而非两个图形硬叠。
+   静 = 晶体；动 = 声核包裹晶体。 */
+function Fusion(){
+  const {cv,gl}=getGL('c-fusion'); if(!gl) return null;
+
+  /* ── 外层粒子球 ── */
+  const sphereP=program(gl,POINT_V,POINT_F), sphereG=program(gl,GLOW_V,GLOW_F);
+  const {p:sp,s:ss}=fibSphere(380,1);
+  const sBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,sBuf);gl.bufferData(gl.ARRAY_BUFFER,sp,gl.STATIC_DRAW);
+  const sSeed=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,sSeed);gl.bufferData(gl.ARRAY_BUFFER,ss,gl.STATIC_DRAW);
+  const sAP=gl.getAttribLocation(sphereP,'aPos'),sAS=gl.getAttribLocation(sphereP,'aSeed');
+  const SU={t:gl.getUniformLocation(sphereP,'uTime'),e:gl.getUniformLocation(sphereP,'uEnergy'),
+    sz:gl.getUniformLocation(sphereP,'uSize'),ax:gl.getUniformLocation(sphereP,'uAxis'),
+    sp:gl.getUniformLocation(sphereP,'uSpread'),pe:gl.getUniformLocation(sphereP,'uPersp'),
+    dpr:gl.getUniformLocation(sphereP,'uDPR'),
+    A:gl.getUniformLocation(sphereP,'uA'),B:gl.getUniformLocation(sphereP,'uB')};
+  const SG={t:gl.getUniformLocation(sphereG,'uTime'),e:gl.getUniformLocation(sphereG,'uEnergy'),
+    sc:gl.getUniformLocation(sphereG,'uScale'),dpr:gl.getUniformLocation(sphereG,'uDPR'),
+    A:gl.getUniformLocation(sphereG,'uA'),B:gl.getUniformLocation(sphereG,'uB')};
+
+  /* ── 内层二十面体 ── */
+  const phi=(1+Math.sqrt(5))/2, V=[
+    [-1,phi,0],[1,phi,0],[-1,-phi,0],[1,-phi,0],
+    [0,-1,phi],[0,1,phi],[0,-1,-phi],[0,1,-phi],
+    [phi,0,-1],[phi,0,1],[-phi,0,-1],[-phi,0,1]];
+  const F=[[0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
+    [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+    [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
+    [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]];
+  const verts=[],seed=[];
+  F.forEach((fi,k)=>{fi.forEach(vi=>{const v=V[vi],l=Math.hypot(...v);
+    verts.push(v[0]/l,v[1]/l,v[2]/l);seed.push((k%7)/7+Math.random()*0.1);});});
+  const edgeIdx=(function(){const idx=[];
+    for(let f=0;f<F.length;f++){const o=f*3;idx.push(o,o+1,o+1,o+2,o+2,o);}
+    return new Uint16Array(idx);})();
+
+  const CVS=`#version 300 es
+  precision highp float;
+  uniform float uTime,uEnergy; uniform vec3 uAxis; uniform float uSpin;
+  in vec3 aPos; in float aSeed; out float vSeed; out vec3 vN;
+  mat4 rot(vec3 ax,float a){float c=cos(a),s=sin(a),t=1.-c;vec3 n=normalize(ax);
+   return mat4(t*n.x*n.x+c,t*n.x*n.y-s*n.z,t*n.x*n.z+s*n.y,0.,
+   t*n.x*n.y+s*n.z,t*n.y*n.y+c,t*n.y*n.z-s*n.x,0.,
+   t*n.x*n.z-s*n.y,t*n.y*n.z+s*n.x,t*n.z*n.z+c,0.,0.,0.,0.,1.);}
+  void main(){vSeed=aSeed;
+   // 晶体随能量生长，但比外层收敛（始终在粒子球内部）
+   float grow=.40+uEnergy*.22+.03*sin(uTime*2.+aSeed*6.);
+   vec3 p=aPos*grow*(1.+uEnergy*.04*sin(uTime*12.+aSeed*17.));
+   mat4 R=rot(uAxis,uTime*uSpin);
+   vec4 wp=R*vec4(p,1.);vN=normalize(mat3(R)*aPos);
+   float persp=1./(1.+wp.z*.2);
+   gl_Position=vec4(wp.xy*.62*persp,0.,1.);}`;
+  const CFS=`#version 300 es
+  precision highp float;
+  uniform vec3 uA,uB; uniform float uEnergy;
+  in float vSeed; in vec3 vN; out vec4 o;
+  void main(){
+   float light=.55+.45*max(dot(normalize(vN),normalize(vec3(.3,.5,.8))),0.);
+   vec3 base=mix(uA,uB,clamp(uEnergy*.7+vSeed*.25,0.,1.));
+   vec3 col=base*(.5+.7*light)+uA*0.3;
+   o=vec4(col,.05+uEnergy*.10+light*.09);}`;
+  const LFS=`#version 300 es
+  precision highp float;
+  uniform vec3 uA,uB; uniform float uEnergy; in vec3 vN; out vec4 o;
+  void main(){float l=.6+.4*max(dot(normalize(vN),normalize(vec3(.3,.5,.8))),0.);
+   vec3 col=mix(uB,uA,.15)+uB*.4; o=vec4(col,l*(.6+uEnergy*.4));}`;
+  const LVS=`#version 300 es
+  precision highp float;
+  uniform float uTime,uEnergy; uniform vec3 uAxis; uniform float uSpin;
+  in vec3 aPos; out vec3 vN;
+  mat4 rot(vec3 ax,float a){float c=cos(a),s=sin(a),t=1.-c;vec3 n=normalize(ax);
+   return mat4(t*n.x*n.x+c,t*n.x*n.y-s*n.z,t*n.x*n.z+s*n.y,0.,
+   t*n.x*n.y+s*n.z,t*n.y*n.y+c,t*n.y*n.z-s*n.x,0.,
+   t*n.x*n.z-s*n.y,t*n.y*n.z+s*n.x,t*n.z*n.z+c,0.,0.,0.,0.,1.);}
+  void main(){
+   float grow=.40+uEnergy*.22+.03*sin(uTime*2.);
+   vec3 p=aPos*grow*(1.+uEnergy*.04*sin(uTime*12.));
+   mat4 R=rot(uAxis,uTime*uSpin);
+   vec4 wp=R*vec4(p,1.);vN=normalize(mat3(R)*aPos);
+   float persp=1./(1.+wp.z*.2);
+   gl_Position=vec4(wp.xy*.62*persp,0.,1.);}`;
+  const cp=program(gl,CVS,CFS), lp=program(gl,LVS,LFS);
+  const cBuf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,cBuf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.STATIC_DRAW);
+  const cSeed=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,cSeed);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(seed),gl.STATIC_DRAW);
+  const cAP=gl.getAttribLocation(cp,'aPos'),cAS=gl.getAttribLocation(cp,'aSeed');
+  const lAP=gl.getAttribLocation(lp,'aPos');
+  const CU={t:gl.getUniformLocation(cp,'uTime'),e:gl.getUniformLocation(cp,'uEnergy'),
+    ax:gl.getUniformLocation(cp,'uAxis'),spin:gl.getUniformLocation(cp,'uSpin'),
+    A:gl.getUniformLocation(cp,'uA'),B:gl.getUniformLocation(cp,'uB')};
+  const LU={t:gl.getUniformLocation(lp,'uTime'),e:gl.getUniformLocation(lp,'uEnergy'),
+    ax:gl.getUniformLocation(lp,'uAxis'),spin:gl.getUniformLocation(lp,'uSpin'),
+    A:gl.getUniformLocation(lp,'uA'),B:gl.getUniformLocation(lp,'uB')};
+  const eib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,eib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,edgeIdx,gl.STATIC_DRAW);
+
+  function bindAttr(buf,loc,size){
+    gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+    if(loc>=0){gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,size,gl.FLOAT,false,0,0);}
+  }
+  return {frame(t){
+    gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+
+    /* 1) 中心柔光 */
+    gl.useProgram(sphereG);
+    gl.uniform1f(SG.t,t);gl.uniform1f(SG.e,E);gl.uniform1f(SG.sc,96);
+    gl.uniform1f(SG.dpr,DPR);
+    gl.uniform3fv(SG.A,cA);gl.uniform3fv(SG.B,cB);gl.drawArrays(gl.POINTS,0,1);
+
+    /* 2) 内层晶体（半透明面 + 发光棱） */
+    gl.useProgram(cp);
+    bindAttr(cBuf,cAP,3);bindAttr(cSeed,cAS,1);
+    gl.uniform1f(CU.t,t);gl.uniform1f(CU.e,E);
+    gl.uniform1f(CU.spin,.28+E*.5);gl.uniform3f(CU.ax,.4,1,.15);
+    gl.uniform3fv(CU.A,cA);gl.uniform3fv(CU.B,cB);
+    gl.drawArrays(gl.TRIANGLES,0,verts.length/3);
+    gl.useProgram(lp);
+    bindAttr(cBuf,lAP,3);
+    gl.uniform1f(LU.t,t);gl.uniform1f(LU.e,E);
+    gl.uniform1f(LU.spin,.28+E*.5);gl.uniform3f(LU.ax,.4,1,.15);
+    gl.uniform3fv(LU.A,cA);gl.uniform3fv(LU.B,cB);
+    gl.lineWidth(2);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,eib);
+    gl.drawElements(gl.LINES,edgeIdx.length,gl.UNSIGNED_SHORT,0);
+
+    /* 3) 外层声核粒子（半径略大、随能量炸开） */
+    gl.useProgram(sphereP);
+    bindAttr(sBuf,sAP,3);bindAttr(sSeed,sAS,1);
+    gl.uniform1f(SU.t,t);gl.uniform1f(SU.e,E);gl.uniform1f(SU.sz,3.4);
+    gl.uniform1f(SU.sp,1.35);gl.uniform1f(SU.pe,.16);gl.uniform1f(SU.dpr,DPR);
+    gl.uniform3f(SU.ax,.35,1,.2);gl.uniform3fv(SU.A,cA);gl.uniform3fv(SU.B,cB);
+    gl.drawArrays(gl.POINTS,0,380);
+  }};
+}
+
+/* 懒加载：只在首次选中某形态时才建它的 GL 上下文，
+   避免 6 个 WebGL context 同时存在触发浏览器上限导致 program link 失败。 */
+const _factories={Core:Core,Ripple:Ripple,Crystal:Crystal,Bars:Bars,Orbit:Orbit,Fusion:Fusion};
+const _instances={};
+function getForm(name){
+  if(!(name in _instances)){
+    const fn=_factories[name.charAt(0).toUpperCase()+name.slice(1)];
+    _instances[name]=typeof fn==='function'?fn():null;
+  }
+  return _instances[name];
+}
+let active='fusion';
+
+/* URL 初始态（截图用）：#core,speak,0.85 / #ripple,listen,.4 */
+(function(){
+  const h=(location.hash||'').replace('#','').split(',');
+  if(h[0]&&['fusion','core','ripple','crystal','bars','wave'].includes(h[0])){
+    active=h[0];
+    document.querySelectorAll('#forms button').forEach(b=>b.classList.toggle('on',b.dataset.f===active));
+    document.querySelectorAll('.form').forEach(d=>d.classList.toggle('on',d.dataset.form===active));
+  }
+  if(PALETTE[h[1]]){state=h[1];
+    document.querySelectorAll('#stateseg button').forEach(b=>b.classList.toggle('on',b.dataset.s===state));
+  }
+  if(h[2]!=null&&h[2]!=='')targetE=parseFloat(h[2]);
+  else targetE=PALETTE[state].glow;
+  E=targetE; cA=PALETTE[state].a.slice(); cB=PALETTE[state].b.slice();
+  document.getElementById('energy').value=Math.round(targetE*100);
+})();
+
+/* ── 小图标（选择列表里每形态的迷你预览，复用主帧渲染到小 canvas）── */
+document.querySelectorAll('#forms .ic').forEach(cv=>{cv.width=44;cv.height=44;});
+
+/* ── 主循环 ── */
+const t0=performance.now();
+function loop(now){
+  const t=(now-t0)/1000;
+  const P=PALETTE[state];
+  E+=(targetE-E)*(targetE>E?.32:.08);
+  cA=cA.map((v,i)=>v+(P.a[i]-v)*.08);
+  cB=cB.map((v,i)=>v+(P.b[i]-v)*.08);
+  const f=getForm(active);
+  if(f&&f.frame)f.frame(t);
+  // 标签
+  const tag=document.getElementById('t-'+active), meter=document.getElementById('m-'+active);
+  if(tag){tag.textContent={idle:'IDLE',listen:'LISTEN',speak:'SPEAK'}[state];
+    tag.styleColor={idle:'var(--faint)',listen:'#7fdcff',speak:'#5fe6a0'}[state];}
+  if(meter)meter.textContent=E.toFixed(2);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* ── 控件 ── */
+document.querySelectorAll('#forms button').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('#forms button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');active=b.dataset.f;
+    document.querySelectorAll('.form').forEach(d=>d.classList.toggle('on',d.dataset.form===active));
+  };
+});
+document.querySelectorAll('#stateseg button').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('#stateseg button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');state=b.dataset.s;
+    targetE=PALETTE[state].glow;
+    document.getElementById('energy').value=Math.round(targetE*100);
+  };
+});
+document.getElementById('energy').oninput=e=>targetE=e.target.value/100;
+
+/* 真实麦克风 */
+let actx,analyser,stream,data;
+const micBtn=document.getElementById('micbtn');
+micBtn.onclick=async()=>{
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;
+    micBtn.classList.remove('on');micBtn.textContent='用真实麦克风驱动';return;}
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    actx=new (window.AudioContext||window.webkitAudioContext)();
+    const src=actx.createMediaStreamSource(stream);
+    analyser=actx.createAnalyser();analyser.fftSize=512;src.connect(analyser);
+    data=new Uint8Array(analyser.fftSize);
+    micBtn.classList.add('on');micBtn.textContent='停止麦克风（实时驱动中）';
+    (function tick(){if(!stream)return;
+      analyser.getByteTimeDomainData(data);
+      let sum=0;for(let i=0;i<data.length;i++){const v=(data[i]-128)/128;sum+=v*v;}
+      targetE=Math.min(1,Math.sqrt(sum/data.length)*3.4);
+      document.getElementById('energy').value=Math.round(targetE*100);
+      requestAnimationFrame(tick);})();
+  }catch(e){micBtn.textContent='麦克风不可用：'+e.name;}
+};
+
+/* 背景示意星点 */
+(function(){
+  const bc=document.getElementById('brain'),bx=bc.getContext('2d');
+  function rs(){bc.width=innerWidth;bc.height=innerHeight;}rs();addEventListener('resize',rs);
+  const P=Array.from({length:150},()=>({x:Math.random(),y:Math.random()*.8,
+    r:Math.random()*1.3+.3,p:Math.random()*6.28,s:.3+Math.random()*.7}));
+  (function l(){bx.clearRect(0,0,bc.width,bc.height);const t=performance.now()/1000;
+    for(const p of P){const tw=.2+.3*(.5+.5*Math.sin(t*p.s+p.p));
+      bx.fillStyle='rgba(120,160,210,'+tw.toFixed(3)+')';
+      bx.beginPath();bx.arc(p.x*bc.width,p.y*bc.height,p.r,0,7);bx.fill();}
+    requestAnimationFrame(l);})();
+})();
+</script>
+</body></html>

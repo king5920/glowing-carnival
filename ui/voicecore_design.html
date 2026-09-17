@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>声核 · 语音动态形态设计稿</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#070b11; --panel:rgba(16,24,36,.62); --line:rgba(150,175,215,.16);
+    --txt:#eef3fa; --dim:#9aa8ba; --faint:#74808f;
+    --accent:#3fd0ff; --warm:#ff9f1c; --ok:#3fd48a;
+    --num:"SF Mono",Consolas,"Roboto Mono",monospace;
+  }
+  body{background:var(--bg);color:var(--txt);overflow:hidden;
+    font:13.5px/1.65 "Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
+    background:radial-gradient(ellipse at 50% 45%,transparent 52%,rgba(0,0,0,.55) 100%)}
+
+  /* 模拟中央星图舞台的一块区域，用于看光球与大脑的搭配 */
+  #stage{position:fixed;inset:0}
+  #brain{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+  /* ── 声核光球容器：右下角 ── */
+  #voicecore{position:absolute;right:46px;bottom:40px;width:230px;height:230px;
+    z-index:6;pointer-events:none}
+  #core{width:100%;height:100%;display:block}
+  #vc-label{position:absolute;left:50%;bottom:-2px;transform:translateX(-50%);
+    font:10px/1 var(--num);letter-spacing:2px;color:var(--faint);
+    white-space:nowrap;opacity:.85;transition:color .3s}
+  #vc-state{position:absolute;left:0;top:2px;font:10px/1 var(--num);
+    letter-spacing:1px;color:var(--faint)}
+  #vc-meter{position:absolute;right:0;top:2px;font:10px/1 var(--num);color:var(--accent)}
+
+  /* 控制面板 */
+  #panel{position:fixed;left:18px;top:18px;z-index:20;width:250px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 14px 12px;backdrop-filter:blur(8px)}
+  #panel h1{font-size:13px;letter-spacing:1px;margin-bottom:2px}
+  #panel .sub{font:9.5px/1.4 var(--num);color:var(--faint);letter-spacing:1px;margin-bottom:12px}
+  .row{margin:10px 0}
+  .row .t{font-size:11px;color:var(--dim);margin-bottom:6px;letter-spacing:.5px}
+  .seg{display:flex;gap:6px}
+  .seg button{flex:1;background:rgba(63,208,255,.06);border:1px solid var(--line);
+    color:var(--dim);font-size:11px;padding:6px 0;border-radius:6px;cursor:pointer;
+    font-family:inherit;transition:all .15s}
+  .seg button.on{background:rgba(63,208,255,.18);border-color:var(--accent);color:#fff}
+  .seg button:hover{border-color:var(--accent)}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .hint{font-size:10.5px;color:var(--faint);line-height:1.5;margin-top:10px;
+    border-top:1px solid var(--line);padding-top:9px}
+  #micbtn{width:100%;margin-top:8px;background:rgba(63,212,138,.08);
+    border:1px solid rgba(63,212,138,.3);color:var(--ok);font-size:11px;
+    padding:7px 0;border-radius:6px;cursor:pointer;font-family:inherit}
+  #micbtn.on{background:rgba(63,212,138,.2);border-color:var(--ok)}
+</style></head>
+<body>
+<canvas id="brain"></canvas>
+
+<div id="voicecore">
+  <canvas id="core"></canvas>
+  <div id="vc-state">IDLE</div>
+  <div id="vc-meter">0.00</div>
+  <div id="vc-label">VOICE CORE · 声核</div>
+</div>
+
+<div id="panel">
+  <h1>声核 · 呼吸光球</h1>
+  <div class="sub">VOICE CORE — MOTION STUDY</div>
+
+  <div class="row">
+    <div class="t">状态 STATE</div>
+    <div class="seg" id="stateseg">
+      <button data-s="idle" class="on">待命</button>
+      <button data-s="listen">聆听</button>
+      <button data-s="speak">说话</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="t">模拟音量 ENERGY（真实接入后由麦克风驱动）</div>
+    <input type="range" id="energy" min="0" max="100" value="8">
+  </div>
+
+  <button id="micbtn">用真实麦克风驱动</button>
+
+  <div class="hint">
+    <b style="color:var(--dim)">设计要点</b><br>
+    · 待命：冷蓝，缓慢呼吸自转，几乎静止的"活着感"<br>
+    · 聆听：青色提亮起波纹，粒子向外微张，像在"接住"声音<br>
+    · 说话：翠绿→暖橙，粒子随音量炸开回缩，与大脑同源粒子语言
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ═══════════════════════════════════════════════════════
+   声核 · 呼吸光球  —— 设计原型
+   独立 WebGL 不依赖任何库。真实接入时：
+     setVoiceState('idle'|'listen'|'speak')
+     setVoiceEnergy(0..1)   ← 服务端 mic_level.smooth 归一化
+   ═══════════════════════════════════════════════════════ */
+const cv = document.getElementById('core');
+const gl = cv.getContext('webgl2', {antialias:true, alpha:true});
+const DPR = Math.min(devicePixelRatio||1, 2);
+function resize(){
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width*DPR; cv.height = r.height*DPR;
+  gl.viewport(0,0,cv.width,cv.height);
+}
+resize(); addEventListener('resize', resize);
+
+function sh(t,s){const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);return o;}
+function prog(v,f){const p=gl.createProgram();
+  gl.attachShader(p,sh(gl.VERTEX_SHADER,v));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,f));
+  gl.linkProgram(p);return p;}
+
+/* 粒子点精灵：球面斐波那契均布 + 噪声抖动 */
+const VS=`#version 300 es
+precision highp float;
+uniform float uTime, uEnergy, uSize;
+uniform vec3 uAxis;
+in vec3 aPos;      // 单位球面基准位置
+in float aSeed;    // 每粒子随机相位
+out float vSeed; out float vDepth;
+mat4 rotAxis(vec3 ax, float a){
+  float c=cos(a),s=sin(a),t=1.0-c; vec3 n=normalize(ax);
+  return mat4(
+    t*n.x*n.x+c,    t*n.x*n.y-s*n.z, t*n.x*n.z+s*n.y, 0.0,
+    t*n.x*n.y+s*n.z,t*n.y*n.y+c,    t*n.y*n.z-s*n.x, 0.0,
+    t*n.x*n.z-s*n.y,t*n.y*n.z+s*n.x,t*n.z*n.z+c,    0.0,
+    0,0,0,1);
+}
+void main(){
+  vSeed=aSeed;
+  float t=uTime;
+  // 自转（说话时加快）
+  mat4 R = rotAxis(uAxis, t*(0.25+uEnergy*0.9));
+  vec3 p = aPos;
+  // 呼吸：整体半径的缓慢起伏
+  float breath = 0.04*sin(t*1.4);
+  // 能量驱动：径向炸开 + 高频抖动（说话时）
+  float pulse = uEnergy*(0.10+0.10*sin(t*9.0+aSeed*6.2831));
+  float jitter = uEnergy*0.05*sin(t*13.0+aSeed*21.0);
+  float r = 1.0 + breath + pulse;
+  p = p*r + normalize(aPos)*jitter;
+  vec4 wp = R*vec4(p,1.0);
+  vDepth = wp.z;
+  // 轻微透视：让球体有前后纵深而非正圆平面
+  float persp = 1.0 / (1.0 + wp.z*0.18);
+  vec2 clip = wp.xy * 0.62 * persp;
+  gl_Position = vec4(clip, 0.0, 1.0);
+  float pt = uSize*(1.0 + uEnergy*1.6 + 0.25*sin(t*9.0+aSeed*6.2831)*uEnergy);
+  gl_PointSize = pt * (0.85+0.3*aSeed);
+}`;
+const FS=`#version 300 es
+precision highp float;
+uniform vec3 uColorA, uColorB;   // 冷色/暖色
+uniform float uEnergy;
+in float vSeed; in float vDepth;
+out vec4 outColor;
+void main(){
+  vec2 d = gl_PointCoord-0.5;
+  float dist=length(d);
+  if(dist>0.5) discard;
+  float core = smoothstep(0.5,0.05,dist);
+  // 深度让背面粒子暗一些，产生球体感
+  float depthFade = 0.30 + 0.70*clamp(vDepth+0.9,0.0,1.0)/1.9;
+  vec3 col = mix(uColorA, uColorB, clamp(uEnergy*0.9+vSeed*0.15,0.0,1.0));
+  float a = core*depthFade*(0.55+0.45*uEnergy);
+  outColor = vec4(col*(0.8+0.6*core), a);
+}`;
+const progP = prog(VS,FS);
+gl.useProgram(progP);
+const LOC={
+  time:gl.getUniformLocation(progP,'uTime'),
+  energy:gl.getUniformLocation(progP,'uEnergy'),
+  size:gl.getUniformLocation(progP,'uSize'),
+  axis:gl.getUniformLocation(progP,'uAxis'),
+  cA:gl.getUniformLocation(progP,'uColorA'),
+  cB:gl.getUniformLocation(progP,'uColorB'),
+};
+
+/* 斐波那契球面布点 */
+const N=420;
+const pos=new Float32Array(N*3), seed=new Float32Array(N);
+const ga=Math.PI*(3-Math.sqrt(5));
+for(let i=0;i<N;i++){
+  const y=1-(i/(N-1))*2;
+  const rad=Math.sqrt(1-y*y);
+  const th=ga*i;
+  pos[i*3]=Math.cos(th)*rad; pos[i*3+1]=y; pos[i*3+2]=Math.sin(th)*rad;
+  seed[i]=Math.random();
+}
+const vPos=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,vPos);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.STATIC_DRAW);
+const aPos=gl.getAttribLocation(progP,'aPos');
+gl.enableVertexAttribArray(aPos);gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,0,0);
+const vSeed=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,vSeed);gl.bufferData(gl.ARRAY_BUFFER,seed,gl.STATIC_DRAW);
+const aSeed=gl.getAttribLocation(progP,'aSeed');
+gl.enableVertexAttribArray(aSeed);gl.vertexAttribPointer(aSeed,1,gl.FLOAT,false,0,0);
+
+gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE);  // 加法发光
+
+/* ── 内核辉光（一个柔和的中心光球，用一个大的点精灵即可）── */
+const VS2=`#version 300 es
+precision highp float;
+uniform float uTime,uEnergy;
+void main(){
+  vec2 p=vec2(0.0);
+  gl_Position=vec4(p,0,1);
+  gl_PointSize = 120.0*(1.0+uEnergy*0.5+0.03*sin(uTime*1.4));
+}`;
+const FS2=`#version 300 es
+precision highp float;
+uniform vec3 uColorA,uColorB; uniform float uEnergy;
+out vec4 outColor;
+void main(){
+  vec2 d=gl_PointCoord-0.5; float r=length(d);
+  if(r>0.5)discard;
+  // 柔光球：指数衰减，中心也不堆成纯白，保留颜色
+  float glow=pow(smoothstep(0.5,0.0,r), 2.4);
+  vec3 col=mix(uColorA,uColorB,clamp(uEnergy,0.,1.));
+  // 压低强度，加法混合下才是"光晕"而非白饼
+  outColor=vec4(col*1.25, glow*(0.10+0.16*uEnergy));
+}`;
+const progG=prog(VS2,FS2); gl.useProgram(progG);
+const G={time:gl.getUniformLocation(progG,'uTime'),energy:gl.getUniformLocation(progG,'uEnergy'),
+  cA:gl.getUniformLocation(progG,'uColorA'),cB:gl.getUniformLocation(progG,'uColorB')};
+
+/* 三态配色：待命冷蓝 / 聆听青 / 说话翠绿偏暖 */
+const STATES={
+  idle:  {a:[0.14,0.38,0.70], b:[0.28,0.58,1.00], gain:0.10},
+  listen:{a:[0.18,0.66,0.95], b:[0.50,0.92,1.00], gain:0.42},
+  speak: {a:[0.16,0.88,0.52], b:[1.00,0.60,0.16], gain:1.00},
+};
+let state='idle';
+let targetEnergy=0.08, energy=0.08;
+let colA=STATES.idle.a.slice(), colB=STATES.idle.b.slice();
+
+/* URL 初始态：#speak / #listen / #idle,0.8（截图用） */
+(function(){
+  const h=(location.hash||'').replace('#','').split(',');
+  if(STATES[h[0]]){
+    state=h[0];
+    targetEnergy = h[1]!=null ? parseFloat(h[1]) : STATES[state].gain;
+    colA=STATES[state].a.slice(); colB=STATES[state].b.slice();
+    document.querySelectorAll('#stateseg button').forEach(b=>
+      b.classList.toggle('on', b.dataset.s===state));
+  }
+})();
+
+function mix3(a,b,k){return [a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k,a[2]+(b[2]-a[2])*k];}
+const labelEl=document.getElementById('vc-label');
+const stateEl=document.getElementById('vc-state');
+const meterEl=document.getElementById('vc-meter');
+
+let t0=performance.now();
+function frame(now){
+  const t=(now-t0)/1000;
+  const S=STATES[state];
+  // 能量平滑（快上慢下，跟真实语音包络一致）
+  const ease = targetEnergy>energy?0.35:0.08;
+  energy += (targetEnergy-energy)*ease;
+  // 状态间颜色缓动
+  colA=colA.map((v,i)=>v+(S.a[i]-v)*0.08);
+  colB=colB.map((v,i)=>v+(S.b[i]-v)*0.08);
+  const E=energy;
+  meterEl.textContent=E.toFixed(2);
+  stateEl.textContent={idle:'IDLE',listen:'LISTEN',speak:'SPEAK'}[state];
+  stateEl.style.color={idle:'var(--faint)',listen:'#7fdcff',speak:'#5fe6a0'}[state];
+
+  gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+
+  // 内核辉光
+  gl.useProgram(progG);
+  gl.viewport(0,0,cv.width,cv.height);
+  gl.uniform1f(G.time,t); gl.uniform1f(G.energy,E);
+  gl.uniform3fv(G.cA,colA); gl.uniform3fv(G.cB,colB);
+  gl.drawArrays(gl.POINTS,0,1);
+
+  // 粒子球
+  gl.useProgram(progP);
+  // 切换过 program（刚画完辉光），必须重绑顶点属性
+  gl.bindBuffer(gl.ARRAY_BUFFER,vPos);
+  gl.enableVertexAttribArray(aPos);gl.vertexAttribPointer(aPos,3,gl.FLOAT,false,0,0);
+  gl.bindBuffer(gl.ARRAY_BUFFER,vSeed);
+  gl.enableVertexAttribArray(aSeed);gl.vertexAttribPointer(aSeed,1,gl.FLOAT,false,0,0);
+  gl.uniform1f(LOC.time,t);
+  gl.uniform1f(LOC.energy,E);
+  gl.uniform1f(LOC.size, 3.2*DPR);
+  gl.uniform3f(LOC.axis,0.35,1.0,0.2);
+  gl.uniform3fv(LOC.cA,colA); gl.uniform3fv(LOC.cB,colB);
+  gl.drawArrays(gl.POINTS,0,N);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ── 控件 ── */
+document.querySelectorAll('#stateseg button').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('#stateseg button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); state=b.dataset.s;
+    stateEl.textContent={idle:'IDLE',listen:'LISTEN',speak:'SPEAK'}[state];
+    if(state==='idle'){targetEnergy=0.08;}
+    if(state==='listen'){targetEnergy=0.32;}
+    if(state==='speak'){targetEnergy=0.75;}
+  };
+});
+const slider=document.getElementById('energy');
+slider.oninput=()=>{targetEnergy=slider.value/100;};
+
+/* 对外接口（真实接入时由 app.js 调用） */
+window.setVoiceState=(s)=>{if(STATES[s]){state=s;
+  stateEl.textContent={idle:'IDLE',listen:'LISTEN',speak:'SPEAK'}[s];}};
+window.setVoiceEnergy=(v)=>{targetEnergy=Math.max(0,Math.min(1,v));
+  slider.value=Math.round(targetEnergy*100);};
+
+/* 真实麦克风：AnalyserNode 取 RMS 驱动 */
+let actx,analyser,micStream;
+const micBtn=document.getElementById('micbtn');
+micBtn.onclick=async()=>{
+  if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;
+    micBtn.classList.remove('on');micBtn.textContent='用真实麦克风驱动';
+    targetEnergy=STATES[state].gain;return;}
+  try{
+    micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+    actx=new (window.AudioContext||window.webkitAudioContext)();
+    const src=actx.createMediaStreamSource(micStream);
+    analyser=actx.createAnalyser();analyser.fftSize=512;
+    src.connect(analyser);
+    const buf=new Uint8Array(analyser.fftSize);
+    micBtn.classList.add('on');micBtn.textContent='停止麦克风（正在实时驱动）';
+    (function tick(){
+      if(!micStream)return;
+      analyser.getByteTimeDomainData(buf);
+      let sum=0;for(let i=0;i<buf.length;i++){const x=(buf[i-128])/128;sum+=x*x;}
+      const rms=Math.sqrt(sum/buf.length);
+      // 归一化 + 增益，安静环境压低
+      window.setVoiceEnergy(Math.min(1,rms*3.2));
+      requestAnimationFrame(tick);
+    })();
+  }catch(e){micBtn.textContent='麦克风不可用：'+e.name;}
+};
+
+/* 背景画一点极简"大脑"星点，让搭配感真实（非接入代码，仅示意） */(function(){
+  const bc=document.getElementById('brain');const bx=bc.getContext('2d');
+  function rs(){bc.width=innerWidth;bc.height=innerHeight;}rs();addEventListener('resize',rs);
+  const P=Array.from({length:140},()=>({x:Math.random(),y:Math.random()*(0.75),
+    r:Math.random()*1.4+0.3,p:Math.random()*6.28,s:0.3+Math.random()*0.7}));
+  (function loop(){
+    bx.clearRect(0,0,bc.width,bc.height);
+    const t=performance.now()/1000;
+    for(const p of P){
+      const tw=0.25+0.35*(0.5+0.5*Math.sin(t*p.s+p.p));
+      bx.fillStyle='rgba(120,160,210,'+tw.toFixed(3)+')';
+      bx.beginPath();bx.arc(p.x*bc.width,p.y*bc.height,p.r,0,7);bx.fill();
+    }
+    requestAnimationFrame(loop);
+  })();
+})();
+</script>
+</body></html>

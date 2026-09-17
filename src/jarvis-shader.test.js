@@ -288,10 +288,50 @@ test('图例说的是类别而不是新鲜度（不能说假话）', () => {
    * 按新鲜度上色会退化成一种颜色。
    * 图例如果写"新鲜/正常/变淡"就是在说假话，比没有图例更糟。 */
   const html = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
-  const seg = html.slice(html.indexOf('id="legend"'), html.indexOf('</div>', html.indexOf('c-ring')));
+  /* 截取 legend 的标记段（不要用 'c-ring' 定位结尾——它先出现在上方 CSS 规则里，
+     一旦 legend 之前插入别的内容（如无 WebGL 降级块），按字符位置的切片就会反向变空）。
+     改为：从标记里的 id="legend" 起，取到它所在容器闭合，用出现的第二个 class="lg-r"
+     之后的第一个 </div> 作为稳妥边界；最简单稳健的是直接截取到 legend 之后 600 字符。*/
+  const start = html.indexOf('id="legend"');
+  const seg = html.slice(start, start + 800);
   A(/记忆类别/.test(seg), '图例标题应说明这是类别维度');
   A(!/>新鲜</.test(seg),
     '图例还写着"新鲜" —— 但色相表达的是类别，这是在误导用户');
+});
+
+test('§1.1 反向纪律：图例与色带都不落在绿带 [120°,180°]', () => {
+  /* 星图承载的是"记忆类别"，不是涨跌语义。但只要有一个分档的色相落在绿带里，
+   * 在金融仪表盘上就会被读成"跌色"——这正是 DESIGN.md §1.1 反向纪律要挡的。
+   *
+   * 2026-09-16 实证：图例 c-person #71ecbb 色相 156.1°、着色器 fresh (0.44,0.93,0.74)
+   * 色相 156.7°，两处都在绿带内（且互为同一概念：都是"新鲜记忆/人物"）。
+   * 上面"图例存在且与色相分档对应"只验结构不验色相，抓不住这类问题——
+   * 于是把纪律本身写成可执行检查，颜色回归时立刻失败。 */
+  function hueOf(r, g, b) {
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    if (!d) return 0;
+    let h;
+    if (mx === r) h = ((g - b) / d + 6) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    return h * 60;
+  }
+  const bad = [];
+  const html = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
+  let m;
+  const re = /#legend \.lg-d\.([\w-]+)[^{]*color:\s*#([0-9a-fA-F]{6})/g;
+  while ((m = re.exec(html))) {
+    const h = hueOf(parseInt(m[2].slice(0, 2), 16), parseInt(m[2].slice(2, 4), 16), parseInt(m[2].slice(4, 6), 16));
+    if (h >= 120 && h <= 180) bad.push(`图例 .${m[1]} #${m[2]}（色相 ${h.toFixed(1)}°）`);
+  }
+  const stops = [...SRC.matchAll(/\b(fade|fresh|amber|gold)=vec3\(([\d.]+),([\d.]+),([\d.]+)\)/g)];
+  A(stops.length === 4, '着色器色带应恰好 4 档 stop（fade/fresh/amber/gold），实际 ' + stops.length);
+  stops.forEach(s => {
+    const h = hueOf(Number(s[2]), Number(s[3]), Number(s[4]));
+    if (h >= 120 && h <= 180) bad.push(`色带 ${s[1]} rgb(${s[2]},${s[3]},${s[4]})（色相 ${h.toFixed(1)}°）`);
+  });
+  A(bad.length === 0,
+    '以下颜色落在绿带 [120°,180°]，在金融仪表盘里会被读成"跌色"：\n       - ' + bad.join('\n       - '));
 });
 
 console.log('\n───────────────────────────────────');
