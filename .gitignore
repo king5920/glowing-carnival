@@ -1,8 +1,10 @@
 # ── 密钥与凭证（绝对不能入库）──────────────────
 .env
 .env.local
-.feishu.json
+.env.bak
+.env.*.bak
 *.credentials.yaml
+.feishu.json
 
 # ── 可重新生成的依赖与构建产物 ────────────────
 node_modules/
@@ -19,16 +21,48 @@ sandbox/
 # ── 上游第三方参考代码（体积大、非本项目产权）──
 _ref/
 
-# ── 设计稿大图（7.5MB PNG，不适合进 git）───────
-_mockup/*.png
-_mockup/ref/
-_mockup/user/
+# ── 设计稿/原型/草稿（体积大、非源码）───────────
+_mockup/
+factor_audit/
+_mockup*.png
+ui_backup_*/
+
+# ── 备份快照（D1 决策暂留工作区，C 系列目检后再删）─
+*.bak
+*.bak-*
+*.gatebak-*
+*.uibak-*
+*.colorbak-*
+*.tokfixbak-*
+*.flowbak-*
+*.gdbak-*
+*.glowbak-*
+*.navybak-*
+*.svgbak-*
+*.colbak-*
+*.ccdbak-*
 
 # ── 一次性验证脚本（用完即弃，非主链路）────────
 _ff.js
 _sg.js
 _tmp*.js
 _probe*.js
+_probe*.txt
+_chan_*.js
+_chan*.js
+
+# ── 一次性审计产物（用完即弃）───────────────────
+_audit*.txt
+_probe_out.txt
+_ui_phase2.png
+_root_reports.html
+
+# ── 根目录一次性报告（回测/蓝图，非项目源码）────
+潜龙选股体系_*.html
+
+# ── 验证截图（产物，非源码）────────────────────
+_shots/
+scripts/_shots/
 
 # ── 工具会话私有目录 ──────────────────────────
 .workbuddy/
