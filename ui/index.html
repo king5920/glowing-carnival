@@ -324,6 +324,41 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
 .mp-ing.unk{color:var(--faint);border-style:dashed}
 .mp-note{font-size:9.5px;color:var(--faint);margin-top:7px;line-height:1.5}
 
+/* ════════ §5 情绪温度 60 日热力柱（chart 家族公共样式） ════════
+ * .chart-tip 是 canvas 的 tooltip：绝对定位、DOM 元素、非动画。
+ * prefers-reduced-motion 下仍可用（DOM 更新不涉及 animation/transition）。
+ * 颜色全走 :root CSS 变量，图表家族零写死 hex。 */
+.chart-tip{
+  position:absolute;
+  pointer-events:none;
+  background:rgba(10,19,32,.95);
+  border:1px solid rgba(63,208,255,.35);
+  border-radius:4px;
+  padding:3px 6px;
+  font-size:10.5px;
+  line-height:1.4;
+  color:var(--txt);
+  font-family:var(--num);
+  font-variant-numeric:var(--tnum);
+  letter-spacing:.02em;
+  white-space:nowrap;
+  z-index:100;
+  box-shadow:0 0 8px rgba(63,208,255,.15);
+  max-width:280px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+#mpHeatbox{position:relative;padding:8px 12px 6px}
+#mpHeatTitle{display:flex;align-items:baseline;justify-content:space-between;font-size:9.5px;
+  color:var(--faint);font-family:var(--num);margin-bottom:4px}
+#mpHeatCanvas{display:block;width:100%;height:78px;cursor:crosshair}
+.mp-heat-legend{display:flex;align-items:center;gap:8px;margin-top:3px;
+  font-size:8.5px;color:var(--faint);font-family:var(--num)}
+.mp-heat-legend .mhl-key{flex:0 0 auto}
+.mp-heat-legend .mhl-grad{flex:1;height:5px;border-radius:2px;
+  background:linear-gradient(90deg,var(--cy),var(--gd),var(--rd))}
+.mp-heat-legend .mhl-note{flex:0 0 auto}
+
 /* ════════ 收盘扫描面板（左栏盯盘主场） ════════ */
 .scan-time{margin-left:auto;font-size:9px;color:var(--faint);font-family:var(--num);font-weight:400}
 #scanbox{padding:0}
@@ -966,6 +1001,18 @@ body.no-webgl #gl-fallback{display:grid}
     <section class="panel" data-panel="marketphase">
       <div class="ph">大盘定时机 <span class="en">MARKET PHASE</span> <span id="mpTime" class="scan-time"></span><span class="fold">▾</span></div>
       <div class="pb" id="mpbox"><div class="empty">读取中…</div></div>
+      <!-- §5 情绪温度 60 日热力柱：与缠论阶段配对，让"当下阶段"看到历史脉络。
+           独立 div，不在 #mpbox IIFE 的 innerHTML 生命周期里（IIFE 只操作 #mpbox）。 -->
+      <div class="pb" id="mpHeatbox">
+        <div id="mpHeatTitle"><span>情绪温度 · 60 日炸板率</span><span id="mpHeatTime"></span></div>
+        <canvas id="mpHeatCanvas"></canvas>
+        <div class="mp-heat-legend">
+          <span class="mhl-key">冷静</span>
+          <span class="mhl-grad"></span>
+          <span class="mhl-key">恐慌</span>
+          <span class="mhl-note">斜纹＝极值</span>
+        </div>
+      </div>
     </section>
     <!-- 板块定方向：指数判时机 + 主线板块扫描（盯盘主场） -->
     <section class="panel" data-panel="closescan">
@@ -1509,9 +1556,57 @@ body.no-webgl #gl-fallback{display:grid}
 <script src="/starplus.js"></script>
 <script src="/markdown.js"></script>
 <script src="/animgate.js"></script>
+<script src="/charts.js"></script>
 <script src="/starfield.js"></script>
 <script src="/voicecore.js"></script>
 <script src="/app.js"></script>
+<script>
+/* ── §5 情绪温度 60 日热力柱（DESIGN.md §5 第 1 项） ──
+ * 数据来自 /api/sentiment/heatmap（60 天 alert_samples 每条）。
+ * 画布独立于 #mpbox IIFE 生命周期——IIFE 用 innerHTML 全替换 #mpbox，
+ * canvas 兄弟 div 天然躲过。渲染走 Charts.drawSentimentHeatmap + bindHover，
+ * 不新增 rAF 链（数据到位后一次性重画，与 §4 图表纪律一致）。
+ * 涨跌纪律（§1.1）：情绪温度不属涨跌语义，用 colorLadder 三段色（--cy→--gd→--rd）
+ * 映射的是"炸板率情绪强度"，是连续数值而非二元涨跌，不适用红绿禁则。 */
+(function () {
+  'use strict';
+  if (typeof window.Charts !== 'object' || !window.Charts.drawSentimentHeatmap) return;
+  const canvas = document.getElementById('mpHeatCanvas');
+  const box = document.getElementById('mpHeatbox');
+  const timeEl = document.getElementById('mpHeatTime');
+  if (!canvas || !box) return;
+
+  const C = window.Charts;
+  let hover = null;   // bindHover 返回句柄，重绘前 unbind
+  let timer = null;
+
+  function render(data){
+    if (!data || data.ok === false){
+      box.querySelector('#mpHeatTitle').firstElementChild.textContent = '情绪温度 · 数据不可用';
+      return;
+    }
+    const pts = (data.points || []).filter(p => p.broken_rate != null);
+    box.querySelector('#mpHeatTitle').firstElementChild.textContent = '情绪温度 · ' + pts.length + ' 日炸板率';
+    if (hover){ hover.unbind(); hover = null; }
+    hover = C.bindHover(canvas, C.drawSentimentHeatmap(canvas, pts));
+  }
+
+  async function refresh(){
+    try {
+      const r = await fetch('/api/sentiment/heatmap?days=60');
+      render(await r.json());
+      if (timeEl) timeEl.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      const now = new Date();
+      const trading = now.getDay() >= 1 && now.getDay() <= 5 && now.getHours() >= 9 && now.getHours() < 15;
+      timer = setTimeout(refresh, trading ? 5 * 60e3 : 30 * 60e3);
+    } catch (e) {
+      box.querySelector('#mpHeatTitle').firstElementChild.textContent = '情绪温度 · 连接失败';
+      timer = setTimeout(refresh, 60e3);
+    }
+  }
+  refresh();
+})();
+</script>
 <script>
 /* 运维按钮抽屉：默认收起，只在需要时展开；点外部或 Esc 关闭 */
 (function(){

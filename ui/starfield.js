@@ -306,6 +306,11 @@
   let bDim, bEDim, dimArr = null, eDimArr = null;
   let galHubIdx = {}, semEdges = [], hoverIdx = -1;
   let focRy = 0, focRx = 0, focZ = 1, focTRy = 0, focTRx = 0, focTZ = 1;
+  /* STAGE1 fov 轻推：悬停时把垂直半视角收窄 3°（约 0.052 rad）。
+   * 目的不是"看到更多"，而是让非聚焦节点在视觉上更"贴"着被聚焦的一度圈，
+   * 配合 alpha dim 的 1.0/0.45/0.12 三档，让眼睛顺着聚焦区域读。
+   * 用同样的 0.045 lerp 系数与 focRy 保持一致节奏。 */
+  let hoverFov = 0, hoverFovT = 0;
   const nameToIdx = new Map();     // 实体名 → 节点索引
   const memToIdx = new Map();      // 记忆 id → 节点索引
   let lastVP = null;               // 最近一帧的 MVP 矩阵（点击拾取要用）
@@ -1172,6 +1177,8 @@
     focRy += (focTRy - focRy) * 0.045;
     focRx += (focTRx - focRx) * 0.045;
     focZ  += (focTZ  - focZ)  * 0.045;
+    /* STAGE1 hover fov 轻推，节奏与 STAGE2 对齐 */
+    hoverFov += (hoverFovT - hoverFov) * 0.045;
 
     let M = mul(rY(ry + px + focRy), rX(rx + py + focRx));
     /* 相机距离：让内容球正好填满画面（不乘 spread，着色器已用 uSpread 缩放坐标）
@@ -1183,7 +1190,10 @@
      * 正确算法：垂直半视角 fovY/2 下，要让半径 R 的球完整入镜，
      * 距离 d = R / tan(fovY/2)。persp() 的第一个参数是 fovY 弧度值 1.0。
      * 再留 8% 余量，避免边缘节点擦边被裁。 */
-    const FOVY = 1.0;
+    /* STAGE1：悬停时垂直半视角收窄 3°（0.052 rad）。
+     * 距离按 tan(FOVY/2) 反向缩放，画面内容球大小不变，只有非焦点区域的
+     * 空间感被"压紧"——配合 dim 三档，视觉重量向焦点集中。 */
+    const FOVY = 1.0 - hoverFov * 0.052;
     /* 留 8% → 18% 余量。
      * 形状系数从 y*0.82 改成 y*0.95 后，球的垂直尺寸增大约 16%，
      * 8% 余量不够，上下被裁掉了。contentR 取的是最大半径（水平方向），
@@ -1251,7 +1261,8 @@
        否则停止调度：补到这里的最后一帧就是静止的正确画面。 */
     if (forceFrames > 0) forceFrames--;
     const gate = window.AnimGate;
-    const keepGoing = wakeActive || idleDrifting() || focAnimating() || (gate
+    const keepGoing = wakeActive || idleDrifting() || focAnimating() ||
+      Math.abs(hoverFov - hoverFovT) > 0.002 || (gate
       ? gate.scheduleNext({
           forceFrames, reduceMotion, dragging: drag,
           cur, tgt, targetIsIdle: tgt === S.idle,
@@ -1290,7 +1301,9 @@
     if (!dimArr || !eDimArr) return;
     if (idx == null || idx < 0 || !window.STARPLUS) {
       dimArr.fill(1); eDimArr.fill(1);
+      hoverFovT = 0;                     // 离开悬停：fov 目标回位
     } else {
+      hoverFovT = 1;                     // 悬停：fov 目标收窄 3°
       const lv = window.STARPLUS.neighborLevels(nodes.length, edges, idx, semEdges);
       for (let i = 0; i < dimArr.length; i++)
         dimArr[i] = lv.l1.has(i) ? 1.0 : (lv.l2.has(i) ? 0.45 : 0.12);

@@ -508,6 +508,30 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  /* 情绪温度热力柱（§5 第 1 项）：每日一条 alert_samples 的 broken_rate/limit_up/limit_down/ladder_height/seal_fund_yi。
+     只读、缺数据不编造——broken_rate 缺失的日期保留在返回里（前端灰化），不跳过。 */
+  if (url === '/api/sentiment/heatmap' || url.startsWith('/api/sentiment/heatmap?')) {
+    try {
+      const q = new URL(url, 'http://x').searchParams;
+      const days = Math.max(1, Math.min(365, parseInt(q.get('days') || '60', 10)));
+      const dbm = require('./db');
+      const all = dbm.alertSamplesDaily();
+      /* 只取最近 days 天；按 date 升序（alertSamplesDaily 已排序） */
+      const points = all.slice(-days).map(r => ({
+        date: r.date,
+        limit_up: r.limit_up,
+        limit_down: r.limit_down,
+        broken: r.broken,
+        broken_rate: r.broken_rate,
+        ladder_height: r.ladder_height,
+        seal_fund_yi: r.seal_fund_yi,
+      }));
+      return sendJson(res, 200, { ok: true, days: points.length, points: points });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: String(e.message || e) });
+    }
+  }
+
   /* 崩溃冰点基准历史回填（一次性/按需运维）：POST /api/fear_backfill?dry=1 预演。
      较慢（东财 QPS<1，约1-2分钟），只读外部+UPSERT本地，绝不把无保留日期写成0。 */
   if (url.startsWith('/api/fear_backfill') && req.method === 'POST') {

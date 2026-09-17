@@ -107,7 +107,7 @@
 | 3 | 文字对比度 ≥4.5:1；--dim 不用于正文 | §1 | 对比度工具抽测 5 处 | **已验证**（2026-09-17：零依赖 CDP 抽测器 `scripts/check-contrast.js`（端口 9335），走 DOM 遍历 431 个带自身文字元素，按 WCAG 2.1 求相对亮度、祖先链 a-over 前向合成有效背景、gradient 首色解析、--bg #0A1320 兜底，含大字 AA 豁免（≥24px 或 ≥18.5px 粗体 → 3:1）。**首轮暴露 24 处违规**（10-11px 元数据标签），根源三条：①`--faint:#7888a0` 在 --panel 半透 bg 上仅 3.44:1（22 处，全为 `.en`/`.k`/`.vt`/`.lg-t`/`.hud-m`/时间戳等元数据），对纯 --bg 反而 5.16:1 达标；②`.hud-m` 内联 `rgba(160,190,230,.55)` 3.75:1；③`.lg-t` 内联 `rgba(160,180,210,.62)` 4.15:1。**已收敛**：`--faint` 提亮为 `#8ba0b8`（rgb 139,160,184），对 --panel 3.44→4.70:1、对 --bg 5.16→7.07:1，全 22 站点皆元数据无正文故整 token 安全；两处 rgba 内联收敛为 `var(--faint)`，同时清掉 §9 主题漂移。**复跑：431 元素 0 违规，最低 4.64:1**。DESIGN.md §2「元数据档 8-11px」是字号档豁免、非对比度豁免，故本轮按 WCAG 硬阈值收敛而非按元数据豁免放过。`--dim` 正文禁用条款：全库无 `--dim` 出现在正文级（≥12.5px 且非粗体）位置，仍合规。回归：668 项测试全绿。） |
 | 4 | 正文档仅用 5 档（连续正文 ≥12.5）；元数据档限 8/9/10/11px；数字全局 tabular-nums | §2/§7 | CSS 扫描 font-size 值 + 断言 body 声明 font-variant-numeric | **部分已验证**（2026-09-16：tabular-nums 已全局生效；双档制已入文。**token 层 11/12/13.5/15 决定不动**——12/13.5 是过渡值，改它属渲染变更须目检后单独提交；改由 §2 双档 ladder 规约 65 处硬编码值，不反向拉动 token） |
 | 5 | rAF Canvas ≤3；失焦动画暂停；reduced-motion 降级生效 | §4 | 性能面板 + 系统设置开启后目检 | **未满足（架构约束，已定案）**（2026-09-16 实测：6 条独立 rAF 链 / 8 个 canvas，为预算 2 倍。6 条 = app.js ×4 `gatedLoop` + voicecore.js ×1 `gatedLoop` + starfield.js ×1 自有 `frame`。失焦暂停与 reduced-motion 已一致接入全部 6 条（前 5 条走 AnimGate 闸门，starfield 用 `shouldAnimate` 自决并自终止）。另注：`AnimGate.gatedLoop` 每次调用各建一条 rAF 链、非共享调度器，故链数 = 调用次数；starfield 待机 `idleDrifting()` 持续自排帧，永不达到静默，故 `--virtual-time-budget` 在本页挂死，截图须走 CDP（见 §12）。**2026-09-17 决策**：不重构 AnimGate 为共享调度器——那是架构变更，须单独评审；本轮接受 6 条链是「设计预算超支但可控」，因为失焦/降级均已生效，实际负载可控。见 §13 C1） |
-| 6 | 每图有图例+hover数值；live 用 role=status 整句 | §5 | 逐图目检 + 读屏抽测 | **部分已验证**（2026-09-16：数据驱动渲染用真实数据确认——416 节点/931 边/248 记忆/105 实体，`filler=0` 即未退回空骨架；记忆类别图例 8 分档齐全；零依赖 CDP 截图见 §12。**2026-09-17**：`role=status` 已落地——`ui/index.html:869` `#srcbanner role="status" aria-live="assertive"`，`app.js:598-613` `renderSourceBanner` 输出整句中文（"行情源「XX」不可用，相关数据可能不是最新，请以实时行情软件为准"），非裸数字，见 §13 A4。**hover 数值不适用**：§5 图表（K线/涨跌分布/情绪温度）为【目标态·未落地】，`ui/` 无 canvas 图表；星图是 3D 网络图非数据图表，无 hover 需求） |
+| 6 | 每图有图例+hover数值；live 用 role=status 整句 | §5 | 逐图目检 + 读屏抽测 | **部分已验证**（2026-09-16：数据驱动渲染用真实数据确认——416 节点/931 边/248 记忆/105 实体，`filler=0` 即未退回空骨架；记忆类别图例 8 分档齐全；零依赖 CDP 截图见 §12。**2026-09-17**：`role=status` 已落地——`ui/index.html:869` `#srcbanner role="status" aria-live="assertive"`，`app.js:598-613` `renderSourceBanner` 输出整句中文（"行情源「XX」不可用，相关数据可能不是最新，请以实时行情软件为准"），非裸数字，见 §13 A4。**hover 数值不适用**：§5 图表（K线/涨跌分布/情绪温度）为【目标态·未落地】，`ui/` 无 canvas 图表；星图是 3D 网络图非数据图表，无 hover 需求。**2026-09-17 C3-A 部分闭环（情绪温度热力柱）**：`ui/charts.js`（398 行 Canvas 2D 共享原语，零外部库、零写死 hex，全走 `css('--xxx')` 从 `:root` 取值；6 项导出 API `css/resizeCanvas/colorLadder/drawText/drawAxis/drawBar/drawHatch/drawCandle/drawSentimentHeatmap/bindHover`）+ `src/server.js:511` `GET /api/sentiment/heatmap?days=60` 只读端点（`db.alertSamplesDaily().slice(-days)` 兜底 `{ok:false,error}`）+ `ui/index.html` `#mpHeatbox` DOM 锚点（`#mpbox` 兄弟级，不会被父级 innerHTML 覆写）+ 数据到位一次性重画、不入 `AnimGate.gatedLoop`（rAF 链数保持 6）。**图例**：冷静→恐慌 linear-gradient 冷青→暖金→恐慌红（3-stop `colorLadder`），斜纹标记极值柱（rate≥90 或 ≤10）作色盲备援。**hover tooltip 整句中文**：`「YYYY-MM-DD 炸板率 42.5% · 涨停 88 · 跌停 12 · 最高连板 7 · 封单 4.5 亿」` 6 段（日期+5 指标），`role=status` + `aria-live=polite`，`mouseleave` 干净隐藏。**验证双轨**：①`src/jarvis-charts.test.js` 37 项单测（`css()`/`colorLadder` 边界+插值+alpha/`hexToRgb` 三形式/6 项 draw 基元/主图数据形状+hit+tooltip 整句+极值斜纹+空数据兜底+缺字段兜底/`bindHover` DOM 生命周期/`resizeCanvas` DPR clamp）②`scripts/verify-charts.js` 端口 9338 CDP 契约（真实浏览器跑 60 天真实数据，6 断言：canvas 存在/模块 API 齐全/图例渐变/paintedPct≥5/hover 整句中文+role=status+aria-live+mouseleave 隐藏/未新增 rAF 链）；截图 `_shots/charts-sentiment.png`。**剩余 K线/涨跌分布/实时流/TAPE/个股 K 线**为 §5 剩余目标态，独立轮次落地后本项才升"已验证"。见 §13 C3。 |
 | 7 | 抽屉焦点锁/Esc/hash还原/小屏上滑 | §6 | 键盘全程操作一遍 | **不适用（目标态未落地）**（2026-09-17 判定：§6 抽屉功能在 `ui/` 无任何实现代码，属【新功能】，无对象可测；待 §13 C2 独立轮次实现后再测。见 §13 C2） |
 | 8 | 375/768/1024/1440 无横向滚动 | §3 | 四档截图（`scripts/screenshot-cdp.js` 第 5 参数传四档，逐档断言 `scrollWidth` vs `clientWidth`，溢出则退出码 4） | **已验证**（2026-09-16 首轮：页面级横向滚动四档全为否、退出码 0。但发现窄屏**信息静默裁切**：顶栏 6 指标 + 3 数据源灯 + meta 在 375 溢出 490px、768 溢出 97px、1024 溢出 26px、1440 为 0，被祖先 overflow 裁成一条硬直截断线，无省略号无更多提示。最要紧的是 `#srcs` 数据源健康灯被切掉——窄屏用户看不出行情已降级，正是「假的可用比明确不可用更危险」要挡的。截图 `_shots/viewport-2026-09-16-{375x812,768x1024,1024x768,1440x900}.png`。窄屏顶栏收折方案动全局视觉，本轮不擅自改，需拍板。**2026-09-17 闭环（方案① 汉堡菜单）**：走用户拍板的方案①——`<1024px` 时把顶栏 6 指标 + `#model` + `#meta` 折进汉堡按钮触发的浮层面板，`#srcs` 数据源灯**始终留在顶栏、任何宽度绝对可见**。落地：CSS 拆分 `@media (max-width:900px)`（面板/布局收折）与 `@media (max-width:1024px)`（顶栏折叠）两条断点——单条 900 会在 1024 视口下漏 26px `#meta`，1024 单独不够又要在 900 断点前保持顶部密度。HTML 在 `#top` 内加 `<button id="tbmenu">`，紧随其后加 `<div id="tbmenuPanel" role="menu">`；JS IIFE 走「点开克隆 live DOM、非持续同步」策略（顶栏是慢变量，clone 一次就够），复用 `#ops` 抽屉的 click-toggle / click-outside / Esc / aria-expanded 四路交互纪律。新增零依赖 CDP 验证器 `scripts/verify-tbmenu.js`（端口 9336），375 视口五断言：①`#srcs` 数据源灯在视口内绝对可见（4/4 全在 x=279-318 区间，服务器动态渲染 4 盏——个股资金流拆解/腾讯行情/东财行业/腾讯K线——非初始 HTML 硬编码 3 盏，故断言改为「全在视口且 ≥3」而非精确计数）②汉堡按钮关闭态可见 ③面板打开 aria-hidden=false / btn aria-expanded=true / 6 指标同步 6/6 ④面板内文本对比度 ≥4.5:1（16 个文本元素、0 违规、最低 6.84:1）⑤Esc 关闭 + click-toggle 双路径。截图 `_shots/tbmenu-375-open.png`（729.1 KB）。§8 #8 硬纪律（"数据源降级必须显性化"）在 375 视口下达成。） |
 
@@ -140,20 +140,22 @@
 > 落地：`--gd` 补齐入 `:root`（#F2B23E）；`#ffcf6b ×4`、`#7fe3b0/#4ad991/#8ff0c0 ×6` 全部收敛为 `var(--gd)`/`var(--ok)`；
 > rgba alpha 变体的 RGB 三元组同步对齐新权威值。详见 §13 Phase B。
 
-## 10. 星图增强清单【目标态 · 已定稿，待实现】（三轮评审收敛结果）
+## 10. 星图增强清单【已落地 · 2026-09-17 收尾轮】（三轮评审收敛结果）
 
 前提：starfield.js 一行不删，全部以增量方式增强；零新依赖；原 319 项测试作回归基线不动，新功能配独立测试文件 jarvis-starmap-plus.test.js。
 
-| # | 项 | 设计要点 | 工作量 |
-|---|---|---|---|
-| 1 | 三级景深聚焦（悬停） | 自身+一度邻居 alpha 1.0 → 二度 0.45 → 其余 0.12，相机 fov 轻推 -3°；遍历两遍邻接表 | ~60 行 |
-| 2 | 点击聚焦 + Esc 归位 | 聚焦前记录相机位置，平滑飞入（2s easeInOutCubic）；点空白或 Esc 飞回原位，复用 showMemoryCard | ~50 行 |
-| 3 | 事件驱动脉冲传播 | 禁匀速装饰流；脉冲由事件触发：新记忆写入=核心→实体，AI 召回=实体→核心，沿真实连接路径 | ~40 行 |
-| 4 | shader 内发光 | 重要节点（memCount 高位）点精灵径向衰减外扩 + additive 双色混合；零新纹理零新 draw call | ~15 行 |
-| 5 | 黄金角螺旋布局 | 实体按 137.5° 叶序螺旋挂所属星系；新增只追加末端，既有坐标永不动；淡忘节点留空位（淡忘可视化） | ~80 行 |
-| 6 | jarvis-starmap-plus.test.js | 5 项各配独立断言；原测试套件保持全绿 | ~80 行 |
+| # | 项 | 设计要点 | 工作量 | 落地 |
+|---|---|---|---|---|
+| 1 | 三级景深聚焦（悬停） | 自身+一度邻居 alpha 1.0 → 二度 0.45 → 其余 0.12，相机 fov 轻推 -3°；遍历两遍邻接表 | ~60 行 | `applyDepthFocus` + `neighborLevels` + `hoverFov` lerp（本轮补齐 fov） |
+| 2 | 点击聚焦 + Esc 归位 | 聚焦前记录相机位置，平滑飞入（2s easeInOutCubic）；点空白或 Esc 飞回原位，复用 showMemoryCard | ~50 行 | `focus`/`unfocus` + `app.js:1476` Esc 归位 |
+| 3 | 事件驱动脉冲传播 | 禁匀速装饰流；脉冲由事件触发：新记忆写入=核心→实体，AI 召回=实体→核心，沿真实连接路径 | ~40 行 | `pulseAlong` + `pulseWrite`/`pulseRecall`（本轮补齐 `learned` 事件→`pulseWrite` 触发） |
+| 4 | shader 内发光 | 重要节点（memCount 高位）点精灵径向衰减外扩 + additive 双色混合；零新纹理零新 draw call | ~15 行 | `impAdd` smoothstep 门控 + `gl.SRC_ALPHA,gl.ONE` |
+| 5 | 黄金角螺旋布局 | 实体按 137.5° 叶序螺旋挂所属星系；新增只追加末端，既有坐标永不动；淡忘节点留空位（淡忘可视化） | ~80 行 | `CAT_CAP=100` + `SLOT_CAP=520` + `stableSlot` φ⁻¹ 低差异序列 + `assignSlots` 撞槽确定性顺移 |
+| 6 | jarvis-starmap-plus.test.js | 5 项各配独立断言；原测试套件保持全绿 | ~80 行 | 11 断言（STAGE4 GL 层、fov shader 视觉无独立数值点），全套 682 项回归绿 |
 
-合计约 325 行（含测试），预估 3 天。
+原合计约 325 行（含测试），预估 3 天。实际本轮新增 ~60 行 + 缺口补齐 ~20 行 = ~80 行——§10 五项大部分在 DESIGN.md 写完后、设计审计开跑前，`ui/starfield.js` 已按同套约定实现（commit 6655582），本轮实际工作是验证 + 补齐 fov 轻推与 pulseWrite 触发两个缺口。详见 §13 Phase E。
+
+验收挂钩：实现后对照 §8 检查单第 1/5/6 项验证（双通道色、rAF 预算、图例与 role=status）。
 
 待决项（未拍板，不进入本轮实现）：
 - 时光回溯模式：拖时间轴回放记忆图谱 30 天生长过程，~120 行，零约束冲突，等单独确认
@@ -205,7 +207,7 @@
 |---|---|---|---|
 | A1 | §8 #2 无外部字体请求 | ✓ 已合规 | 全库 `@font-face`/`fonts.googleapis`/`fonts.gstatic`/`url(http)` 0 匹配；`--num` 栈首是本地回退 `"SF Mono",Consolas,"Roboto Mono"` |
 | A2 | §8 #3 文字对比度 ≥4.5:1；`--dim` 不用于正文 | ✓ 已合规 | 见 §8 #3。零依赖 CDP 抽测 431 元素 0 违规，最低 4.64:1。首轮 24 处违规（10-11px 元数据标签）经 `--faint` 提亮 #7888a0→#8ba0b8 + `.hud-m`/`.lg-t` 两处 rgba 收敛为 var(--faint) 后全数通过 |
-| A3 | §8 #6 hover 数值 | — 不适用 | §5 图表类（K线/涨跌分布/情绪温度）为【目标态·未落地】，`ui/` 无 canvas 图表，无对象可加 hover；星图是 3D 网络图，非数据图表 |
+| A3 | §8 #6 hover 数值 | **部分已合规**（2026-09-17 C3-A） | 情绪温度热力柱 hover tooltip 已落地并验证——`ui/charts.js` `bindHover()` 生成 `.chart-tip` DOM（`role=status` + `aria-live=polite`），命中柱时输出整句中文 `「2026-09-01 炸板率 42.5% · 涨停 88 · 跌停 12 · 最高连板 7 · 封单 4.5 亿」`（日期+5 指标、`%`/`亿` 单位齐全），`mouseleave` 干净隐藏；`scripts/verify-charts.js` CDP 契约六断言全绿。**K线/涨跌分布/实时流/TAPE/个股 K 线**仍在目标态，§5 剩余图表 hover 待 C3-B/C3-C 与后续独立轮次落地 |
 | A4 | §8 #6 `role=status` 整句播报 | ✓ 已合规 | `ui/index.html:869` `#srcbanner role="status" aria-live="assertive"`，`app.js:598-613` `renderSourceBanner` 输出整句中文（"行情源「XX」不可用，相关数据可能不是最新，请以实时行情软件为准"），非裸数字 |
 
 ### Phase B · 决策落定 + 颜色收敛（已落地）
@@ -223,8 +225,8 @@
 |---|---|---|---|
 | C1 | §8 #5 rAF Canvas ≤3 | **设计约束**（非代码可绕过） | 6 条 rAF 链 = `AnimGate.gatedLoop` ×4 + `starfield.frame` ×1 + `voicecore` ×1；失焦暂停与 reduced-motion 已一致接入全部 6 条。要压到 ≤3 需重构 AnimGate 为共享调度器，属架构变更，本轮只做决策不动代码 |
 | C2 | §8 #7 抽屉焦点锁/Esc/hash/小屏上滑 | 【新功能】 | §6 抽屉未在 `ui/` 落地，无对象可测；需一轮独立实现 |
-| C3 | §5 图表落地（K线/涨跌分布/情绪温度） | 【新功能】 | 目标态未落地，无 canvas 图表；本轮 A3 因此判"不适用" |
-| C4 | §10 星图增强 6 项 | 【新功能】 | ~325 行 + `jarvis-starmap-plus.test.js`，见 §10 |
+| C3 | §5 图表落地（K线/涨跌分布/情绪温度） | **【部分落地】**（2026-09-17 C3-A 收官） | **C3-A 情绪温度 60 日热力柱** 已交付：①`ui/charts.js` 398 行 Canvas 2D 共享原语（`css`/`resizeCanvas`/`colorLadder`/`drawText`/`drawAxis`/`drawBar`/`drawHatch`/`drawCandle`/`drawSentimentHeatmap`/`bindHover`；零外部库、零写死 hex、全走 CSS 变量）②`src/server.js` `GET /api/sentiment/heatmap?days=60` 只读端点（`db.alertSamplesDaily().slice(-days)` + `{ok:false,error}` 兜底）③`ui/index.html` `#mpHeatbox` DOM 锚点（`#mpbox` 兄弟级，避开父级 innerHTML 覆写）④数据到位一次性重画、不入 `AnimGate.gatedLoop`（rAF 链数保持 6）⑤`src/jarvis-charts.test.js` 37 项单测 + `scripts/verify-charts.js` CDP 端口 9338 六断言契约验证器全绿。图例冷青→暖金→恐慌红渐变 + 斜纹标记极值柱作色盲备援；hover tooltip 整句中文 `role=status`。§5 第 3 项（板块资金水平条形）已由 `.fb` 类 flowbar 覆盖、不重做。**C3-B 涨跌分布直方图** + **C3-C 大盘 K 线** 待下一轮独立开工；**§5 第 4 项 实时流面积图/TAPE**（需流式端点基建）与**§5 第 2 项 个股 K 线**（需个股数据抓取链路）另列独立轮次 |
+| C4 | §10 星图增强 6 项 | **【已落地·已验证】**（2026-09-17 收尾轮） | 见下方 Phase E 明细；本轮实际新增 ~60 行 + 缺口补齐 ~20 行，与 §10 估算 ~325 行的偏差见 Phase E 说明 |
 
 ### Phase D · 收尾
 
@@ -233,6 +235,25 @@
 | D1 | 备份文件清理（11+ 个 `.bak*`） | **保留**。等 C2/C3/C4 目检后再删；现在删则失去回退点 |
 | D2 | git 提交 | 本轮末步；用户明说"不擅自提交"故仅在明确要求后执行 |
 | D3 | DESIGN.md 更新 | 本表 + §1 补注 + §8 #1/#2/#6 状态同步 |
+
+### Phase E · C4 §10 星图增强交付（2026-09-17 收尾轮）
+
+授权：「需要我决策给你权限按自己的建议来」。凡 §10 有明文条目、无技术障碍的，直接落地；无对象可测的判"不适用"。
+
+| 项 | 落地 | 验证 |
+|---|---|---|
+| #1 三级景深聚焦（悬停） | `ui/starfield.js:1294-1312` `applyDepthFocus` 分层 dim（1.0/0.45/0.12）+ 边分层；`neighborLevels` BFS 两遍遍历在 `ui/starplus.js:50-67` | `src/jarvis-starmap-plus.test.js` 3 断言全绿；CDP 验证 `hover/focus/unfocus/pick` 均零抛错（`scripts/verify-starmap-plus.js` 端口 9337） |
+| #1 fov 轻推 -3°（原缺失） | `ui/starfield.js:308-311` `hoverFov`/`hoverFovT` 状态 + `applyDepthFocus` 推目标 + `frame` 0.045 lerp + `keepGoing` 判定；`FOVY = 1.0 - hoverFov*0.052`，`fit` 距离按 `tan(FOVY/2)` 反向缩放保持内容球尺寸 | 数值不外部可测，靠 CDP 截图人眼确认（`_shots/starmap-plus-verify.png`）；浏览器控制台 0 error/0 warning |
+| #2 点击聚焦 + Esc 归位 | `ui/starfield.js:1315-1334` `focus`/`unfocus` + `focRy/focRx/focZ` 0.045 lerp 收敛到目标；`app.js:1476` Esc 归位 | 同上 CDP 验证 |
+| #3 事件驱动脉冲传播 | `ui/starfield.js:1342-1353` `pulseAlong` setTimeout 260ms 逐级；`pulseWrite` = 核心→实体正向路径，`pulseRecall` = 反向 | `src/jarvis-starmap-plus.test.js` `pulseOffsets` 3 断言全绿 |
+| #3 缺口补齐：pulseWrite 触发 | `ui/app.js:501-512` `learned` 事件处理器：`loadStarmap().then(() => ms.forEach(m => STAR.pulseWrite(m.entity)))` —— 先重建星图让 `nameToIdx` 里真的有新实体，再触发脉冲（否则路径返回 null 等于无声） | CDP 验证 `STAR.pulseWrite` typeof=function 且调用无错 |
+| #4 shader 内发光 | `ui/starfield.js:144-147,167` `impAdd` additive 双色混合（0.55/0.80/1.0）；`smoothstep(1.8,3.4,vSz)` 门控 | 全套 25 项 shader 测试全绿 |
+| #5 黄金角螺旋布局 | `ui/starfield.js:605-623,677-681` `CAT_CAP=100` + `SLOT_CAP=520` + `stableSlot(id, cap)`（φ⁻¹ 低差异序列）+ `assignSlots` 撞槽确定性顺移 | `src/jarvis-starmap-plus.test.js` 5 断言全绿（稳定性/范围/顺序无关/无重叠） |
+| #6 独立测试文件 | `src/jarvis-starmap-plus.test.js` 15 项（本次实际 11 项：STAGE4 属 GL 层不可数值验证，STAGE1 fov 属 shader 视觉，均无独立断言点） | 11/11 全绿；全套 682 项回归无失败 |
+
+**与 §10 估算的偏差**：原估 325 行；实际本轮新增 ~60 行 + 缺口补齐 ~20 行 = ~80 行。原因是 §10 五项大部分在 DESIGN.md 写完后、设计审计开跑前，`ui/starfield.js` 已按同套约定实现（`applyDepthFocus`/`focus`/`pulseAlong`/`impAdd`/`assignSlots` 都已在 commit 6655582），本轮实际工作是**验证 + 补齐两个缺口**（fov 轻推 -3°、pulseWrite 触发）。
+
+**回归基线**：全套 682 项测试通过（`scripts/run-tests.js`），星图数据 431 节点 / 977 边 / 263 记忆 / filler=0，STAR 全部 5 项 API（hover/focus/unfocus/pulseWrite/pulseRecall）+ pick 均零抛错，浏览器控制台 0 error/0 warning。截图 `_shots/starmap-plus-verify.png`（1700.9 KB）。
 
 ### 本轮实际完成范围
 

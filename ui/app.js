@@ -502,7 +502,13 @@
       const ms = d.memories || [];
       if (ms.length) {
         assistantBubble(ms.map(m => '- ' + m.content).join('\n'), '新记忆');
-        loadStarmap();      // 星图重建，新星出现
+        /* 先重建星图，等 nameToIdx 里真的有了新实体，再触发脉冲。
+         * 否则 pulseWrite 里查不到实体索引，脉冲路径返回 null，等于无声。 */
+        loadStarmap().then(() => {
+          ms.forEach(m => {
+            if (m.entity && window.STAR && STAR.pulseWrite) STAR.pulseWrite(m.entity);
+          });
+        });
       }
     }
     else if (ev === 'error') {

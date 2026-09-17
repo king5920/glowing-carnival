@@ -26,6 +26,7 @@ const SUITES = [
   ['巡视 patrol',         'src/jarvis-patrol.test.js'],
   ['星图 starmap',        'src/jarvis-starmap.test.js'],
   ['星图增强 starmap-plus', 'src/jarvis-starmap-plus.test.js'],
+  ['图表 charts',          'src/jarvis-charts.test.js'],
   ['着色 shader',         'src/jarvis-shader.test.js'],
   ['告警 alerts',         'src/jarvis-alerts.test.js'],
   ['市场阶段 phase',      'src/jarvis-market-phase.test.js'],
