@@ -153,6 +153,13 @@ const COMPUTE_TYPE = process.env.JARVIS_WHISPER_COMPUTE || 'int8';
 
 const PY_CANDIDATES = [
   process.env.JARVIS_PYTHON,
+  /* 本机实测（2026-09-10）：PATH 里的 python/python3 全指向 qianfan 沙箱
+   * 的隔离环境（无 faster-whisper），py 启动器损坏（指向不存在的 Accio 路径）。
+   * 语音识别专用 venv（uv 托管，可重建）：C:/Users/99904/jarvis-whisper-venv
+   * probe 只测"第一个能跑的 Python"，所以本机必须把 venv 放最前，
+   * 否则会先命中沙箱 python 而误报"faster-whisper 未安装"。
+   * 其它机器上该路径不存在时 spawn 失败会顺延到 python/python3，不影响可移植性。 */
+  'C:/Users/99904/jarvis-whisper-venv/Scripts/python.exe',
   'python',
   'python3',
   /* ⚠ 不放 'py'：实测本机 py 启动器坏了，
@@ -184,9 +191,15 @@ const PROBE_TTL_MS = 5 * 60 * 1000;
  * （那里是因为 SpeechRecognitionEngine 初始化要 300-600ms）。
  *
  * 协议：stdin 送一行 JSON 请求，stdout 回一行 JSON 结果。
- * 用行分隔而非长度前缀 —— 调试时能直接看懂。 */
-let _worker = null;
-const WORKER_IDLE_MS = 10 * 60 * 1000;   // 闲置 10 分钟就放掉（模型常驻内存，base 约 150MB）
+ * 用行分隔而非长度前缀 —— 调试时能直接看懂。
+ *
+ * 多档位：_workers 按 size 各管一个常驻进程。
+ *   base 是默认的快通道（~1.5s/句，常驻）；
+ *   small 是"复核"通道（~6s/句，准但慢），按需启动，
+ *   只在 base 结果可疑时才用，且不阻塞主交互。 */
+const _workers = new Map();   // size -> worker 对象
+const WORKER_IDLE_MS = 10 * 60 * 1000;   // 闲置 10 分钟就放掉（模型常驻内存）
+let _worker = null;           // 指向当前 base worker（兼容旧引用/状态展示）
 let _workerIdleTimer = null;
 
 function runPy(pyExe, code, timeoutMs = 20000) {
@@ -365,15 +378,16 @@ async function probe(force = false) {
 
 /* ══════════ 常驻 worker 实现 ══════════ */
 
-/** worker 端的 Python 脚本。模型加载一次，然后循环读 stdin。 */
-function workerCode() {
+/** worker 端的 Python 脚本。模型加载一次，然后循环读 stdin。
+ * modelRef：加载哪个模型（本地目录路径或档位名）。 */
+function workerCode(modelRef) {
   return [
     'import sys, json, math',
     'from faster_whisper import WhisperModel',
     // 模型加载放在循环外 —— 这是整个优化的核心
     /* 有本地模型目录就传目录路径，完全跳过 hub 下载；
      * 否则传档位名（"base"），由 faster-whisper 自己去 hub 拉。 */
-    `m = WhisperModel(${JSON.stringify(localModelPath() || MODEL_SIZE)}, device="cpu", compute_type=${JSON.stringify(COMPUTE_TYPE)})`,
+    `m = WhisperModel(${JSON.stringify(modelRef)}, device="cpu", compute_type=${JSON.stringify(COMPUTE_TYPE)})`,
     'sys.stdout.write(json.dumps({"type":"ready"}) + "\\n"); sys.stdout.flush()',
     'for line in sys.stdin:',
     '    line = line.strip()',
@@ -406,18 +420,22 @@ function workerCode() {
   ].join('\n');
 }
 
-/** 拿到一个 ready 的 worker（没有就启动）。失败返回 null 让调用方回退。 */
-async function getWorker(pyExe) {
-  if (_worker && _worker.ready && _worker.proc && !_worker.proc.killed) {
-    touchWorker();
-    return _worker;
+/** 拿到一个 ready 的 worker（没有就启动）。失败返回 null 让调用方回退。
+ * @param {string} pyExe python 可执行
+ * @param {string} size  模型档位（base/small/...） */
+async function getWorker(pyExe, size = MODEL_SIZE) {
+  const existing = _workers.get(size);
+  if (existing && existing.ready && existing.proc && !existing.proc.killed) {
+    touchWorker(size);
+    return existing;
   }
-  if (_worker && _worker.starting) return _worker.starting;   // 并发调用复用同一次启动
+  if (existing && existing.starting) return existing.starting;   // 并发复用同一次启动
 
+  const modelRef = localModelPath(size) || size;
   const startPromise = new Promise(resolve => {
     let proc;
     try {
-      proc = spawn(pyExe, ['-u', '-c', workerCode()], {
+      proc = spawn(pyExe, ['-u', '-c', workerCode(modelRef)], {
         windowsHide: true,
         env: Object.assign({}, process.env, {
           PYTHONIOENCODING: 'utf-8',
@@ -428,17 +446,23 @@ async function getWorker(pyExe) {
         }),
       });
     } catch (e) {
-      _worker = null;
+      _workers.delete(size);
       return resolve(null);
     }
 
-    const w = { proc, ready: false, buf: '', pending: new Map(), seq: 0, starting: null };
-    _worker = w;
+    const w = { proc, size, ready: false, buf: '', pending: new Map(), seq: 0, starting: null };
+    _workers.set(size, w);
+    if (size === MODEL_SIZE) _worker = w;
 
     /* 启动超时给足：首次要下载模型（实测走镜像约 100 秒），
-     * 之后加载模型约 13 秒。 */
+     * 之后加载模型约 13 秒（small 更久）。 */
     const timer = setTimeout(() => {
-      if (!w.ready) { try { proc.kill(); } catch (_) {} _worker = null; resolve(null); }
+      if (!w.ready) {
+        try { proc.kill(); } catch (_) {}
+        _workers.delete(size);
+        if (_worker === w) _worker = null;
+        resolve(null);
+      }
     }, 600000);
 
     proc.stdout.on('data', d => {
@@ -454,7 +478,7 @@ async function getWorker(pyExe) {
         if (msg.type === 'ready') {
           w.ready = true; w.starting = null;
           clearTimeout(timer);
-          touchWorker();
+          touchWorker(size);
           resolve(w);
           continue;
         }
@@ -471,35 +495,52 @@ async function getWorker(pyExe) {
       // 未完成的请求全部失败，别让调用方永久挂着
       w.pending.forEach(cb => cb({ type: 'error', err: 'worker 退出' }));
       w.pending.clear();
+      _workers.delete(size);
       if (_worker === w) _worker = null;
       clearTimeout(timer);
       resolve(w.ready ? w : null);
     });
     proc.on('error', () => {
       clearTimeout(timer);
+      _workers.delete(size);
       if (_worker === w) _worker = null;
       resolve(null);
     });
   });
 
-  if (_worker) _worker.starting = startPromise;
+  const w0 = _workers.get(size);
+  if (w0) w0.starting = startPromise;
   return startPromise;
 }
 
-/** 续期闲置计时器 —— 模型常驻内存（base 约 150MB），长期不用该放掉 */
-function touchWorker() {
+/** 续期闲置计时器 —— 模型常驻内存，长期不用该放掉。
+ * small 复核 worker 用更短的闲置时间（它大、又不常用）。 */
+function touchWorker(size = MODEL_SIZE) {
+  if (size !== MODEL_SIZE) {
+    const w = _workers.get(size);
+    if (w) {
+      if (w.idleTimer) clearTimeout(w.idleTimer);
+      w.idleTimer = setTimeout(() => stopWorker(size), 2 * 60 * 1000);
+      if (w.idleTimer.unref) w.idleTimer.unref();
+    }
+    return;
+  }
   if (_workerIdleTimer) clearTimeout(_workerIdleTimer);
-  _workerIdleTimer = setTimeout(() => { stopWorker(); }, WORKER_IDLE_MS);
-  // 别让这个定时器阻止 node 退出
+  _workerIdleTimer = setTimeout(() => { stopWorker(MODEL_SIZE); }, WORKER_IDLE_MS);
   if (_workerIdleTimer.unref) _workerIdleTimer.unref();
 }
 
-/** 停掉常驻进程 */
-function stopWorker() {
-  if (_workerIdleTimer) { clearTimeout(_workerIdleTimer); _workerIdleTimer = null; }
-  const w = _worker;
-  _worker = null;
-  if (!w || !w.proc) return;
+/** 停掉常驻进程（默认停 base；可指定档位） */
+function stopWorker(size = MODEL_SIZE) {
+  if (size === MODEL_SIZE && _workerIdleTimer) {
+    clearTimeout(_workerIdleTimer); _workerIdleTimer = null;
+  }
+  const w = _workers.get(size);
+  if (!w) return;
+  _workers.delete(size);
+  if (_worker === w) _worker = null;
+  if (w.idleTimer) clearTimeout(w.idleTimer);
+  if (!w.proc) return;
   try { w.proc.stdin.write(JSON.stringify({ cmd: 'quit' }) + '\n'); } catch (_) {}
   setTimeout(() => { try { w.proc.kill(); } catch (_) {} }, 1500).unref?.();
 }
@@ -520,13 +561,14 @@ async function transcribe(wavPath, opts = {}) {
     return { ok: false, reason: '音频文件不存在: ' + wavPath };
   }
 
-  const w = await getWorker(p.python);
+  const size = opts.model || MODEL_SIZE;
+  const w = await getWorker(p.python, size);
   if (!w || !w.ready) {
     return {
       ok: false,
       reason: p.modelCached
         ? 'whisper 进程启动失败'
-        : `whisper 进程启动失败（首次需从 ${HF_ENDPOINT} 下载约 ${MODEL_MB[MODEL_SIZE] || '?'}MB 模型）`,
+        : `whisper 进程启动失败（首次需从 ${HF_ENDPOINT} 下载约 ${MODEL_MB[size] || '?'}MB 模型）`,
       fallback: 'System.Speech',
     };
   }
@@ -700,8 +742,21 @@ async function status() {
 /** 清缓存 —— 用户装完后不用重启服务 */
 function resetProbe() { _probeCache = null; _probeAt = 0; }
 
+/** 后台预热某档模型（不 await、不阻塞）。
+ * 给"复核专用的 small"用：它冷启动加载要约 20-30 秒，等真要复核时再加载
+ * 用户会干等；监听开始后悄悄拉起来，第一次低置信指令命中时往往已是热的。
+ * 任何失败都静默——预热只是优化，不是功能。 */
+async function prewarm(size = 'small') {
+  try {
+    const p = await probe();
+    if (!p.available) return false;
+    const w = await getWorker(p.python, size);
+    return !!(w && w.ready);
+  } catch (_) { return false; }
+}
+
 module.exports = {
-  probe, transcribe, status, resetProbe, stopWorker, localModelPath,
+  probe, transcribe, status, resetProbe, stopWorker, localModelPath, prewarm,
   cleanTranscript,
   MODEL_SIZE, MODEL_MB, COMPUTE_TYPE, TMP_DIR, HF_ENDPOINT, INITIAL_PROMPT,
   LOCAL_MODEL_DIR, WORKER_IDLE_MS,

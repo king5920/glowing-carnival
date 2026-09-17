@@ -33,7 +33,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const QUANT_ROOT = process.env.JARVIS_QUANT_ROOT || 'C:\\Users\\99904\\quant_research';
+const QUANT_ROOT = process.env.JARVIS_QUANT_ROOT || 'D:\\quant_research';
 
 /* ══════ 白名单 ══════
  *

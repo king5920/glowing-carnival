@@ -22,6 +22,7 @@
 const db = require('./db');
 const { createJarvisMind } = require('./jarvis-persona.js');
 const patrol = require('./patrol');
+const clock = require('./clock');
 
 const STATE_KEY = 'jarvis_mind_v1';
 
@@ -302,13 +303,59 @@ async function heartbeatTick() {
   await jiwen.tick(TICK_MINUTES);
   const triggers = await jiwen.checkThresholds();
 
+  /* ── 盘前简报（用户 2026-09-10 点名的每日定时工作）──
+   *
+   * 交易日 08:40-09:05 自动跑一次，独立于情绪触发和静默窗口：
+   *   - 静默窗口 09:00 才开，但简报 08:55 就该到，所以放在静默过滤之前
+   *   - 它是"用户安排的具体工作"，按用户的规则豁免静默
+   *   - 20h 冷却 + 窗口判断保证一天最多一次；开机晚了窗口内仍会补
+   *   - 先标记避免失败后反复重试；产出只进网页/记忆，不推飞书
+   */
+  try {
+    if (patrol.morningBriefDue && patrol.morningBriefDue()) {
+      patrol.markMorningBriefDone();
+      broadcast('mind_activity', { reason: 'brief', urgency: 0, label: '生成盘前简报', task: 'morning_brief', findings: [] });
+      const br = await patrol.runMorningBrief();
+      if (br && br.ok && br.brief) {
+        _lastProactiveAt = Date.now();
+        broadcast('mind_proactive', {
+          action: 'report', urgency: 'low',
+          text: br.brief.text, findings: br.findings || [],
+        });
+      }
+      return;   // 这一拍就做简报
+    }
+  } catch (e) {
+    broadcast('mind_activity', { reason: 'brief', urgency: 0, label: '盘前简报出错', task: 'morning_brief',
+      findings: [{ kind: 'error', severity: 'medium', text: e.message }] });
+  }
+
   // ── 触发主动行为 ──
   const now = Date.now();
   const inCooldown = now - _lastProactiveAt < PROACTIVE_COOLDOWN_MS;
 
   // 找出最高优先级的触发
   let strongest = null;
-  for (const t of triggers) {
+
+  /* ══ 非交易时段静默（用户 2026-09-10 明确要求）══════
+   *
+   * 「不是交易时间段别巡视，除非我主动提问或安排其它具体工作」
+   *
+   * 边界：
+   *   - 只拦【后台主动行为】（自己搭话 + 自己找事做巡视）
+   *   - 用户主动提问走 brain.js，不经过心跳，永远照常响应
+   *   - 收盘扫描是用户点名要的每日动作，交给 patrol.runOne 内部单独放行：
+   *     窗口内（15:00-23:00）照常跑，这里的静默不挡它。
+   *
+   * 实现：非主动窗口时，把"搭话/找事做"两类触发直接压掉，
+   * 但情绪 tick（上面的 jiwen.tick）照走 —— 心境还在累积，
+   * 只是不开口、不外放。 */
+  const proactiveOn = clock.isProactiveWindow(new Date());
+  const activeTriggers = proactiveOn
+    ? triggers
+    : triggers.filter(t => t.action !== 'contact' && t.action !== 'find_activity');
+
+  for (const t of activeTriggers) {
     if (!strongest || t.urgency > strongest.urgency) strongest = t;
   }
 

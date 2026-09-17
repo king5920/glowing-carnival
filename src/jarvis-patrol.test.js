@@ -746,16 +746,44 @@ test('第一优先：资金流数量短缺必须断言，不能静默成功', as
   }
 });
 
-test('第一优先：数量短缺不能记为健康成功', () => {
-  /* 健康表如果把"要20给1"记成成功，面板永远是绿的，
-   * 而用户拿到的是残缺数据 —— 指标测的不是用户关心的东西。
-   * 这正是 Phase 20 里「100%成功但用户说用不上」的翻版。 */
+test('第一优先：数量短缺必须显式暴露，且不能污染健康表', () => {
+  /* ══ 这条断言 2026-09-11 改过目标，原因必须写清楚 ══
+   *
+   * 原版要求：短缺时 health.record(SOURCE, false)。
+   * 出发点是对的 —— 「面板绿灯 + 用户拿到残缺数据」是 Phase 20
+   * 那类"指标测的不是用户关心的东西"的翻版。
+   *
+   * 但用错了机制，实测后果更坏：
+   *   东财 fflow **设计上就只给当日**（四个入口全试过）。
+   *   于是每次调用都记一次失败 → 连续 36 次 → 永久降级，
+   *   横幅"个股资金流拆解不可用，已持续 2.5 天"。
+   *   而同一时刻 fundFlow('600519') 明明返回了当日真实数据，
+   *   新浪备用源也正常给 10 天序列 —— 整条链路是通的。
+   * 把"接口能力上限"记成"接口故障"，等于常年拉响假警报；
+   * 真出故障时用户已经不看横幅了。这比绿灯骗人更危险。
+   *
+   * 所以职责重新划分，两条都必须成立：
+   *   健康表 → 只回答"这个源现在还取不取得到数据"
+   *   返回值 → 负责让调用方看见"数据全不全"（shortfall + warning + note）
+   * 下面同时守住这两条。 */
   const src = require('fs').readFileSync(
     require('path').join(__dirname, 'tools', 'stock_fundflow.js'), 'utf8');
-  const m = /if \(shortfall\) \{[\s\S]{0,400}?\n  \}/.exec(src);
-  assert(m, '找不到 shortfall 分支');
-  assert(/health\.record\(SOURCE,\s*false/.test(m[0]),
-    '数量短缺时应 health.record(false)，否则面板绿灯骗人');
+
+  /* 1) 短缺事实必须出现在返回值里，不能只写日志 —— 这是原断言真正要保的东西 */
+  assert(/shortfall,/.test(src), '返回值里必须带 shortfall 字段');
+  assert(/warning:\s*shortfall/.test(src), '短缺时必须带 warning 自首');
+
+  /* 2) 拿到当日数据就该记成功，不能因为"给不满多日"而记失败 */
+  assert(/health\.record\(SOURCE,\s*true\);/.test(src),
+    '取到当日数据必须记成功 —— 否则接口能力上限会被当成故障，永久降级');
+  assert(!/数量短缺：请求/.test(src),
+    '不应再把数量短缺写进健康表失败原因（会造成永久假降级）');
+
+  /* 3) 真正的故障路径仍必须记失败，别把这条一起放水了 */
+  assert(/health\.record\(SOURCE,\s*false,\s*'请求失败/.test(src),
+    '网络失败仍必须记 false');
+  assert(/health\.record\(SOURCE,\s*false,\s*'klines 解析后为空'\)/.test(src),
+    '空数据仍必须记 false');
 });
 
 test('第二优先：板块必须分页抓全，不能只抓第一页', async () => {
@@ -1236,7 +1264,13 @@ test('低置信度唤醒被挡且不开窗口', () => {
   const gate = micQuality.currentPolicy().wakeConf;
   const tooLow = Math.max(gate - 0.15, 0.001);
   const r = h.fire({ type: 'wake', text: '贾维斯', conf: tooLow });
-  assert(r.length === 0, `conf=${tooLow} 低于阈值 ${gate} 却没被挡`);
+  /* 2026-09-13 起，低置信 wake 在开了 whisper 兜底的设备上会送复核，
+   * 而不是静默丢弃（修漏唤醒）。所以这里锁的是**意图**，不是"零事件"：
+   *   ① 绝不能直接开窗；
+   *   ② 绝不能直接当成功唤醒。
+   * 复核是异步的，成功与否由 whisper 决定，且有节流/信号地板兜底。 */
+  const woke = r.some(e => e.type === 'wake');
+  assert(!woke, `conf=${tooLow} 低于阈值 ${gate} 竟直接当成唤醒`);
   assert(!h.L.inConvo(), '低置信度居然打开了对话窗口');
 });
 
@@ -1347,14 +1381,26 @@ test('噪声过滤：单字语气词不发给模型', () => {
     '"嗯"被当成指令了 —— 语气词和键盘声都会这样触发模型调用');
 });
 
-test('噪声过滤：低置信度上报「没听清」但不调模型', () => {
-  /* 不是完全丢弃 —— 界面显示"没听清"比毫无反应好，
-   * 让用户知道麦克风活着。但绝不发给模型。 */
-  const h = mkListener();
-  h.wake();
-  const r = h.fire({ type: 'speech', text: '哗啦哗啦', conf: 0.2 });
-  assert(r.some(x => x.type === 'speech_unclear'), '没上报 speech_unclear');
-  assert(!r.some(x => x.type === 'speech'), '低置信度语音被发给模型了');
+test('噪声过滤：低置信度不上报模型（whisper 兜底关闭时才显示"没听清"）', () => {
+  /* 不是完全丢弃 —— 界面显示"没听清"比毫无反应好，让用户知道麦克风活着。
+   * 但绝不发给模型。
+   *
+   * 2026-09-11 起：needWhisperConfirm 在所有设备等级都为 true（血的教训，
+   * 见 mic_quality.js），所以低置信默认走 whisper 异步复核，不再同步产生
+   * speech_unclear。这条用例显式把兜底关掉，锁"没有 whisper 时"的旧契约：
+   * 上报没听清、但不发给模型。 */
+  const micQuality = require('./mic_quality');
+  const orig = micQuality.currentPolicy;
+  micQuality.currentPolicy = () => ({ wakeConf: 0.3, needWhisperConfirm: false, grade: 'wideband' });
+  try {
+    const h = mkListener();
+    h.wake();
+    const r = h.fire({ type: 'speech', text: '哗啦哗啦', conf: 0.2 });
+    assert(r.some(x => x.type === 'speech_unclear'), '没上报 speech_unclear');
+    assert(!r.some(x => x.type === 'speech'), '低置信度语音被发给模型了');
+  } finally {
+    micQuality.currentPolicy = orig;
+  }
 });
 
 test('VAD 参数已设置且比默认值更宽容', () => {
@@ -1799,8 +1845,10 @@ test('whisper 唤醒复核：每条退出路径都必须留痕', () => {
    * 加上诊断事件后一次就看到根因：no_speech peak=31。 */
   const src = require('fs').readFileSync(
     require('path').join(__dirname, 'voice.js'), 'utf8');
-  const fn = /_tryWhisperWake\(rawText, rawConf\)\s*\{[\s\S]*?\n  \}/.exec(src);
-  assert(fn, '找不到 _tryWhisperWake');
+  /* 复核逻辑 2026-09-11 抽到共用 helper（wake/command 两条通道都走它）。
+   * 守卫针对 helper，保证"静默 return 不得多于诊断事件"的约束不被重构丢掉。 */
+  const fn = /_whisperFromRing\(rawText, kind\)\s*\{[\s\S]*?\n  \}/.exec(src);
+  assert(fn, '找不到 _whisperFromRing');
   const body = fn[0];
   /* 数一下 return 和诊断事件的数量 —— 不要求一一对应，
    * 但静默 return 明显多于事件就说明又在暗地里失败。 */
@@ -1828,7 +1876,7 @@ test('whisper 唤醒复核：busy 标记不能泄漏', () => {
    * 必须用 finally 清理，不能只在正常路径清。 */
   const src = require('fs').readFileSync(
     require('path').join(__dirname, 'voice.js'), 'utf8');
-  const fn = /_tryWhisperWake\(rawText, rawConf\)\s*\{[\s\S]*?\n  \}/.exec(src);
+  const fn = /_whisperFromRing\(rawText, kind\)\s*\{[\s\S]*?\n  \}/.exec(src);
   assert(/finally\s*\{[\s\S]*?_whisperBusy = false/.test(fn[0]),
     'busy 标记没在 finally 里清 —— 抛异常就永久卡住');
 });
@@ -2009,8 +2057,8 @@ test('whisper 复核必须从环形缓冲取音频，不能现场录', () => {
    * 「因静音被跳过」降到 0 次。 */
   const src = require('fs').readFileSync(
     require('path').join(__dirname, 'voice.js'), 'utf8');
-  const fn = /_tryWhisperWake\(rawText, rawConf\)\s*\{[\s\S]*?\n  \}/.exec(src);
-  assert(fn, '找不到 _tryWhisperWake');
+  const fn = /_whisperFromRing\(rawText, kind\)\s*\{[\s\S]*?\n  \}/.exec(src);
+  assert(fn, '找不到 _whisperFromRing');
   assert(/dumpRecent/.test(fn[0]), '没从环形缓冲取音频');
   assert(!/rec\.record\(/.test(fn[0]),
     '还在现场录音 —— 启动开销会让它永远录不到唤醒词');

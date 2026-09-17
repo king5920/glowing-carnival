@@ -173,6 +173,14 @@ function health(source) {
     totalFailures: s.totalFailures || 0,
     lastReason: s.lastReason || null,
     lastOkAt: s.lastOkAt ? new Date(s.lastOkAt).toISOString().slice(0, 16).replace('T', ' ') : null,
+    // 前端用 epoch 毫秒算"多久以前"，避免截断的 UTC 字符串带来时区歧义
+    lastOkMs: s.lastOkAt || null,
+    lastCheckMs: recent.length ? recent[recent.length - 1].at : null,
+    firstFailureMs: s.firstFailureAt || null,
+    // 最近一次探测（无论成败）与首次连续失败的原始时间戳（前端要如实显示"多久没成功"，
+    // 不能让 UI 自己拿页面加载时刻猜"刚刚"——那会在源已坏两天时还显示"刚刚异常"，误导）。
+    lastCheckAt: recent.length ? new Date(recent[recent.length - 1].at).toISOString().slice(0, 16).replace('T', ' ') : null,
+    firstFailureAt: s.firstFailureAt ? new Date(s.firstFailureAt).toISOString().slice(0, 16).replace('T', ' ') : null,
     // 关键指标：这个问题躺了多久
     brokenForDays: s.firstFailureAt && s.degraded
       ? Math.round((Date.now() - s.firstFailureAt) / 86400000 * 10) / 10

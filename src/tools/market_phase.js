@@ -1,0 +1,114 @@
+'use strict';
+/**
+ * market_phase.js —— 把「缠论生命阶段」与「散户崩溃冰点」合成一个大盘状态。
+ * ─────────────────────────────────────────────────────────────────────
+ * 这是阶段3的装配层：
+ *   chan.analyzeMarket(日/60/30)  → 结构阶段（大级别定方向）
+ *   capitulation.evaluate(...)    → 情绪反向冰点（左/右侧开关）
+ *   alerts.judgeMarket(...)       → 顺势买入窗口（右侧，已存在）
+ *
+ * 职责只是"取数 + 调纯函数 + 拼成给模型/网页读的一个对象"，不含任何阈值新定义。
+ * 红线全部沿用底层：未标定标注、缺数据 unknown、绝不说"可以买"、不对个股给建议。
+ *
+ * 缠论按"只在收盘确认K判定"，因此本函数主要用日K；分钟级可选传入做 timing 细化，
+ * 第一版装配只用日K出阶段，避免盘中未完成K造成闪烁。
+ */
+
+const chan = require('./chan');
+const cap = require('./capitulation');
+
+/**
+ * 计算当前大盘状态。
+ * @param {object} deps 注入依赖，便于单测，也便于 patrol 复用一次 snapshot：
+ *   - getBars(period)  => Promise<bars>   取上证K线（period: day/m60/m30）
+ *   - snapshot()       => Promise<sentiment.snapshot() 结果>
+ *   - alertSamples()   => alert_samples 行数组（分位历史）
+ * @param {object} [opt] { withMinute:false }
+ */
+async function assess(deps, opt = {}) {
+  const errors = [];
+
+  /* 1) 缠论结构（日K定阶段；可选 60/30 做 timing） */
+  let barsDay = null;
+  try { barsDay = await deps.getBars('day'); } catch (e) { errors.push('日K获取失败:' + e.message); }
+
+  const levels = {};
+  let market = null;
+  if (barsDay && barsDay.length) {
+    if (opt.withMinute) {
+      const [b60, b30] = await Promise.all([
+        safe(() => deps.getBars('m60')), safe(() => deps.getBars('m30')),
+      ]);
+      market = chan.analyzeMarket({ day: barsDay, m60: b60, m30: b30 });
+    } else {
+      market = chan.analyzeMarket({ day: barsDay });
+    }
+    levels.day = summarizeLevel(market.levels && market.levels.day);
+    if (market.levels) {
+      levels.m60 = summarizeLevel(market.levels.m60);   // 缺失/失败级别 → null
+      levels.m30 = summarizeLevel(market.levels.m30);
+    }
+  }
+
+  /* 2) 情绪快照 + 崩溃冰点 */
+  let snap = null;
+  try { snap = await deps.snapshot(); } catch (e) { errors.push('情绪快照失败:' + e.message); }
+  const history = (deps.alertSamples ? deps.alertSamples() : []) || [];
+  const se = snap && snap.sentiment;
+  const sh = snap && snap.indexes && snap.indexes['上证'];
+
+  const fear = cap.evaluate(se, sh, history, market ? { phase: market.phase } : null);
+
+  /* 3) 综合一句话（大白话，供模型/网页） */
+  const phase = market ? market.phase : 'unknown';
+  const summary = buildSummary(phase, fear, errors);
+
+  return {
+    ok: errors.length === 0,
+    at: new Date().toISOString(),
+    phase,                       // 缠论六阶段之一 / unknown
+    chan: market ? {
+      phase: market.phase,
+      reason: market.reason,     // 大白话阶段理由（给网页/模型）
+      combo: market.combo,
+      levels,
+      strokeCount: levels.day && levels.day.strokeCount,
+      segZoneCount: levels.day && levels.day.segZoneCount,
+      calibrated: false,         // 缠论画法待用户持续对图，默认未标定
+    } : null,
+    fear,                        // {tier, fear, resonance, side, label, ...}
+    shTechnical: sh && !sh.error ? {
+      close: sh.close, rsi14: sh.rsi14, aboveMa20: sh.aboveMa20, macdCross: sh.macdCross,
+    } : null,
+    summary,
+    calibrated: fear.calibrated === true,   // 阶段图未标定，整体仍以 false 为准
+    errors: errors.length ? errors : undefined,
+  };
+}
+
+function summarizeLevel(lv) {
+  if (!lv) return null;
+  return {
+    trend: lv.trend, pricePos: lv.pricePos, pivot: lv.pivot,
+    strokeCount: lv.strokeCount,
+    segZoneCount: lv.pivotZoneCount != null ? lv.pivotZoneCount : (Array.isArray(lv.zones) ? lv.zones.length : 0),
+    segmentCount: lv.segmentCount,
+    pointCount: Array.isArray(lv.points) ? lv.points.length : 0,
+    divergenceCount: Array.isArray(lv.divergences) ? lv.divergences.length : 0,
+  };
+}
+
+function buildSummary(phase, fear, errors) {
+  if (errors.length && phase === 'unknown' && fear.tier === 'unknown') {
+    return '大盘状态无法判断：' + errors.join('；') + '（缺数据不编造）';
+  }
+  const parts = [`缠论阶段「${phase}」`];
+  if (fear.tier === 'extreme') parts.push('情绪极端恐慌（左侧·未标定）');
+  else if (fear.tier === 'normal') parts.push('出现恐慌冰点（' + (fear.calibrated ? '' : '未标定·') + '值得关注，非买入建议）');
+  else if (fear.tier === 'watch') parts.push('情绪有恐慌共振但阶段不符，只观察不接飞刀');
+  return parts.join('，') + '。';
+}
+
+async function safe(fn) { try { return await fn(); } catch (_) { return null; } }
+
+module.exports = { assess, buildSummary, summarizeLevel };

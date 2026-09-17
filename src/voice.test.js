@@ -166,8 +166,10 @@ test('提示词必须同时覆盖操作类与行情类词汇', () => {
 test('本地模型目录兜底存在（hub 下载在部分环境必失败）', () => {
   A(typeof whisper.localModelPath === 'function', '应提供 localModelPath');
   A(typeof whisper.LOCAL_MODEL_DIR === 'string', '应暴露本地模型目录常量');
-  /* 本地路径要真的传进 WhisperModel，而不是只做个探测摆设 */
-  A(/localModelPath\(\)\s*\|\|\s*MODEL_SIZE/.test(WH_SRC),
+  /* 本地路径要真的传进 WhisperModel，而不是只做个探测摆设。
+   * 多档位后按 size 取本地目录：localModelPath(size) || size。 */
+  A(/localModelPath\(size\)\s*\|\|\s*size/.test(WH_SRC)
+    || /localModelPath\(\)\s*\|\|\s*MODEL_SIZE/.test(WH_SRC),
     '本地模型路径应优先传给 WhisperModel，否则兜底无效');
 });
 
@@ -364,6 +366,63 @@ test('识别为空时给出分支诊断（电平不足 vs VAD 吞短音）', () 
   A(/if \(!tr\.text\)/.test(CHECK_SRC), '应对空结果单独给出诊断');
   A(/vad:false|vad: false/.test(CHECK_SRC),
     '电平正常却为空时应提示短音频要关 VAD');
+});
+
+/* ══════════════ 七、edge-tts 降级链与播放路由 ══════════════
+ *
+ * 2026-09-10 落地多女声：edge-tts 神经语音为主，SAPI Huihui 兜底。
+ * 这一节盯的是「降级链真的存在」和「每个引擎都带能区分的标记」——
+ * 两个引擎返回同样结构（file/bytes/ms/engine/mime），
+ * 只有 engine/mime 不一样。没有这些标记，播放端会把 mp3 当 wav 发。
+ *
+ * server 侧只做静态扫描：真起服务做集成测试会占端口、碰麦克风，
+ * 不适合进 CI；路由参数的非空性已由 npm start 冒烟脚本验证。 */
+
+test('降级链：edge-tts 是主引擎，失败必须自动落 SAPI', () => {
+  A(/await ttsEdge\.synthesize/.test(VOICE_SRC), '主引擎必须调用 ttsEdge.synthesize');
+  A(/catch \(e\)\s*\{/.test(VOICE_SRC), '主引擎失败必须有 catch');
+  A(/sapiSynthesize\(rate, spoken, key\)/.test(VOICE_SRC),
+    'catch 里必须落回 SAPI 兜底，否则断网时就是一声不吭');
+});
+
+test('降级链：两个引擎的产物标记必须可区分（engine/mime）', () => {
+  A(/engine:\s*'edge-tts'/.test(VOICE_SRC), 'edge 路径缺 engine 标记');
+  A(/mime:\s*'audio\/mpeg'/.test(VOICE_SRC), 'edge 路径缺 mime（播放端靠它选类型）');
+  A(/engine:\s*'sapi'/.test(VOICE_SRC), 'SAPI 路径缺 engine 标记');
+  A(/mime:\s*'audio\/wav'/.test(VOICE_SRC), 'SAPI 路径缺 mime');
+});
+
+test('降级链：缓存 key 必须含音色（换声音不能串音）', () => {
+  /* 缓存 key 是 `${rate}:${vId}:${spoken}`。如果不含音色，
+   * 切到晓伊后读到的是晓晓的缓存音频 —— "换声音"就变成了假切换。 */
+  const m = /\$\{rate\}:\$\{vId\}:\$\{spoken\}/.test(VOICE_SRC);
+  A(m, '缓存 key 应为 rate:vId:spoken 三段式');
+});
+
+test('降级链：音色参数每次合成都归一化，不能信任调用方', () => {
+  A(/ttsEdge\.normalizeVoice\(voice\)\s*\|\|\s*currentVoice/.test(VOICE_SRC),
+    '合成时应先归一化 voice 参数，非法值落回当前音色');
+});
+
+test('播放路由：/api/voice/speak 转发 voice 参数并自适应 MIME', () => {
+  const SRV = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+  A(/const voiceId = q\.get\('voice'\)/.test(SRV), '路由应读取 voice 查询参数');
+  A(/voice\.synthesize\(text, rate, voiceId\)/.test(SRV),
+    '路由应把 voiceId 传给 synthesize');
+  A(/r\.mime \|\| 'audio\/wav'/.test(SRV),
+    'Content-Type 应按引擎 mime 自适应（mp3 发 mpeg 头）');
+  A(/X-TTS-Engine/.test(SRV),
+    '响应头应带 X-TTS-Engine，便于前端/调试区分引擎');
+});
+
+test('窄带救命通道：窗口内低置信指令也要 whisper 复核（修"能唤醒却下不了令"）', () => {
+  /* 2026-09-11 真机 bug：网页点麦能被唤醒（唤醒词走 whisper 救活），
+   * 但接着说指令永远"没听清"——因为 whisper 兜底只在 !inConvo() 触发。
+   * 锁死：低置信分支必须按 inConvo() 分流到 command/wake 两条复核。 */
+  const code = codeOnly(VOICE_SRC);
+  A(/_tryWhisperCommand\s*\(/.test(code), '缺少窗口内指令复核 _tryWhisperCommand');
+  const branch = /if\s*\(this\.inConvo\(\)\)\s*\{[\s\S]*?_tryWhisperCommand[\s\S]*?\}\s*else\s*\{[\s\S]*?_tryWhisperWake/.exec(code);
+  A(!!branch, '低置信分支必须按 inConvo() 分流到 command / wake 复核');
 });
 
 console.log('\n───────────────────────────────────');

@@ -467,8 +467,13 @@ test('巡视接入 quant_refresh 且冷却足够长', () => {
 
   const src = require('fs').readFileSync(
     require('path').join(__dirname, 'patrol.js'), 'utf8');
-  assert(/'quant_refresh'/.test(src.slice(src.indexOf('const order = isTradingHours'), src.indexOf('const order = isTradingHours') + 300)),
-    'quant_refresh 不在调度序列里 —— 永远不会被执行');
+  /* 锁意图：先从 order 三元表达式里取出「盘中分支」数组（第一个 [...]），
+   * 断言其中必须有 quant_refresh。不用通配的 +300 字符窗口切片 ——
+   * 数组前注释加几个字就会把 quant_refresh 推出窗口外，误报"不在序列里"。 */
+  const fromOrder = src.slice(src.indexOf('const order = isTradingHours'));
+  const intradayArr = fromOrder.slice(fromOrder.indexOf('['), fromOrder.indexOf(']') + 1);
+  assert(/'quant_refresh'/.test(intradayArr),
+    'quant_refresh 不在盘中调度序列里 —— 永远不会被执行');
 });
 
 test('quant_refresh 先查新鲜度再决定跑不跑', () => {

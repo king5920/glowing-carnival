@@ -52,6 +52,67 @@ function getWhisper() {
   if (!_whisper) _whisper = require('./whisper_sidecar');
   return _whisper;
 }
+
+/* 动态领域提示词供给器（由 server 注入，读 db 里用户实际查过的股票名）。
+ *
+ * 为什么不直接 require db：voice.js 要能在不连数据库的测试里独立跑，
+ * 而且每次唤醒都查库也浪费。server 启动时 setWhisperPromptProvider 注入，
+ * 这里调用时做 60 秒缓存 + try/catch，任何异常都退回静态提示，
+ * 绝不让"想把股票名喂准一点"反过来导致唤醒失败。 */
+let _promptProvider = null;
+let _promptCache = { at: 0, text: null, vocab: [] };
+const PROMPT_CACHE_MS = 60000;
+/* 供给器返回一个专名数组（股票/板块/龙头）；提示词拼接和"是否像没匹配上的
+ * 股票名"判断都用它。 */
+function setWhisperPromptProvider(fn) {
+  _promptProvider = typeof fn === 'function' ? fn : null;
+  // 换供给器（测试里也常换）必须立刻让旧词表缓存失效，否则 60 秒内
+  // 仍按上一份词表判断"名字有没有命中"，触发条件会算错。
+  _promptCache = { at: 0, text: null, vocab: [] };
+}
+function _getVocab() {
+  const now = Date.now();
+  if (_promptCache.text && now - _promptCache.at < PROMPT_CACHE_MS) return _promptCache;
+  let vocab = [];
+  try {
+    const v = _promptProvider ? _promptProvider() : [];
+    vocab = Array.isArray(v) ? v.map(x => String(x || '').trim()).filter(Boolean) : [];
+  } catch (_) { vocab = []; }
+  const base = require('./whisper_sidecar').INITIAL_PROMPT;
+  const text = vocab.length ? (base + '最近可能提到的股票：' + vocab.join('、') + '。') : base;
+  _promptCache = { at: now, text, vocab };
+  return _promptCache;
+}
+function buildWhisperPrompt() {
+  if (!_promptProvider) return undefined;   // undefined → sidecar 用自带静态提示
+  return _getVocab().text;
+}
+
+/* 判断一次 base 转写是否"值得用 small 复核"。
+ *
+ * 实测：置信度对"专名错"不敏感——"认则科技"(应为润泽科技) 仍有 0.81，
+ * 单纯卡 conf 阈值会漏掉真正要纠正的股票名。所以两条触发，取其一：
+ *   ① 置信度低（含糊/口音/噪声）；
+ *   ② 句子明显在点股票（出现"这只股/股票/板块/代码"等），但话里的名字
+ *      一个都没命中已知词表 —— 很可能是专名被识别成了近音字，值得精识别。
+ * 触发②要求词表非空，否则冷启动时任何句子都会被判"没命中"而白白复核。 */
+const STOCK_INTENT_RE = /(股票|这只股|这只票|个股|板块|龙头|代码|股价|仓位|买入|卖出|涨停|跌停)/;
+/* 判断 whisper 兜底出来的一句"没带唤醒词"的话，像不像真指令。
+ * 覆盖炒股与常用操作，宁可稍宽——它只在 SRGS 唤醒已触发的前提下使用。 */
+const COMMAND_INTENT_RE = new RegExp([
+  '股票|这只股|这只票|个股|板块|龙头|代码|股价|仓位|买入|卖出|涨停|跌停|大盘|行情|资金|主力|北向|均线|持仓|回测|选股|基金|指数',
+  '看一下|帮我|给我|查一下|查下|看看|打开|关闭|截图|播放|提醒|记一下|搜索|搜一下|跑一下|多少|怎么样|什么价|能不能|要不要',
+].join('|'));
+function shouldVerify(heard, conf) {
+  if (!VERIFY_MODEL) return false;
+  if (conf != null && conf < VERIFY_BASE_CONF) return true;
+  if (STOCK_INTENT_RE.test(heard)) {
+    const { vocab } = _getVocab();
+    if (vocab.length && !vocab.some(name => name && heard.includes(name))) return true;
+  }
+  return false;
+}
+
 /* 录音 —— whisper 要原始 WAV 才能工作。
  * 注意：只能用 waveIn，绝不能用 MCI（实测 MCI 在这台机器返回假数据）。 */
 let _micRec;
@@ -79,6 +140,52 @@ const VOICE_FLOOR = 60;
 
 const TTS_VOICE = 'Microsoft Huihui Desktop';
 const ASR_CULTURE = 'zh-CN';
+
+/* ── TTS 双引擎（Phase 25）──
+ *
+ * SAPI 的中文语音只有 Huihui 一个（2010 年代的拼接音，机械感来源），
+ * 用户要求"多几种女声"。edge-tts（微软 Edge 在线朗读）提供 8 个
+ * 实测可用的中文女声、神经音质，且零新增依赖（手写 WS，见 tts_edge.js）。
+ *
+ * 引擎策略：
+ *   edge-tts 为主（默认晓晓，可切换），SAPI Huihui 兜底
+ *   —— 断网 / token 失效 / 服务端异常都会自动降级，不打断朗读。
+ */
+const ttsEdge = require('./tts_edge');
+
+/** 当前生效音色（edge-tts 体系；SAPI 兜底固定 Huihui）。 */
+let currentVoice = ttsEdge.DEFAULT_VOICE;
+
+/** 切换当前音色。input 支持音色 id / 中文名 / 拼音昵称。 */
+function setTtsVoice(input) {
+  const id = ttsEdge.normalizeVoice(input);
+  if (!id) return { ok: false, error: `未知音色：${input}`, voices: ttsEdge.VOICES };
+  currentVoice = id;
+  const meta = ttsEdge.VOICES.find(v => v.id === id);
+  return { ok: true, voice: id, name: meta && meta.name, region: meta && meta.region };
+}
+
+/** 当前音色状态（含兜底信息，供 probe / 工具查询）。 */
+function getTtsVoice() {
+  const meta = ttsEdge.VOICES.find(v => v.id === currentVoice);
+  return {
+    engine: 'edge-tts', voice: currentVoice,
+    name: meta && meta.name, region: meta && meta.region,
+    fallback: { engine: 'sapi', voice: TTS_VOICE },
+  };
+}
+
+/** 全部可选音色（给工具注册 / UI 用）。 */
+function listTtsVoices() {
+  return ttsEdge.VOICES;
+}
+
+/** 语速数字(-10..10) → edge-tts 的百分比字符串（"+10%" / "-20%"）。 */
+function rateToPct(rate) {
+  const n = Math.max(-10, Math.min(10, rate | 0));
+  if (n === 0) return '+0%';
+  return `${n > 0 ? '+' : ''}${n * 10}%`;
+}
 
 /* 唤醒词列表。
  *
@@ -110,15 +217,56 @@ function matchesWakeWord(text) {
   const t = String(text || '').replace(/[\s，。、！？,.!?]/g, '');
   if (!t) return false;
   /* 太长说明是整句话，不是在叫名字 —— 避免把
-   * 「这个维斯康星的数据」当成唤醒。 */
-  if (t.length > 12) return false;
+   * 「这个维斯康星的数据」当成唤醒。
+   * 但句首就是强唤醒词的"贾维斯，帮我看XX"一口气说法不算，
+   * 那由 parseWakeCommand 单独识别并拆出指令。 */
+  if (t.length > 12) return LEAD_WAKE_RE.test(t);
   return WAKE_VARIANTS.some(re => re.test(t));
+}
+
+/* 句首强唤醒：只认"贾/加/家/嘉 + 维斯/维"这类清晰的叫名，
+ * 必须出现在开头（前面最多容忍语气词"喂/哎/嘿"）。
+ * 故意不收裸"维斯"——那是"威斯康星/维斯坦"等词的中段，
+ * 只有开头完整的"X维斯"才是在叫助手。 */
+const LEAD_WAKE_RE = /^(?:喂|哎|嘿|欸)?(?:贾维斯|加维斯|家维斯|嘉维斯|贾维|加维|家维)/;
+
+/**
+ * 解析"唤醒词 + 指令"一口气说的句子，例如
+ *   「贾维斯帮我看一下新安股份这只股票」
+ *   「嘿贾维斯 今天大盘怎么样」
+ * 命中句首强唤醒时返回 { command }，command 是剥掉唤醒词后的指令
+ * （可能为空字符串，表示只是叫了一声）；否则返回 null。
+ *
+ * 这解决了一个真实漏唤醒：matchesWakeWord 的长度护栏(12字)把这种
+ * 最自然的连贯说法整句判成"不是唤醒"，于是既没开窗、指令也丢了。
+ */
+function parseWakeCommand(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  const compact = t.replace(/[\s，。、！？,.!?]/g, '');
+  const m = compact.match(LEAD_WAKE_RE);
+  if (!m) return null;
+  // 去掉句首语气词 + 唤醒词，剩下的才是指令
+  let rest = compact.slice(m[0].length);
+  rest = rest.replace(/^(帮我|给我|那个|就是|哎|啊|嗯)+/, '');
+  return { command: rest.trim() };
 }
 
 /* whisper 复核的冷却时间。
  * 差设备上乱码事件很密集（实测 3 秒内 3 次），
  * 不设冷却会把 CPU 打满，而且 whisper 并发只会互相拖慢。 */
 const WHISPER_WAKE_COOLDOWN_MS = 3000;
+
+/* 指令低置信时用更大的模型复核（智能档位切换）。
+ *
+ * 实测标准发音 10 句炒股口语：base 字准 92% / 1.5s，small 98% / 6.4s。
+ * 为了不把每句话都拖慢 5 秒，只有 base 置信度低于此值才升级 small 复核。
+ * 设环境变量 JARVIS_WHISPER_VERIFY_MODEL='' 可关闭（无大模型/纯求快时）。
+ * 0.72：base 对清晰正确句子通常给 0.8+，明显含糊或专名错读会掉到 0.6 档。 */
+const VERIFY_MODEL = process.env.JARVIS_WHISPER_VERIFY_MODEL != null
+  ? process.env.JARVIS_WHISPER_VERIFY_MODEL.trim()
+  : 'small';
+const VERIFY_BASE_CONF = Number(process.env.JARVIS_WHISPER_VERIFY_CONF) || 0.72;
 
 /* 唤醒词置信度下限。
  *
@@ -165,11 +313,13 @@ const WAKE_COOLDOWN_MS = 2500;
  *   窗口内 → speech 事件当作指令
  *   窗口外 → speech 事件丢弃（否则电视声、旁人说话都会被当命令）
  *
- * 30 秒是折中：
- *   太短（<15s）→ 追问一句还得再喊唤醒词，等于没做
- *   太长（>60s）→ 变成常开麦，房间里任何对话都可能被当指令
+ * 15 秒（2026-09-13 从 30 秒下调，用户实测选择）：
+ *   追问一句足够；更重要的是修"朗读时倒计时空跑"——
+ *   现在窗口在朗读结束时才重新计时（见 setSpeaking），
+ *   15 秒是"念完之后"真正能用来接话的时间，不是和朗读重叠的虚账。
+ *   太长会变成常开麦，房间里任何对话都可能被当命令。
  * 每次成功交互都续期，所以真正的连续对话不会中途断掉。 */
-const CONVO_WINDOW_MS = 30000;
+const CONVO_WINDOW_MS = 15000;
 
 /* 听写置信度下限。
  *
@@ -258,33 +408,24 @@ function cleanForSpeech(text) {
     .trim();
 }
 
-/** 语音合成缓存：同一句话不重复合成 */
+/** 语音合成缓存：同一句话（含音色）不重复合成 */
 const ttsCache = new Map();
 const TTS_CACHE_MAX = 40;
 
-/**
- * 把文本合成为 WAV，返回 { file, bytes, ms }。
- * @param {string} text 要朗读的文本
- * @param {number} rate 语速 -10..10，0 为默认
- */
-async function synthesize(text, rate = 0) {
-  const clean = cleanForSpeech(text);
-  if (!clean) return null;
+/** 写缓存并做 LRU 淘汰（删最老的文件）。 */
+function cachePut(key, rec) {
+  ttsCache.set(key, rec);
+  if (ttsCache.size > TTS_CACHE_MAX) {
+    const oldestKey = ttsCache.keys().next().value;
+    const old = ttsCache.get(oldestKey);
+    ttsCache.delete(oldestKey);
+    if (old && old.file !== rec.file) fs.unlink(old.file, () => {});
+  }
+  return rec;
+}
 
-  /* 太长的文本截断。
-   *
-   * 实测：410 字中文朗读 = 89 秒语音（3.9MB WAV）。
-   * 助手回复不该让人听一分半，超过就提示看屏幕。
-   * 120 字约 25 秒，是"听得完"的合理上限。 */
-  const MAX_CHARS = 120;
-  const spoken = clean.length > MAX_CHARS
-    ? clean.slice(0, MAX_CHARS) + '……详细内容请看屏幕。'
-    : clean;
-
-  const key = `${rate}:${spoken}`;
-  const hit = ttsCache.get(key);
-  if (hit && fs.existsSync(hit.file)) return hit;
-
+/** SAPI 兜底引擎：PowerShell 调 System.Speech，输出 wav。 */
+async function sapiSynthesize(rate, spoken, key) {
   const outFile = path.join(TMP_DIR, `tts_${crypto.randomBytes(8).toString('hex')}.wav`);
   // 文本写成单独文件，避免引号/换行在脚本里转义出错
   const txtFile = outFile.replace(/\.wav$/, '.txt');
@@ -303,23 +444,98 @@ $s.Dispose()
 Write-Output 'OK'
 `;
   const t0 = Date.now();
-  await runPs(script, 30000);
-  const ms = Date.now() - t0;
-  fs.unlink(txtFile, () => {});
+  try {
+    await runPs(script, 30000);
+  } finally {
+    fs.unlink(txtFile, () => {});
+  }
 
   if (!fs.existsSync(outFile)) throw new Error('TTS 未生成文件');
-  const bytes = fs.statSync(outFile).size;
-  const rec = { file: outFile, bytes, ms };
+  const rec = {
+    file: outFile,
+    bytes: fs.statSync(outFile).size,
+    ms: Date.now() - t0,
+    engine: 'sapi',
+    mime: 'audio/wav',
+  };
+  return cachePut(key, rec);
+}
 
-  // LRU：超量时删掉最老的缓存文件
-  ttsCache.set(key, rec);
-  if (ttsCache.size > TTS_CACHE_MAX) {
-    const oldestKey = ttsCache.keys().next().value;
-    const old = ttsCache.get(oldestKey);
-    ttsCache.delete(oldestKey);
-    if (old && old.file !== outFile) fs.unlink(old.file, () => {});
+/**
+ * 把文本合成为音频，返回 { file, bytes, ms, engine, mime }。
+ * @param {string} text 要朗读的文本
+ * @param {number} rate 语速 -10..10，0 为默认
+ * @param {string} [voice] 指定音色（id/中文名/昵称）；缺省用当前音色 currentVoice
+ */
+async function synthesize(text, rate = 0, voice = null) {
+  const clean = cleanForSpeech(text);
+  if (!clean) return null;
+
+  /* 太长的文本截断。
+   *
+   * 实测：410 字中文朗读 = 89 秒语音（3.9MB WAV）。
+   * 助手回复不该让人听一分半，超过就提示看屏幕。
+   * 120 字约 25 秒，是"听得完"的合理上限。 */
+  const MAX_CHARS = 120;
+  const spoken = clean.length > MAX_CHARS
+    ? clean.slice(0, MAX_CHARS) + '……详细内容请看屏幕。'
+    : clean;
+
+  const vId = ttsEdge.normalizeVoice(voice) || currentVoice;
+  const key = `${rate}:${vId}:${spoken}`;
+  const hit = ttsCache.get(key);
+  if (hit && fs.existsSync(hit.file)) return hit;
+
+  /* 主引擎：edge-tts 神经语音（断网/异常自动降级 SAPI） */
+  try {
+    const t0 = Date.now();
+    const buf = await ttsEdge.synthesize(spoken, {
+      voice: vId,
+      ratePct: rateToPct(rate),
+      timeoutMs: 25000,
+    });
+    const outFile = path.join(TMP_DIR, `tts_${crypto.randomBytes(8).toString('hex')}.mp3`);
+    fs.writeFileSync(outFile, buf.buffer);
+    const rec = {
+      file: outFile,
+      bytes: buf.bytes,
+      ms: Date.now() - t0,
+      engine: 'edge-tts',
+      mime: 'audio/mpeg',
+    };
+    return cachePut(key, rec);
+  } catch (e) {
+    console.warn(`[voice] edge-tts 合成失败，降级 SAPI(${TTS_VOICE})：${e.message}`);
+    return sapiSynthesize(rate, spoken, key);
   }
-  return rec;
+}
+
+/**
+ * 流式语音合成：edge-tts 音频帧一到就通过 onAudio 吐出。
+ *
+ * 与 synthesize（整段缓冲 + 落盘 + 缓存）不同：
+ *   · 不写临时文件、不进缓存 —— 流式的价值就是"早出声"，
+ *     落盘再读反而把省下的延迟又加回来；
+ *   · 走同一套 cleanForSpeech / 120 字截断，保证两种模式说的内容一致；
+ *   · edge-tts 失败由调用方决定如何降级（端点会退回整段 SAPI），
+ *     这里不自己吞错 —— 吞了调用方会以为流正常结束，浏览器干等。
+ *
+ * @returns {Promise<{bytes:number, engine:string, mime:string}>}
+ */
+async function synthesizeStream(text, rate = 0, voice = null, onAudio) {
+  const clean = cleanForSpeech(text);
+  if (!clean) return null;
+  const MAX_CHARS = 120;
+  const spoken = clean.length > MAX_CHARS
+    ? clean.slice(0, MAX_CHARS) + '……详细内容请看屏幕。'
+    : clean;
+  const vId = ttsEdge.normalizeVoice(voice) || currentVoice;
+  const r = await ttsEdge.synthesizeStream(spoken, {
+    voice: vId,
+    ratePct: rateToPct(rate),
+    timeoutMs: 25000,
+  }, onAudio);
+  return { ...r, mime: 'audio/mpeg' };
 }
 
 /* ─────────────────────────── ASR ─────────────────────────── */
@@ -363,6 +579,13 @@ class Listener {
      * 所以不用碰 PowerShell，只在这里判断该不该采纳 speech 事件。 */
     this.convoUntil = 0;
     this.speaking = false;      // 贾维斯是否正在朗读（用于打断判定）
+
+    /* 能量起音打断（比等识别完整句早 ~0.6-1s）的状态。
+     * speakingStartedAt：本次朗读开始时间，用来跳过刚出声那段
+     *   （此时喇叭回声正猛，最容易自触发）。
+     * onsetInterruptAt：上一次能量打断的节流时间戳。 */
+    this.speakingStartedAt = 0;
+    this.onsetInterruptAt = 0;
   }
 
   /** 对话窗口是否开着 */
@@ -374,8 +597,52 @@ class Listener {
   /** 关闭对话窗口（用户明确说"结束"或超时） */
   closeConvo() { this.convoUntil = 0; }
 
-  /** 告知 Listener 当前是否在朗读 —— 决定 wake 事件算打断还是新一轮 */
-  setSpeaking(on) { this.speaking = !!on; }
+  /**
+   * 告知 Listener 当前是否在朗读。
+   *
+   * 关键修复（2026-09-13）：朗读**结束**时重新开窗。
+   * 之前窗口在"识别到用户说话"时就开始计时，于是贾维斯朗读的那段时间
+   * （长回复能念 20+ 秒）把窗口白白耗掉，等它念完用户能接话时，
+   * 30 秒只剩几秒 —— 截图里的"7 秒"就是这么来的。
+   *
+   * 正确语义：窗口代表"用户念完之后可以免唤醒接话的时间"，
+   * 所以必须在 TTS 结束那一刻才开始走表。
+   *
+   * 只在"刚才确实在朗读"时续期：setSpeaking(false) 在很多路径都会调
+   * （error/空音频/打断），无脑续期会让一句没出声的失败也开窗。 */
+  setSpeaking(on) {
+    const was = this.speaking;
+    this.speaking = !!on;
+    if (on) this.speakingStartedAt = Date.now();
+    if (was && !on) this.convoUntil = Date.now() + CONVO_WINDOW_MS;
+  }
+
+  /**
+   * 能量起音 → 朗读中即时打断。
+   *
+   * 为什么需要它：原来的打断要等 System.Speech 识别完整句，
+   * 而识别器要先听到 0.6-1 秒的句尾静音才出结果，所以"立刻打断"做不到。
+   * 环形缓冲在音量越过 400 的那一刻就回调（约 100-300ms），快得多。
+   *
+   * 三道防自触发（喇叭回声会让麦收到自己的声音）：
+   *   1. 只在确实正在朗读时才可能打断；
+   *   2. 朗读刚出声的 ECHO_SETTLE_MS 内忽略 —— 那是回声建立期，
+   *      真人插话几乎不会精确卡在这 0.4 秒里；
+   *   3. 节流：一次打断后 ONSET_COOLDOWN_MS 内不再触发，
+   *      避免同一段人声/回声反复打断。
+   * 真正"这句话是什么"仍交给随后的识别结果（wake/speech）处理，
+   * 这里只负责"马上闭嘴"，不负责理解。
+   */
+  _handleSpeechOnset(/*peak*/) {
+    if (!this.speaking) return;
+    const now = Date.now();
+    const ECHO_SETTLE_MS = 400;
+    const ONSET_COOLDOWN_MS = 1500;
+    if (now - this.speakingStartedAt < ECHO_SETTLE_MS) return;
+    if (now - this.onsetInterruptAt < ONSET_COOLDOWN_MS) return;
+    this.onsetInterruptAt = now;
+    this.onEvent({ type: 'interrupt', reason: 'speech_onset' });
+  }
 
   /**
    * ══════════ whisper 唤醒复核（差设备的救命通道）══════════
@@ -393,134 +660,186 @@ class Listener {
    *    实测见过凭空生成「谢谢观看」。所以 sawSpeech=false 直接丢。
    */
   async _tryWhisperWake(rawText, rawConf) {
+    const heard = await this._whisperFromRing(rawText, 'wake');
+    if (heard == null) return;   // 跳过/失败路径已在 helper 内上报
+
+    /* 优先处理"贾维斯，帮我看XX"这种唤醒词+指令一口气说的句子。
+     * 不这样的话，matchesWakeWord 的长度护栏会把整句判成非唤醒，
+     * 用户最自然的说法反而既唤不醒也丢了指令。 */
+    const pc = parseWakeCommand(heard);
+    if (pc) {
+      try { micQuality.recordWakeOutcome(rawConf, true); } catch { }
+      // 先开窗
+      this._handle({ type: 'wake', text: '贾维斯', conf: 1.0, via: 'whisper_lead' });
+      this.onEvent({ type: 'wake_via_whisper', heard, rawText, rawConf, lead: true });
+      // 剥出的指令若足够长，紧接着当指令下发，省得用户再重复一遍
+      const cmd = pc.command;
+      if (cmd && cmd.length >= 2) {
+        this.onEvent({ type: 'speech_via_whisper', heard: cmd, rawText: heard, rawConf, lead: true });
+        this._handle({ type: 'speech', text: cmd, conf: 1.0, convo: true, via: 'whisper_lead' });
+      }
+      return;
+    }
+
+    if (matchesWakeWord(heard)) {
+      try { micQuality.recordWakeOutcome(rawConf, true); } catch { }
+      this._handle({ type: 'wake', text: heard, conf: 1.0, via: 'whisper' });
+      this.onEvent({ type: 'wake_via_whisper', heard, rawText, rawConf });
+    } else if (this._looksLikeCommand(heard)) {
+      /* SRGS 唤醒语法已经撞过一次（本函数就是被它低置信触发的），
+       * 只是 whisper 没把"贾维斯"转出来、却转出了一句完整指令 ——
+       * 实测案例：用户说"贾维斯帮我看新安股份"，whisper 给
+       * "下星安股份指支股票"，里面没有"维斯"。
+       *
+       * 旧逻辑到这里就判 wake_miss 丢掉，既没开窗指令也没了。
+       * 既然有 SRGS 唤醒信号在先、whisper 又给了像样的指令，
+       * 就信任这是"唤醒+一口气指令"，开窗并下发。
+       * _looksLikeCommand 足够保守，避免把电视声当唤醒。 */
+      try { micQuality.recordWakeOutcome(rawConf, true); } catch { }
+      this._handle({ type: 'wake', text: '贾维斯', conf: 1.0, via: 'whisper_cmd_recover' });
+      this.onEvent({ type: 'wake_via_whisper', heard, rawText, rawConf, recovered: true });
+      this.onEvent({ type: 'speech_via_whisper', heard, rawText, rawConf, recovered: true });
+      this._handle({ type: 'speech', text: heard, conf: 1.0, convo: true, via: 'whisper_cmd_recover' });
+    } else {
+      try { micQuality.recordWakeOutcome(rawConf, false); } catch { }
+      this.onEvent({ type: 'whisper_wake_miss', heard, rawText });
+    }
+  }
+
+  /**
+   * whisper 没听到唤醒词，但给了一段文本 —— 判断它像不像"指令"。
+   *
+   * 用在"SRGS 唤醒语法已低置信触发、whisper 兜底"的场景：
+   * 有唤醒在先的信号，这里宁可宽松一点救回连贯说法，
+   * 但仍要过滤明显的乱码/噪声：
+   *   · 长度 4~25（太短可能是噪声，超长不像一句话指令）；
+   *   · 命中常见的操作/行情意图词，或句中出现已知专名词表里的名字。
+   */
+  _looksLikeCommand(text) {
+    const t = String(text || '').replace(/[\s，。、！？,.!?]/g, '');
+    if (t.length < 4 || t.length > 25) return false;
+    if (COMMAND_INTENT_RE.test(t)) return true;
+    const { vocab } = (typeof _getVocab === 'function') ? _getVocab() : { vocab: [] };
+    return vocab.some(name => name && t.includes(name));
+  }
+
+  /**
+   * ══════════ whisper 指令复核（对话窗口内的救命通道）══════════
+   *
+   * ══ 这是 2026-09-11 修的真 bug ══
+   * 用户在网页点麦克风，能被唤醒（唤醒词走 _tryWhisperWake 救活了），
+   * 但接着说指令时界面永远显示「没听清」。根因：
+   *   窄带麦上 System.Speech 对自由听写也只给 conf 0.0x-0.3，
+   *   而 _handle 里 whisper 兜底**只在窗口外**触发（`!inConvo()`）；
+   *   一旦进了对话窗口，低置信指令直接 speech_unclear，从不问 whisper。
+   * 于是"能叫醒、不能下命令"。
+   *
+   * 修法：窗口内低置信时同样从环形缓冲取音交给 whisper，
+   * 识别出像样的句子就当指令下发（conf 记 1.0，标记 via:whisper）。
+   * 噪声防护沿用同一套：忙/冷却互斥、长度区间、峰值地板、
+   * 且必须仍在对话窗口内（防止窗口早关后补一句电视声进来）。
+   */
+  async _tryWhisperCommand(rawText, rawConf) {
+    const wasInConvo = this.inConvo();
+    const heard = await this._whisperFromRing(rawText, 'command');
+    if (heard == null) return;
+
+    /* 复核耗时约 0.5-1s，期间窗口可能刚好到期 —— 以发起时在窗口内为准，
+     * 但内容若像唤醒词则交回唤醒逻辑，不在这里硬当指令。 */
+    if (matchesWakeWord(heard)) {
+      this._handle({ type: 'wake', text: heard, conf: 1.0, via: 'whisper_cmd' });
+      this.onEvent({ type: 'wake_via_whisper', heard, rawText, rawConf });
+      return;
+    }
+    if (!wasInConvo) {
+      this.onEvent({ type: 'whisper_cmd_skip', why: 'convo_closed', heard });
+      return;
+    }
+    this.onEvent({ type: 'speech_via_whisper', heard, rawText, rawConf });
+    /* 走统一处理：会做结束词/打断/续期并发 speech 事件给模型 */
+    this._handle({ type: 'speech', text: heard, conf: 1.0, convo: true, via: 'whisper' });
+  }
+
+  /**
+   * 从环形缓冲取最近音频跑 whisper，返回识别文本；
+   * 各种跳过/失败返回 null 并已上报对应事件。wake/command 共用。
+   */
+  async _whisperFromRing(rawText, kind) {
     const now = Date.now();
+    const skipEvt = 'whisper_' + kind + '_skip';
+    const failEvt = 'whisper_' + kind + '_failed';
 
-    /* ══ 为什么每条退出路径都要上报事件 ══
-     * 第一版这些 return 全是静默的，结果真机上 whisper 复核
-     * 「没有命中也没有失败」—— 我只能靠猜来定位。
-     * 这正是本项目反复踩的「看起来在工作但实际没连上」。
-     * 现在每条路径都留痕，代价只是几个事件。 */
-
-    /* 护栏 1+2：节流 + 互斥。
-     * 差设备上乱码事件很密集，不设节流会把 CPU 打满。 */
-    if (this._whisperBusy) {
-      this.onEvent({ type: 'whisper_wake_skip', why: 'busy' });
-      return;
-    }
+    if (this._whisperBusy) { this.onEvent({ type: skipEvt, why: 'busy' }); return null; }
     if (now - (this._lastWhisperAt || 0) < WHISPER_WAKE_COOLDOWN_MS) {
-      this.onEvent({
-        type: 'whisper_wake_skip', why: 'cooldown',
-        waitMs: WHISPER_WAKE_COOLDOWN_MS - (now - this._lastWhisperAt),
-      });
-      return;
+      this.onEvent({ type: skipEvt, why: 'cooldown',
+        waitMs: WHISPER_WAKE_COOLDOWN_MS - (now - this._lastWhisperAt) });
+      return null;
     }
-
-    /* ══ 长度过滤：实测修正过一次 ══
-     *
-     * 我最初写 `length > 10 return` 想省成本，结果实测发现
-     * 真实的乱码往往**很长**（识别器把 2 秒噪声拉成一长串）：
-     *   「是股数着一包雕琢的报表倒让着了我」16 字
-     *   「当我路过着日报道窝窝肉」        11 字
-     * 结果 whisper 复核一次都没被触发 —— 过滤条件把要救的场景挡死了。
-     *
-     * 教训：**过滤阈值必须来自实测样本，不能凭"应该差不多"来定。** */
+    /* 长度过滤区间沿用唤醒复核的实测结论：真实乱码可能很长（见下）。 */
     if (rawText.length < 2 || rawText.length > 25) {
-      this.onEvent({ type: 'whisper_wake_skip', why: 'length', len: rawText.length });
-      return;
+      this.onEvent({ type: skipEvt, why: 'length', len: rawText.length });
+      return null;
     }
 
     this._whisperBusy = true;
     this._lastWhisperAt = now;
+    let wavPath = null;
     try {
-      /* ══════════ Phase 1：从环形缓冲取音频，不再现场录 ══════════
-       *
-       * ══ 为什么改 ══
-       * 旧做法是"听到疑似唤醒词才启动录音"，实测证伪：
-       * 每次启动有 1.6 秒固定开销（新起 PowerShell + 编译 C#），
-       *   总耗时 2600ms  实际录音 990ms  启动开销 1600ms
-       * 用户说完「贾维斯」→ 识别器识别(约1s) → 才开始录音
-       * → 再等 1.6s 才收音 → 话早说完了。
-       * 实测拿到的全是 no_speech peak≈30（静音）。
-       *
-       * ══ 现在 ══
-       * 麦克风常驻开着，最近 6 秒音频躺在内存里。
-       * **唤醒词在触发前就已经被录进缓冲了**，所以取得到。
-       * 已实测验证：事后取回的峰值与 VAD 当时检测到的一致
-       * （取回 946 vs 检测 455，取回更高因为 VAD 用平滑值）。
-       *
-       * 取 3 秒：唤醒词约 0.8s，加上识别器的处理延迟，
-       * 3 秒足够覆盖，又不会让 whisper 因为太多静音变慢
-       * （实测大量静音会让耗时从 4s 涨到 24s）。 */
       const R = this.ring;
-      if (!R || !R.status().running) {
-        this.onEvent({ type: 'whisper_wake_skip', why: 'ring_not_running' });
-        return;
-      }
-
-      const wavPath = R.dumpRecent(3000);
+      if (!R || !R.status().running) { this.onEvent({ type: skipEvt, why: 'ring_not_running' }); return null; }
+      wavPath = R.dumpRecent(3000);
       if (!wavPath) {
-        /* 缓冲还没攒够 3 秒 —— 刚启动时会这样，不是错误 */
-        this.onEvent({ type: 'whisper_wake_skip', why: 'ring_not_filled',
-          filled: R.status().filledSeconds });
-        return;
+        this.onEvent({ type: skipEvt, why: 'ring_not_filled', filled: R.status().filledSeconds });
+        return null;
       }
-
-      /* 护栏：缓冲里没有真实语音就绝不喂给 whisper。
-       * whisper 在纯静音上会**编出内容**（幻觉），
-       * 实测见过凭空生成「谢谢观看」。
-       *
-       * 注意用相对判据 —— 麦克风灵敏度会变，
-       * 实测同一设备从 peak=18037 掉到 848（差 20 倍），
-       * 写死绝对阈值会让功能在灵敏度变化后静默失效。 */
       const st = R.status();
       if (!st.speaking && st.peakSmooth < VOICE_FLOOR) {
-        this.onEvent({ type: 'whisper_wake_skip', why: 'no_speech',
-          peak: st.peakSmooth });
-        try { require('fs').unlinkSync(wavPath); } catch { }
-        return;
+        this.onEvent({ type: skipEvt, why: 'no_speech', peak: st.peakSmooth });
+        return null;
       }
-
-      /* 顺手更新设备质量画像 —— 有真实样本就该学习，
-       * 而不是永远停在 unknown 的保守策略上。 */
       try {
         const q = micQuality.analyze(wavPath);
         if (q.hasSignal && q.grade !== 'unknown') micQuality.recordProbe(q);
-      } catch { /* 分级失败不影响唤醒判定 */ }
+      } catch { }
 
-      const w = getWhisper();
-      const tr = await w.transcribe(wavPath);
-      try { require('fs').unlinkSync(wavPath); } catch { }
-      const heard = String((tr && tr.text) || '').trim();
-      if (!heard) {
-        this.onEvent({ type: 'whisper_wake_skip', why: 'empty_transcript' });
-        return;
+      const tr = await getWhisper().transcribe(wavPath, { vad: false, prompt: buildWhisperPrompt() });
+      if (!tr || !tr.ok) { this.onEvent({ type: failEvt, reason: tr && tr.reason }); return null; }
+      let heard = String(tr.text || '').trim();
+      if (!heard) { this.onEvent({ type: skipEvt, why: 'empty_transcript' }); return null; }
+
+      /* 策略：默认走快的 base；当结果可疑时才用 small 对同一段音频复核。
+       *   · 指令轮：低置信，或像在点股票却没一个名字命中词表；
+       *   · 唤醒轮：whisper 没听到唤醒词、却转出一句像指令的整句
+       *     （"贾维斯帮我看新安股份"被转成"下星安股份指支股票"）——
+       *     这种要拿去救回连贯说法，专名又错了，值得 small 精识别。
+       * 单纯叫名字的唤醒不复核，没必要为开窗等约 6 秒。
+       *
+       * 代价透明：复核期间前端显示"正在仔细辨认…"；
+       * 失败/超时一律沿用 base 结果，绝不为追求准确率把交互卡死。 */
+      const wakeCommandLike = kind === 'wake' && !matchesWakeWord(heard)
+        && this._looksLikeCommand(heard);
+      if (((kind === 'command' && shouldVerify(heard, tr.conf)) || wakeCommandLike)) {
+        try {
+          this.onEvent({ type: 'whisper_verifying', base: heard, baseConf: tr.conf });
+          const tV = Date.now();
+          const tr2 = await getWhisper().transcribe(wavPath, {
+            vad: false, model: VERIFY_MODEL, prompt: buildWhisperPrompt(),
+          });
+          if (tr2 && tr2.ok && String(tr2.text || '').trim()) {
+            heard = String(tr2.text).trim();
+            this.onEvent({ type: 'whisper_verified', heard, model: VERIFY_MODEL,
+              baseConf: tr.conf, ms: Date.now() - tV });
+          }
+        } catch (_) { /* 复核失败就用 base 结果 */ }
       }
 
-      if (matchesWakeWord(heard)) {
-        /* 记录一次成功观测：系统识别器当时只给了 rawConf，
-         * 而 whisper 确认这**确实**是唤醒词。
-         * 这些样本会把阈值压到设备真的做得到的水平 ——
-         * 实测这台设备上界只有 0.107，用 0.85 等于永久锁死。 */
-        try { micQuality.recordWakeOutcome(rawConf, true); } catch { }
-        /* 复用正常唤醒路径的全部规则（冷却、打断、开窗口），
-         * 不要在这里重写一遍 —— 两条路径行为必须一致。 */
-        this._handle({ type: 'wake', text: heard, conf: 1.0, via: 'whisper' });
-        this.onEvent({ type: 'wake_via_whisper', heard, rawText, rawConf });
-      } else {
-        /* 没命中也是有价值的观测：说明这次系统识别器的低分是对的 */
-        try { micQuality.recordWakeOutcome(rawConf, false); } catch { }
-        /* 没命中也要说清听到了什么 —— 否则调不准变体表。 */
-        this.onEvent({ type: 'whisper_wake_miss', heard, rawText });
-      }
+      return heard;
     } catch (e) {
-      /* whisper 失败不该让语音功能崩掉 —— 静默降级。
-       * 但记录下来，否则又变成"看起来在工作但实际没连上"。 */
-      this.onEvent({
-        type: 'whisper_wake_failed',
-        msg: String((e && e.message) || e).slice(0, 200),
-      });
+      this.onEvent({ type: failEvt, msg: String((e && e.message) || e).slice(0, 200) });
+      return null;
     } finally {
       this._whisperBusy = false;
+      if (wavPath) { try { require('fs').unlinkSync(wavPath); } catch { } }
       try { getMicRec().cleanup(60 * 1000); } catch { }
     }
   }
@@ -581,6 +900,11 @@ class Listener {
           /* 音量流给 UI 画波形用。这是常驻缓冲的额外好处：
            * 以前没有常驻采集，界面上根本画不出实时音量。 */
           this.onEvent({ type: 'mic_level', peak: ev.peak, smooth: ev.smooth });
+        } else if (ev.type === 'speaking') {
+          /* 能量起音：只要有人开口（smooth 越过 400）就触发。
+           * 比"识别完整句"早 ~0.6-1 秒 —— 朗读中用它做即时打断，
+           * 不用等 EndSilence 走完。是否真打断由 _handleSpeechOnset 把关。 */
+          this._handleSpeechOnset(ev.peak);
         }
       });
       this.ring.start();
@@ -706,7 +1030,25 @@ while ($true) {
        * 「降低阈值」和「二次确认」是一对，不能只做前者，
        * 否则电视声、旁人说话都会唤醒（既是隐私也是花钱问题）。 */
       const policy = micQuality.currentPolicy();
-      if (ev.conf < policy.wakeConf) return;
+      if (ev.conf < policy.wakeConf) {
+        /* ══ 低置信的"唤醒语法命中"也要走 whisper 复核 ══
+         *
+         * 2026-09-13 修的漏唤醒 bug：
+         * System.Speech 对同一句话只会给**一个**结果 —— 要么命中 SRGS
+         * 唤醒语法(type=wake)，要么走听写(type=speech)，不会两个都给。
+         * 窄带麦上唤醒语法偶尔会"撞上"，但 conf 只有 0.0x（够不到
+         * wakeConf 0.10）。原代码在这里直接 return，而同一句话又不会
+         * 再产生 speech 事件 —— 于是 whisper 救命通道（在 speech 分支里）
+         * **永远没机会跑**，表现为"喊了没反应"。
+         *
+         * 现在：低置信 wake 命中，和低置信 speech 一样送 whisper 复核。
+         * 只在窗口外做（窗口内不需要再确认唤醒），并复用同一套节流，
+         * 不会因为"语法撞上"就额外放大误唤醒。 */
+        if (!this.inConvo() && policy.needWhisperConfirm) {
+          this._tryWhisperWake(ev.text || '贾维斯', ev.conf);
+        }
+        return;
+      }
 
       const now = Date.now();
       if (now - this.lastWakeAt < WAKE_COOLDOWN_MS) return;
@@ -745,9 +1087,20 @@ while ($true) {
          * 录一段音交给 whisper 复核。whisper 对窄带音频鲁棒得多
          * （同一段音频它能抓到「维斯」，系统识别器给的是「会为贵」）。
          *
-         * 只在**窗口外**做这件事 —— 窗口内已经在对话，不需要再确认唤醒。 */
-        if (!this.inConvo() && micQuality.currentPolicy().needWhisperConfirm) {
-          this._tryWhisperWake(text, ev.conf);
+         * 只在**窗口外**做这件事 —— 窗口内已经在对话，不需要再确认唤醒。
+         *
+         * ══ 2026-09-11：窗口内也要救（修"能唤醒却下不了指令"）══
+         * 窄带麦上唤醒被 whisper 救活后，接着说的指令在窗口内同样只有
+         * conf 0.0x，原来直接 speech_unclear，界面就一直「没听清」。
+         * 现在窗口内走 _tryWhisperCommand，把 whisper 识别句当指令下发。 */
+        if (micQuality.currentPolicy().needWhisperConfirm) {
+          if (this.inConvo()) {
+            /* 复核要 0.5-1s，先让界面显示"在辨认"而非干等 */
+            this.onEvent({ type: 'whisper_rescuing', phase: 'command' });
+            this._tryWhisperCommand(text, ev.conf);
+          } else {
+            this._tryWhisperWake(text, ev.conf);
+          }
           return;
         }
         /* 低置信度不是完全丢弃 —— 上报一个 low_conf 事件，
@@ -758,8 +1111,19 @@ while ($true) {
       }
 
       /* 规则 2：窗口外的语音直接丢弃。
-       * 这里不上报事件 —— 房间里的正常对话不该在界面上刷屏。 */
-      if (!this.inConvo()) return;
+       * 这里不上报事件 —— 房间里的正常对话不该在界面上刷屏。
+       *
+       * ══ 新增 fallback：dictation 中也可能包含唤醒词 ══
+       * 实测这台设备上 System.Speech 的唤醒词语法几乎匹配不上
+       * （conf 0.002-0.107），但 dictation 模式能抓到内容。
+       * 如果文本里包含唤醒词，不要静默丢弃 —— 当作 wake 处理。 */
+      if (!this.inConvo()) {
+        if (matchesWakeWord(text)) {
+          this.onEvent({ type: 'wake', text, conf: ev.conf || 0.5, convo: true, via: 'dictation_fallback' });
+          return;
+        }
+        return;
+      }
 
       /* 用户明确结束对话。识别成本极低，
        * 但能避免"说完了还开着 30 秒窗口"带来的误触发。 */
@@ -849,11 +1213,19 @@ Write-Output ('{"voices":"' + $voices + '","recognizers":"' + $recs + '"}')
 }
 
 module.exports = {
-  synthesize, cleanForSpeech, probe, Listener,
+  synthesize, synthesizeStream, cleanForSpeech, probe, Listener,
   WAKE_WORDS, WAKE_MIN_CONFIDENCE, TTS_VOICE,
   CONVO_WINDOW_MS, SPEECH_MIN_CONFIDENCE, SPEECH_MIN_CHARS,
   VAD_END_SILENCE_SEC, VAD_BABBLE_SEC,
   /* 导出给测试用 —— whisper 复核的匹配规则是差设备能否唤醒的关键，
    * 必须能被测试锁住（太宽会误唤醒，太窄等于 whisper 白接）。 */
   matchesWakeWord, WAKE_VARIANTS, WHISPER_WAKE_COOLDOWN_MS,
+  /* "贾维斯，帮我看XX"一口气说法的解析（唤醒+指令连说） */
+  parseWakeCommand, LEAD_WAKE_RE,
+  /* TTS 双引擎：音色切换状态与列表（供 set_tts_voice 工具 / probe 使用） */
+  setTtsVoice, getTtsVoice, listTtsVoices, rateToPct,
+  /* 动态 whisper 领域提示词（注入用户实际查过的股票名，提高专名识别） */
+  setWhisperPromptProvider,
+  /* 复核判定（测试锁阈值与"点股票却没命中词表"两条触发） */
+  shouldVerify, VERIFY_MODEL, VERIFY_BASE_CONF,
 };

@@ -33,6 +33,7 @@ const te = require('./tools/todo_extract');
 const health = require('./tools/source_health');
 const memTidy = require('./tools/memory_tidy');
 const quant = require('./tools/quant_bridge');
+const clock = require('./clock');
 
 /* ─────────────── 冷却管理 ─────────────── */
 
@@ -60,6 +61,30 @@ const COOLDOWNS = {
    * 冷却 6 小时：morning 流程较重（预估 300 秒），一天 2-3 次足够。 */
   quant_refresh:  6 * 60 * 60 * 1000,
   weekly_report:  7 * 24 * 60 * 60 * 1000,  // 7 天
+  /* 收盘扫描：一天一次就够。
+   * 15:00 收盘后数据才定型，盘中跑没意义（资金流还在变）。
+   * 冷却设 20 小时而不是 24 —— 24 小时会因为巡逻是 60 秒一跳、
+   * 每次只跑一个任务，慢慢漂移到越来越晚，最后错过当天。 */
+  close_scan:     20 * 60 * 60 * 1000,      // 20 小时
+  /* 盯盘预警：盘中每 20 分钟看一次大盘时机（信号本身要稳，不能每分钟喊） */
+  market_alert:   20 * 60 * 1000,           // 20 分钟
+  /* 情绪样本采集：为标定攒数据，盘中每 30 分钟一条（同日同 slot 覆盖） */
+  alert_sample:   30 * 60 * 1000,           // 30 分钟
+  /* 板块资金异动：盘中每 15 分钟一次。
+   * 比 market_alert 略快 —— 板块资金变化比大盘时机切换快，
+   * 但也不能太快：间隔太短时"区间流入"淹没在噪音里，
+   * 而且 sector_watch 自带 60 分钟基线过期保护。 */
+  sector_watch:   15 * 60 * 1000,           // 15 分钟
+  /* 盘前简报：交易日 08:55 左右一次。20h 冷却防漂移（同 close_scan） */
+  morning_brief:  20 * 60 * 60 * 1000,      // 20 小时
+  /* 持续选股：收盘后跟随 close_scan（先定方向再选个股），一天一次就够 */
+  stock_pool:     20 * 60 * 60 * 1000,      // 20 小时
+  /* 个股买卖点提示：盘中 20 分钟看一次池内个股技术状态（与 market_alert 同频） */
+  stock_signal:   20 * 60 * 1000,           // 20 分钟
+  /* 缠论生命阶段：收盘K走完才有定论，收盘后跑一次（20h 冷却防漂移，同 close_scan） */
+  chan_phase:     20 * 60 * 60 * 1000,      // 20 小时
+  /* 散户崩溃冰点：恐慌是日内事，盘中每 20 分钟算一次（与 market_alert 同频） */
+  fear_scan:      20 * 60 * 1000,           // 20 分钟
 };
 
 const _lastRun = {};
@@ -465,6 +490,441 @@ async function refreshQuant() {
   }
 }
 
+/**
+ * 收盘扫描：指数判时机 · 板块定方向 · 龙头选个股。
+ *
+ * 用户 2026-09-09 提出的框架，替代了原先「只扫算力票、趋势转正就提醒」
+ * 的窄方案 —— 原方案的问题是**预设了算力是主线**，
+ * 而主线本来就是要扫出来的，不该由我先钦定。
+ *
+ * 只落盘不推送：用户明确说「先只在网页显示，等我看几天觉得靠谱再开推送」。
+ * 这条选择是今天飞书垃圾消息事故之后做的，必须尊重。
+ */
+async function runCloseScan() {
+  try {
+    const cs = require('./tools/close_scan');
+    /* topN 给 60：报告只展示前 12，但校准样本要存更多。
+     *
+     * 原因：回归时最需要看的恰恰是**假阴性**——
+     * 「被判体量不足/不活跃的板块，后来是不是反而涨了」。
+     * 只存前 12 名（全是高分板块）就只能验证假阳性，
+     * 等于把最重要的那半边证据丢掉了。 */
+    const r = await cs.scan({ topN: 60 });
+    if (!r.ok) {
+      return { ok: false, error: '扫描无结果', findings: [], worthReporting: false };
+    }
+
+    const text = cs.formatScan(r);
+
+    /* 收盘扫描已把当日板块定格进 sector_daily（见 close_scan 的落库段）。
+     * 这里顺手回填前向收益：昨天那批行现在有"次日点位"了，可以算 fwd_d1。
+     * 不回填的话，fwd_* 永远是 NULL，"主线判断准不准"就永远没法验证。
+     * 失败不影响扫描结果 —— 但要如实带出来，不静默吞。 */
+    let fwdFilled = null, fwdError = null;
+    try {
+      const st = require('./tools/sector_trend');
+      const fr = st.backfillForward();
+      fwdFilled = fr.filled;
+    } catch (e) { fwdError = e.message; }
+
+    /* 存成记忆，这样网页和后续对话都能查到，也便于日后回看
+     * 「当时判的主线后来走出来了吗」—— 这是校准阈值的唯一途径。 */
+    let memId = null, memError = null;
+    try {
+      const db = require('./db');
+      const date = new Date().toISOString().slice(0, 10);
+      const head = r.mainlineCount
+        ? `${date} 收盘扫描：主线候选 ${r.mainlines.join('、')}`
+        : `${date} 收盘扫描：无主线候选（资金体量均不达标）`;
+      /* db.addMemory 直接返回 lastInsertRowid（数字），不是对象。
+       *
+       * category 必须是 person/place/event/interest/project 之一 ——
+       * 表上有 CHECK 约束。第一版我写了 'market'，
+       * 直接 CHECK constraint failed，而 catch 把错误吞了 →
+       * memId 恒为 null 但扫描照常返回 ok:true。
+       * 这正是本项目最怕的「看起来在工作但实际没连上」。
+       * 所以现在**把错误记进 memError 并向上报**，不再静默。 */
+      memId = db.addMemory({
+        content: head + `｜指数${r.timing ? r.timing.stance : '未知'}`
+          + `｜扫描${r.scanned}个板块\n` + text,
+        category: 'event',
+        entity: '收盘扫描',
+        weight: 0.7,
+      });
+    } catch (e) { memError = e.message; }
+
+    /* ══ 校准样本落盘（用户第四优先）══
+     *
+     * 用户的原话：「每天扫完存一份到沙箱，攒够样本再回归」。
+     * 这是补上「过滤阈值必须来自实测样本」的空缺 ——
+     * 50亿 门槛目前只有单日样本支撑。
+     *
+     * 落盘失败必须显式带出（memError 那个静默 catch 刚咬过一次）。 */
+    let calib = null, calibError = null, backfill = null;
+    try {
+      const cal = require('./tools/calibration');
+      calib = cal.record(r);
+      /* 记完当天就立刻回填 —— 今天的点位正是昨天/前天样本的
+       * d1/d3 参照物。放在同一个任务里做，避免"存了但永远没人回填"。
+       *
+       * 回填必须在 record 之后：先把今天存进去，
+       * 才能给之前的样本当参照。顺序反了会永远差一天。 */
+      backfill = cal.backfill();
+    } catch (e) { calibError = e.message; }
+
+    return {
+      ok: true,
+      findings: [{
+        kind: 'close_scan', severity: 'low',
+        text: r.mainlineCount
+          ? `主线候选 ${r.mainlineCount} 个：${r.mainlines.join('、')}`
+          : '今日无主线候选（高分板块资金体量均不足）',
+        data: {
+          timing: r.timing ? r.timing.stance : null,
+          mainlines: r.mainlines,
+          scanned: r.scanned,
+          top: r.sectors.slice(0, 5).map(s => ({
+            name: s.name, score: s.score, grade: s.grade,
+            d10Yi: s.d10Yi, leader: s.leader, leaderPct: s.leaderPct,
+          })),
+        },
+      }],
+      summary: r.mainlineCount
+        ? `收盘扫描完成，主线候选 ${r.mainlineCount} 个`
+        : '收盘扫描完成，今日无主线候选',
+      text, memId, memError, scan: r,
+      calib, calibError, backfill,
+      didSomething: true,
+      /* 恒为 false：用户选了只在网页看。改之前必须先问。 */
+      worthReporting: false,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false };
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════
+ * 盯盘预警（用户 2026-09-10）：大盘定时机，板块定方向
+ *
+ * 两件事，刻意分开：
+ *   1) runAlertSample —— 盘中定时把情绪+技术快照落 alert_samples（标定底座）
+ *   2) runMarketAlert  —— 判断大盘时机；开窗口时再看主线板块调整，满足才提示
+ *
+ * 阈值未标定前（样本<15天）一律"仅供观察"，且 runMarketAlert 默认不打扰，
+ * 只把状态广播到网页；真的买入信号满足时才值得提示（且仍标注未标定）。
+ * ════════════════════════════════════════════════════════════════ */
+
+/** 盘中采一条情绪+技术样本。静默、零打扰，纯为标定攒数据。 */
+async function runAlertSample() {
+  try {
+    const sentiment = require('./tools/sentiment');
+    const dbm = require('./db');
+    const snap = await sentiment.snapshot();
+    if (!snap.sentiment) return { ok: false, error: snap.sources.poolsError || '情绪缺失', didSomething: false };
+
+    /* slot 按钟点分段，同一天同一段覆盖（靠主键去重），不刷屏。 */
+    const h = new Date().getHours();
+    const slot = h < 10 ? 'open' : h < 13 ? 'mid_am' : h < 14.3 ? 'midday' : 'close';
+    const date = clock.dateKey(new Date());
+    dbm.saveAlertSample(date, slot, snap);
+    return { ok: true, slot, didSomething: true,
+             limitUp: snap.sentiment.limitUpCount, brokenRate: snap.sentiment.brokenRate };
+  } catch (e) {
+    return { ok: false, error: e.message, didSomething: false };
+  }
+}
+
+/**
+ * 大盘买入窗口 + 主线调整预警。
+ * 返回 worthReporting 由调用方按"用户要求只在网页看"强制压成 false，
+ * 但 findings 会进网页状态栏。
+ */
+async function runMarketAlert() {
+  try {
+    const sentiment = require('./tools/sentiment');
+    const alerts = require('./tools/alerts');
+    const dbm = require('./db');
+
+    /* 顺手采一条样本（盘中跑预警时不浪费这次请求） */
+    const snap = await sentiment.snapshot();
+    const days = dbm.alertSampleDates().length;
+    const market = alerts.judgeMarket(snap, days);
+
+    const findings = [];
+    findings.push({
+      kind: 'market_timing', severity: market.buy ? 'high' : 'low',
+      text: market.buy
+        ? `大盘买入窗口信号（${market.passed}/${market.total} 项满足）`
+        : `大盘时机未到（${market.passed}/${market.total}），只观察`,
+      data: { buy: market.buy, calibrated: market.calibrated, sampleDays: days, checks: market.checks },
+    });
+
+    let sectors = null;
+    /* 只有大盘在买入窗口时，板块"调整到位"才有动手意义；
+     * 否则也扫，但结论是"只观察"。为省东财请求，未开窗口时不扫板块。 */
+    if (market.buy) {
+      sectors = await alerts.scanMainlineAdjustments({ market, maxSectors: 6 });
+      if (sectors.ok && sectors.ready.length) {
+        findings.push({
+          kind: 'sector_adjusted', severity: 'high',
+          text: `主线板块回踩到位：${sectors.ready.join('、')}（大盘窗口已开，可作方向关注）`,
+          data: { ready: sectors.ready, sectors: sectors.sectors },
+        });
+      }
+    }
+
+    return {
+      ok: true, didSomething: true,
+      buy: market.buy, calibrated: market.calibrated, sampleDays: days,
+      sectors: sectors ? sectors.ready : [],
+      findings,
+      summary: market.buy
+        ? `大盘买入窗口开（${market.passed}/${market.total}）` + (sectors && sectors.ready.length ? `，方向：${sectors.ready.join('、')}` : '')
+        : `大盘时机未到（${market.passed}/${market.total}），阈值${market.calibrated ? '已标定' : '未标定(供观察)' }`,
+      /* 未标定阶段即使开窗口也不算"可打扰"——先在网页看，标定后再说。 */
+      worthReporting: false,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false, didSomething: false };
+  }
+}
+
+/**
+ * 缠论生命阶段（收盘后，每日一次）。
+ * 只在收盘K走完后判定，避免盘中未完成K造成分型闪烁。
+ * 未标定前恒 worthReporting:false，只把阶段写进 findings/网页，不打扰。
+ */
+async function runChanPhase() {
+  try {
+    const sentiment = require('./tools/sentiment');
+    const kline = require('./tools/stock_kline');
+    const dbm = require('./db');
+    const mp = require('./tools/market_phase');
+    const r = await mp.assess({
+      getBars: (period) => kline.kline('000001', period, period === 'day' ? 240 : 320).then(k => k.bars),
+      snapshot: () => sentiment.snapshot(),
+      alertSamples: () => dbm.alertSamplesDaily(),
+    }, { withMinute: true });
+
+    const findings = [{
+      kind: 'market_phase', severity: 'low',
+      text: `大盘缠论阶段「${r.phase}」`
+        + (r.chan ? `（${(r.chan.levels.day || {}).trend || '?'}走势，笔${r.chan.strokeCount}/笔中枢${r.chan.segZoneCount}/买卖点${(r.chan.levels.day || {}).pointCount}/背驰${(r.chan.levels.day || {}).divergenceCount}）` : '')
+        + '｜崩溃:' + (r.fear ? r.fear.label : '未知')
+        + '（未标定·仅供观察）',
+      data: { phase: r.phase, fear: r.fear ? r.fear.tier : null },
+    }];
+    return {
+      ok: r.phase !== 'unknown', didSomething: true,
+      phase: r.phase, fearTier: r.fear ? r.fear.tier : null,
+      summary: r.summary, findings,
+      worthReporting: false,     // 恒 false：未标定只上网页，改前必须问用户
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false, didSomething: false };
+  }
+}
+
+/**
+ * 散户崩溃冰点（盘中每 20 分钟）。
+ * 与 runMarketAlert 的顺势信号相反，这是左侧/反向，独立成项不混入"买入窗口"。
+ * 只有 normal/extreme 才算有内容；none/watch/unknown 静默让位。
+ * 未标定前恒 worthReporting:false（extreme 也只上网页，绝不主动推送）。
+ */
+async function runFearScan() {
+  try {
+    const sentiment = require('./tools/sentiment');
+    const kline = require('./tools/stock_kline');
+    const dbm = require('./db');
+    const mp = require('./tools/market_phase');
+    const r = await mp.assess({
+      getBars: () => kline.kline('000001', 'day', 240).then(k => k.bars),
+      snapshot: () => sentiment.snapshot(),
+      alertSamples: () => dbm.alertSamplesDaily(),
+    }, { withMinute: false });
+    const f = r.fear;
+    const fired = f && (f.tier === 'normal' || f.tier === 'extreme');
+    if (!fired) {
+      // 无冰点：跑完让位，不占这一拍、不产生播报（但请求已顺带完成采样底座）
+      return { ok: true, didSomething: false, tier: f ? f.tier : 'unknown', findings: [], worthReporting: false };
+    }
+    return {
+      ok: true, didSomething: true, tier: f.tier, side: f.side,
+      findings: [{
+        kind: 'capitulation', severity: f.tier === 'extreme' ? 'high' : 'medium',
+        text: `${f.label}：${f.reason}`,
+        data: { tier: f.tier, side: f.side, resonance: f.resonance, calibrated: f.calibrated },
+      }],
+      summary: f.label,
+      worthReporting: false,     // 恒 false：未标定，极端恐慌也先只上网页
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false, didSomething: false };
+  }
+}
+
+/**
+ * 盘中板块资金异动（每 15 分钟）。
+ *
+ * 与 runMarketAlert 的分工：
+ *   runMarketAlert  → 大盘时机（该不该出手）
+ *   runSectorWatch  → 板块方向（资金在往哪去）
+ *
+ * 打扰纪律沿用 market_alert：阈值未标定前 worthReporting 恒为 false，
+ * 只在网页上看得到，不推送。标定完成（≥15 个交易日样本）后，
+ * 才允许把"强异动"升级成可打扰级别。
+ */
+async function runSectorWatch() {
+  try {
+    const sw = require('./tools/sector_watch');
+    const r = await sw.watch();
+
+    if (!r.ok) {
+      return { ok: false, error: r.error, findings: [], worthReporting: false, didSomething: false };
+    }
+    /* 非交易时段/建基线/基线过期：都不是异动，也不算失败，静默带过。
+     * 这里必须如实区分，不能把"没数据可比"说成"没有异动"。 */
+    if (r.mode !== 'diff') {
+      return {
+        ok: true, didSomething: r.mode === 'baseline',
+        mode: r.mode, findings: [], worthReporting: false,
+        summary: r.note,
+      };
+    }
+
+    const findings = r.moves.slice(0, 6).map(m => ({
+      kind: 'sector_flow_' + m.dir,
+      severity: m.dir === 'flee' ? 'medium' : 'high',
+      text: `${m.name} ${m.dir === 'surge' ? '资金涌入' : m.dir === 'flee' ? '资金撤离' : '资金逆势流入'}`
+        + ` ${m.deltaYi > 0 ? '+' : ''}${m.deltaYi}亿（${m.windowMin}分钟）`,
+      data: m,
+    }));
+
+    return {
+      ok: true, didSomething: true,
+      mode: 'diff', window: r.windowMin, slot: r.slot,
+      moveCount: r.moves.length, calibrated: r.calibrated, calDays: r.calDays,
+      findings,
+      summary: r.moves.length
+        ? `板块资金异动 ${r.moves.length} 个（${r.prevSlot}→${r.slot}）：`
+          + r.moves.slice(0, 3).map(m => `${m.name}${m.deltaYi > 0 ? '+' : ''}${m.deltaYi}亿`).join('、')
+          + (r.calibrated ? '' : '（阈值未标定，仅供观察）')
+        : `板块资金无明显异动（${r.prevSlot}→${r.slot}）`,
+      /* 未标定阶段一律不打扰 —— 和 market_alert 同一条纪律。 */
+      worthReporting: false,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false, didSomething: false };
+  }
+}
+
+/**
+ * 盘前简报（交易日 ~08:55 一次）。
+ * mind 心跳里在盘前窗口调用；产出进网页+记忆，不推飞书（用户选择先只在网页看）。
+ */
+async function runMorningBrief() {
+  try {
+    const mb = require('./tools/morning_brief');
+    const r = await mb.briefing();
+    if (!r.ok) return { ok: false, error: r.error, findings: [], worthReporting: false };
+
+    /* 存记忆，方便开盘对话时模型能直接引用，也便于事后核对"晨报说的对不对" */
+    let memId = null;
+    try {
+      const dbm = require('./db');
+      memId = dbm.addMemory({
+        content: `${r.date} 盘前简报（来源${r.source}，过滤个股${r.filteredCount}条）\n` + r.text,
+        category: 'event', entity: '盘前简报',
+      });
+    } catch (e) { /* 记忆失败不影响简报展示 */ }
+
+    return {
+      ok: true, didSomething: true, memId,
+      findings: [{ kind: 'morning_brief', severity: 'low',
+        text: `盘前简报已生成（利好${r.bullish.length}/利空${r.bearish.length}）` }],
+      summary: `盘前简报：利好${r.bullish.length} 利空${r.bearish.length}`,
+      brief: r,
+      /* 用户明确：先只在网页显示，不推飞书。要推必须先问。 */
+      worthReporting: false,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false };
+  }
+}
+
+/**
+ * 持续选股：收盘后跟随 close_scan 跑（先定方向再选个股）。
+ * 产出候选池落 stock_pool 表 + 一条网页 finding。
+ * 用户 2026-09-12：「同一天相同条件的股票很多，如何精准找到好的」——
+ * 候选锁死在主线/强势板块领涨股 + 连板≥2，四维评分排序取 top N，精准而非罗列。
+ */
+async function runStockPool() {
+  try {
+    const sp = require('./tools/stock_pool');
+    const r = await sp.run({ topN: 15, persist: true });
+    if (!r.ok) {
+      return { ok: false, error: '选股无候选入池', findings: [], didSomething: false, worthReporting: false };
+    }
+
+    const top = r.pool.slice(0, 5).map(s => `${s.name}(${s.code})${s.score}分`).join('、');
+    return {
+      ok: true,
+      didSomething: r.pool.length > 0,
+      findings: [{
+        kind: 'stock_pool_new', severity: 'low',
+        text: r.pool.length
+          ? `候选池 ${r.pool.length} 只（扫描${r.scanned}，入池${r.scored}）：${top}`
+          : '选股扫描完成，无候选入池（候选全部不达评分门槛）',
+        data: {
+          scanned: r.scanned, scored: r.scored, inPool: r.pool.length,
+          failed: r.failedCount, top: r.pool.slice(0, 5),
+          sources: r.sources, calibrated: r.calibrated,
+          staleWarning: r.staleWarning, dataTime: r.dataTime,
+        },
+      }],
+      summary: `选股完成：候选池 ${r.pool.length} 只`,
+      stockPool: r,
+      persistError: r.persistError,   // 落库失败必须带出来，不静默
+      /* 恒为 false：用户选了只在网页看。改之前必须先问。 */
+      worthReporting: false,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false };
+  }
+}
+
+/**
+ * 个股买卖点条件式提示：盘中定时跑。
+ * 大盘闸门：不在买入窗口时买点类信号降级"仅观察"，卖点类恒报（风险提示不设闸）。
+ */
+async function runStockSignal() {
+  try {
+    const ss = require('./tools/stock_signal');
+    const r = await ss.run({ persist: true });
+    if (!r.ok) {
+      return { ok: false, error: r.error, findings: [], didSomething: false, worthReporting: false };
+    }
+    if (r.poolEmpty) {
+      /* 池子为空不算失败：可能今天还没跑选股。静默让位。 */
+      return { ok: true, didSomething: false, findings: [], stockSignal: r, worthReporting: false };
+    }
+
+    return {
+      ok: true,
+      didSomething: r.signalCount > 0,
+      findings: r.findings,
+      summary: r.signalCount
+        ? `个股信号 ${r.signalCount} 条（大盘${r.market.buy ? '买入窗口' : '未开窗'})`
+        : '个股信号 0 条',
+      stockSignal: r,
+      /* 恒为 false：用户选了只在网页看。改之前必须先问。 */
+      worthReporting: false,
+    };
+  } catch (e) {
+    return { ok: false, error: e.message, findings: [], worthReporting: false };
+  }
+}
+
 async function runOne(ctx = {}) {
   /* 任务优先级：便宜的先跑，贵的靠冷却压着。
    * 交易时段优先看盘，非交易时段优先看会话。
@@ -474,13 +934,113 @@ async function runOne(ctx = {}) {
   const day = now.getDay();
   const isTradingHours = day >= 1 && day <= 5 && hour >= 9 && hour < 15;
 
+  /* 收盘扫描窗口：交易日 15:00-23:00。
+   * 下限 15:00 因为收盘后数据才定型；上限 23:00 避免半夜跑完
+   * 用户第二天早上看到的是"昨天"的扫描却以为是今天的。
+   * 周末不跑 —— 没有新数据，跑了只是重复昨天。 */
+  const isAfterClose = day >= 1 && day <= 5 && hour >= 15 && hour < 23;
+
   const order = isTradingHours
-    ? ['market_scan', 'session_scan', 'health_check', 'memory_tidy', 'quant_refresh']
-    : ['session_scan', 'market_scan', 'health_check', 'memory_tidy', 'quant_refresh'];
+    /* 盘中：先看大盘时机（总开关），再看个股买卖点（池内技术状态），
+     * 再扫板块资金异动（方向）、采情绪样本、扫盘。
+     * stock_signal 放 market_alert 之后：它要读大盘窗口结果做闸门。 */
+    ? ['market_alert', 'fear_scan', 'stock_signal', 'sector_watch', 'alert_sample', 'market_scan', 'session_scan', 'health_check', 'memory_tidy', 'quant_refresh']
+    : isAfterClose
+      /* 收盘后把 close_scan 排最前 —— 它是用户明确要的每日固定动作，
+       * 不能让 session_scan 之类天天把它的机会抢掉。
+       * chan_phase 紧跟其后：收盘K走完才判缠论阶段；stock_pool 再后（先定方向再选股）。 */
+      ? ['close_scan', 'chan_phase', 'stock_pool', 'session_scan', 'market_scan', 'health_check', 'memory_tidy', 'quant_refresh']
+      : ['session_scan', 'market_scan', 'health_check', 'memory_tidy', 'quant_refresh'];
 
   for (const task of order) {
     if (!canRun(task)) continue;
+
+    /* ══ 非交易时段静默（用户 2026-09-10 要求）══════
+     *
+     * close_scan 是用户点名要的每日动作，且它本身只在 15:00-23:00
+     * 的 isAfterClose 窗口才会出现在 order 里，所以无条件放行。
+     *
+     * 其余所有任务（扫盘/巡会话/健康/记忆整理/quant）在主动窗口外
+     * 一律不跑。这些任务即使 worthReporting=false 也会产生网络请求和
+     * 状态噪音，用户要的是"非交易时段彻底安静"。
+     *
+     * 注意：心跳没停、情绪还在累积，只是不主动外放。
+     * 用户随时提问，brain.js 那条链路完全不受影响。 */
+    if (task !== 'close_scan' && task !== 'stock_pool' && task !== 'chan_phase' && !clock.isProactiveWindow()) {
+      continue;
+    }
+
     markRun(task);
+    if (task === 'close_scan') {
+      const r = await runCloseScan();
+      return {
+        task,
+        label: '收盘扫描（指数·板块·龙头）',
+        result: r,
+        /* 用户明确选了「先只在网页显示，等我看几天觉得靠谱再开推送」，
+         * 所以这里恒为 false —— 结果进网页和记忆，不推飞书。
+         * 改成 true 之前必须先问用户。 */
+        worthReporting: false,
+      };
+    }
+    if (task === 'chan_phase') {
+      const r = await runChanPhase();
+      if (!r.ok && r.error) continue;   // 取数失败静默让位，下一轮重试
+      return {
+        task,
+        label: '缠论生命阶段（收盘判定）',
+        result: r,
+        /* 恒为 false：画法/阈值未标定，只进网页状态，不推送。改之前必须先问用户。 */
+        worthReporting: false,
+      };
+    }
+    if (task === 'stock_pool') {
+      const r = await runStockPool();
+      return {
+        task,
+        label: '持续选股（候选池）',
+        result: r,
+        /* 恒为 false：用户选了只在网页看。改之前必须先问。 */
+        worthReporting: false,
+      };
+    }    if (task === 'stock_signal') {
+      const r = await runStockSignal();
+      /* 池子为空或 0 信号时静默让位，不占这一拍 */
+      if (r.ok && !r.didSomething) continue;
+      return {
+        task,
+        label: '个股买卖点提示',
+        result: r,
+        worthReporting: false,
+      };
+    }
+    if (task === 'market_alert') {
+      const r = await runMarketAlert();
+      return { task, label: '盯盘预警（大盘时机·主线方向）', result: r, worthReporting: false };
+    }
+    if (task === 'fear_scan') {
+      const r = await runFearScan();
+      /* 无冰点/无法判断时静默让位，不占这一拍 */
+      if (!r.didSomething) continue;
+      return { task, label: '散户崩溃冰点（情绪反向）', result: r, worthReporting: false };
+    }
+    if (task === 'sector_watch') {
+      const r = await runSectorWatch();
+      /* 建基线阶段（今日首拍）没有可播报内容，静默让位给别的任务。
+       * 这不是失败 —— 它把基线写进库了，下一拍才有得比。 */
+      if (r.mode === 'baseline' || r.mode === 'closed' || r.mode === 'stale-baseline') continue;
+      return { task, label: '板块资金异动（盘中）', result: r, worthReporting: false };
+    }
+    if (task === 'alert_sample') {
+      const r = await runAlertSample();
+      /* 纯采集：跑完继续看还有没有别的任务，不占这一拍、不产生活动播报。
+       * 失败也静默，下一轮自然重试。 */
+      continue;
+    }
+    if (task === 'morning_brief') {
+      const r = await runMorningBrief();
+      return { task, label: '盘前简报', result: r, worthReporting: false };
+    }
     if (task === 'market_scan') {
       const r = await scanMarket();
       return {
@@ -546,6 +1106,23 @@ function weeklyDue() {
 }
 function markWeeklyDone() { markRun('weekly_report'); }
 
+/**
+ * 盘前简报到点没：交易日 08:40–09:05 窗口 + 20h 冷却。
+ *
+ * 窗口从 08:40 起而不是精确 08:55：心跳 60s 一跳、每分钟只跑一个任务，
+ * 给排队留余量；到 09:05 截止避免开盘后才补发"盘前"。
+ * 非交易日（周末/节假日）不跑 —— 复用 clock 真实日历。
+ * 开机补做：如果进程 08:40 没开、08:50 才开，冷却没记录过仍会补一次。
+ */
+function morningBriefDue() {
+  const d = new Date();
+  if (!clock.isTradingDay(d)) return false;
+  const hm = d.getHours() * 60 + d.getMinutes();
+  const inWindow = hm >= 8 * 60 + 40 && hm <= 9 * 60 + 5;
+  return inWindow && canRun('morning_brief');
+}
+function markMorningBriefDone() { markRun('morning_brief'); }
+
 /** 调试用：看各任务的冷却状态 */
 function cooldownStatus() {
   const out = {};
@@ -563,7 +1140,10 @@ function cooldownStatus() {
 }
 
 module.exports = {
-  runOne, scanMarket, scanSessions, checkHealth, tidyMemory,
+  runOne, scanMarket, scanSessions, checkHealth, tidyMemory, runCloseScan,
+  runMarketAlert, runAlertSample, runMorningBrief, runSectorWatch,
+  runStockPool, runStockSignal, runChanPhase, runFearScan,
+  morningBriefDue, markMorningBriefDone,
   weeklyDue, markWeeklyDone, cooldownStatus,
   THRESHOLDS, COOLDOWNS,
 };

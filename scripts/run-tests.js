@@ -10,18 +10,57 @@
 
 const { spawnSync } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 const ROOT = path.join(__dirname, '..');
 
+// 注册表须覆盖 src/ 下全部 *.test.js —— 漏登记的套件不会被 npm test 跑到，
+// 失败就被藏起来（2026-09-16 发现 15 个套件未登记，其中 2 个在失败，
+// 而 npm test 仍打印「全部通过」。断言见 jarvis-clock / jarvis-sectorwatch）。
 const SUITES = [
-  ['意识 mind', 'src/jarvis-mind.test.js'],
-  ['工具 tools', 'src/jarvis-tools.test.js'],
-  ['巡视 patrol', 'src/jarvis-patrol.test.js'],
-  ['星图 starmap', 'src/jarvis-starmap.test.js'],
-  ['着色 shader', 'src/jarvis-shader.test.js'],
-  ['上游 jiwen', 'src/jiwen.test.js'],
-  ['语音 voice', 'src/voice.test.js'],
+  ['动画闸门 animgate',   'src/jarvis-animgate.test.js'],
+  ['markdown',            'src/jarvis-markdown.test.js'],
+  ['时钟 clock',          'src/jarvis-clock.test.js'],
+  ['意识 mind',           'src/jarvis-mind.test.js'],
+  ['工具 tools',          'src/jarvis-tools.test.js'],
+  ['巡视 patrol',         'src/jarvis-patrol.test.js'],
+  ['星图 starmap',        'src/jarvis-starmap.test.js'],
+  ['星图增强 starmap-plus', 'src/jarvis-starmap-plus.test.js'],
+  ['着色 shader',         'src/jarvis-shader.test.js'],
+  ['告警 alerts',         'src/jarvis-alerts.test.js'],
+  ['市场阶段 phase',      'src/jarvis-market-phase.test.js'],
+  ['板块趋势 sectortrend','src/jarvis-sectortrend.test.js'],
+  ['板块盯盘 sectorwatch','src/jarvis-sectorwatch.test.js'],
+  ['冰点 capitulation',   'src/jarvis-capitulation.test.js'],
+  ['恐惧回填 fearbk',     'src/jarvis-fear-backfill.test.js'],
+  ['fuyao',               'src/jarvis-fuyao.test.js'],
+  ['缠论 chan',           'src/jarvis-chan.test.js'],
+  ['minkline',            'src/jarvis-minkline.test.js'],
+  ['标的池 universe',     'src/jarvis-universe.test.js'],
+  ['体检 checkup',        'src/jarvis-checkup.test.js'],
+  ['教训 lessons',        'src/jarvis-lessons.test.js'],
+  ['选股买点 stockpick',  'src/jarvis-stockpick.test.js'],
+  ['上游 jiwen',          'src/jiwen.test.js'],
+  ['LLM llm',             'src/llm.test.js'],
+  ['语音 voice',          'src/voice.test.js'],
+  ['TTS边缘 edge',        'src/tts_edge.test.js'],
 ];
+
+/* 防注册表漂移：未登记的 src/*.test.js 其失败不会被 npm test 发现。
+ * 2026-09-16 实证：15 个套件漏登记（含 2 个正在失败），npm test 仍打印「全部通过」。
+ * 直接 process.exit(1) 而非告警 —— 漏登记不算通过。 */
+const toPosix = (s) => s.split(path.sep).join('/');
+const registered = new Set(SUITES.map(([, f]) => toPosix(f)));
+const onDisk = fs.readdirSync(path.join(ROOT, 'src'))
+  .filter((f) => /\.test\.js$/.test(f))
+  .map((f) => toPosix(path.join('src', f)));
+const missing = onDisk.filter((f) => !registered.has(f));
+if (missing.length) {
+  console.log('\x1b[31m✗\x1b[0m 以下测试文件未登记进 run-tests.js，其失败不会被发现：');
+  missing.forEach((f) => console.log(`    ${f}`));
+  console.log('请把上面每一项加进 SUITES 后重跑。\n');
+  process.exit(1);
+}
 
 /* ── 先验环境。地基不对，测试结果没有意义 ── */
 const envCheck = spawnSync(process.execPath, [path.join(__dirname, 'check-env.js')], {

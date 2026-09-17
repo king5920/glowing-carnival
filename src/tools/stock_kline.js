@@ -1,18 +1,42 @@
 'use strict';
 /**
- * A 股 K 线（腾讯 ifzq 主源 + 新浪备用）
+ * A 股 K 线：日/周/月 + 分钟级（1/5/15/30/60 分）+ 当日分时
  *
- * 为什么不用东财？东财 push2his 跟 push2 一样有间歇性风控，
- * 实测连打会 socket hang up，腾讯 ifzq 稳得多。
+ * ── 日/周/月 ──（既有，腾讯主、新浪备）
  *
- * 腾讯接口格式：
- *   { code:0, data:{ sh600519:{ day:[["2026-06-15","1292.700","1271.100","1292.700","1270.100","41586.000"], ...] } } }
- *   每根: [日期, 开盘, 收盘, 最高, 最低, 成交量(手)]
+ * ── 分钟级（2026-09-11 新增，三个源都在本机真请求验证过）──
  *
- * qfqday = 前复权，day = 不复权
+ *   没有任何一个免费源能单独覆盖全部周期 + 长历史 + 指数，所以按周期选源：
+ *
+ *   东财 push2his  1/5/15/30/60 都给、当天最快(40-280ms)、支持前后复权；
+ *                  但 1 分只给当天约240根，且**指数分钟K返0行**，住宅IP偶发风控
+ *                  → 盘中盯盘主源（走 em_client 节流/换域名/熔断）
+ *   同花顺 d.10jqka 码 60=1分(~60天) / 41=30分(回到2023-08,5896根)
+ *                  / 51=60分(回到2023) / 01=日；**指数 hs_1A0001 可用**；
+ *                  但没有 5/15 分，列序是 开-高-低-收
+ *                  → 30/60 分长历史 + 指数分钟K 主源
+ *   新浪(现有备用) 1/5/15/30/60 都给、指数也给，每种最多约1023根、仅不复权
+ *                  → 通用兜底
+ *
+ *   1 分：东财(当天,最快) → 新浪 → 同花顺
+ *   5/15 分：东财 → 新浪
+ *   30/60 分：同花顺(历史深) → 东财 → 新浪
+ *   指数分钟：同花顺 → 新浪（东财不给）
+ *
+ * 分时（当日逐分钟）：腾讯 minute/query（既有实测可用）。
+ *
+ * 字段全部归一成 { date, open, close, high, low, volume }；
+ * 分钟K 的 date 是 'YYYY-MM-DD HH:mm'，日K 是 'YYYY-MM-DD'。
+ *
+ * ⚠ 同花顺列序是 开/高/低/收（不是东财的 开/收/高/低），接反会让 high/low 互换。
+ * ⚠ 东财分钟历史：5分实测可取到约7个月，1分仅当天——别向用户承诺"几年1分历史"。
  */
 
 const https = require('https');
+/* 东财请求统一走 em_client（串行节流 + push2 域名切换 + 熔断），
+ * 东财有住宅IP风控，裸 https 连打会 socket hang up。 */
+let _em;
+function emClient() { if (!_em) _em = require('./em_client'); return _em; }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
@@ -146,6 +170,204 @@ function fetchSina(code, period, limit, forced) {
   });
 }
 
+/* ══════════════════════════════════════════════════════════════
+ * 分钟级 K 线（m1/m5/m15/m30/m60）
+ * ══════════════════════════════════════════════════════════════ */
+
+/* 支持的分钟周期 → 各源周期参数 */
+const MINUTE_PERIODS = {
+  // tx: 腾讯 mkline 支持的周期名（m1 走别的当日分时端点，这里不给）
+  m1: { minutes: 1, em: 1, sina: 1, ths: '60', tx: null },
+  m5: { minutes: 5, em: 5, sina: 5, ths: null, tx: 'm5' },
+  m15: { minutes: 15, em: 15, sina: 15, ths: null, tx: 'm15' },
+  m30: { minutes: 30, em: 30, sina: 30, ths: '41', tx: 'm30' },
+  m60: { minutes: 60, em: 60, sina: 60, ths: '51', tx: 'm60' },
+};
+
+/* 东财 secid：沪市股票 1. / 深市 0.；指数 1.000xxx(沪) 0.399xxx(深)。
+ * 注意 000001 既是平安银行(0.000001)也是上证指数(1.000001) ——
+ * 这里必须尊重调用方语义：isIndexCode 命中白名单的按指数取，其余按个股。 */
+function emSecid(pure, market, isIndex) {
+  if (isIndex) {
+    /* 指数白名单给的前缀就是权威市场 */
+    return (market === 'sz' ? '0.' : '1.') + pure;
+  }
+  return (pure.startsWith('6') || pure.startsWith('9') ? '1.' : '0.') + pure;
+}
+
+/* 同花顺指数代码：上证指数用 1A0001；深证成指 399001 等用原码（hs_ 前缀实测可用）。
+ * 个股直接 6 位码。 */
+function thsCode(pure, isIndex, market) {
+  if (isIndex) {
+    if (pure === '000001') return '1A0001';     // 上证指数
+    return pure;                                 // 1A0001 之外的指数(399xxx等)用原码
+  }
+  return pure;
+}
+
+/** 东财分钟K（盘中主源，支持前/后复权）。只返回 bars 或 null。 */
+async function fetchEastmoneyMinute(pure, period, limit, adjust, forced, isIndex) {
+  const cfg = MINUTE_PERIODS[period];
+  const market = forced && forced.market;
+  const secid = emSecid(pure, market, isIndex);
+  const fqt = adjust === 'forward' ? 1 : adjust === 'backward' ? 2 : 0;
+  /* 东财 lmt 上限较大；1分接口实测只给当天，5/15/30/60 可给数月，封顶 2000 防呆 */
+  const lmt = Math.min(Math.max(limit, 1), 2000);
+  const url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=' + secid
+    + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58'
+    + `&klt=${cfg.em}&fqt=${fqt}&beg=0&end=20500101&lmt=${lmt}`;
+  const j = await emClient().emGetJson(url, { headers: { Referer: 'https://quote.eastmoney.com/' } });
+  const kl = j && j.data && j.data.klines;
+  if (!kl || !kl.length) return null;
+  /* 每根: "2026-09-11 10:00,开,收,高,低,量,额,振幅"（开收高低） */
+  const bars = kl.map(line => {
+    const p = line.split(',');
+    return { date: p[0], open: num(p[1]), close: num(p[2]), high: num(p[3]), low: num(p[4]), volume: num(p[5]) };
+  });
+  return { code: pure, name: j.data.name || pure, period, adjust: adjust || 'none', bars, source: 'eastmoney' };
+}
+
+/** 同花顺分钟K（30/60分历史深 + 指数可用）。JSONP 剥壳。 */
+function fetchThsMinute(pure, period, limit, isIndex, market) {
+  const ty = MINUTE_PERIODS[period] && MINUTE_PERIODS[period].ths;
+  if (!ty) return Promise.resolve(null);
+  const code = thsCode(pure, isIndex, market);
+  const url = `https://d.10jqka.com.cn/v6/line/hs_${code}/${ty}/last.js`;
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: { 'User-Agent': UA, Referer: 'http://stockpage.10jqka.com.cn/' },
+      timeout: 8000,
+    }, res => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try {
+          const json = d.replace(/^[^(]*\(/, '').replace(/\);?\s*$/, '');
+          const j = JSON.parse(json);
+          const rows = String(j.data || '').split(';').filter(Boolean);
+          if (!rows.length) return resolve(null);
+          /* 每根: "YYYYMMDDHHmm,开,高,低,收,量,额,..."（开高低收 —— 与东财不同！） */
+          let bars = rows.map(line => {
+            const p = line.split(',');
+            const ts = p[0];
+            const date = `${ts.slice(0,4)}-${ts.slice(4,6)}-${ts.slice(6,8)} ${ts.slice(8,10)}:${ts.slice(10,12)}`;
+            return { date, open: num(p[1]), high: num(p[2]), low: num(p[3]), close: num(p[4]), volume: num(p[5]) };
+          });
+          /* last.js 最近的在前？实测数据按时间正序；统一保证升序 */
+          bars = bars.filter(b => b.close != null);
+          if (bars.length >= 2 && bars[0].date > bars[1].date) bars.reverse();
+          if (limit < bars.length) bars = bars.slice(bars.length - limit);
+          resolve({ code: pure, name: j.name || code, period, adjust: 'none', bars, source: '10jqka' });
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('同花顺分钟K超时')); });
+    req.on('error', reject);
+  });
+}
+
+/** 新浪分钟K（通用兜底，仅不复权，每种最多约 1023 根）。复用 fetchSina，scale 用分钟数。 */
+async function fetchSinaMinute(pure, period, limit, forced) {
+  const scale = MINUTE_PERIODS[period].sina;
+  /* fetchSina 的 scale 表只认日/周/月，这里直接发分钟请求，单独实现以便带 limit */
+  const pre = txPrefix(pure, forced);
+  if (!pre) throw new Error('无效代码');
+  const lmt = Math.min(Math.max(limit, 1), 1023);
+  const url = `https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol=${pre}${pure}&scale=${scale}&ma=no&datalen=${lmt}`;
+  const r = await new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': UA }, timeout: 8000 }, res => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch (e) { reject(e); } });
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('新浪分钟K超时')); });
+    req.on('error', reject);
+  });
+  if (!Array.isArray(r) || !r.length) return null;
+  const bars = r.map(row => ({
+    date: String(row.day).replace(' ', ' ').slice(0, 16),
+    open: num(row.open), close: num(row.close), high: num(row.high), low: num(row.low),
+    volume: num(row.volume) ? num(row.volume) / 100 : null,
+  }));
+  return { code: pure, name: pure, period, adjust: 'none', bars, source: 'sina' };
+}
+
+/**
+ * 腾讯分钟K（2026-09-13 新增备胎）—— ifzq mkline 端点。
+ * 本机实测（不封 IP、住宅 IP 稳定）：m5/m15/m30/m60 各可取约 320 根，
+ * 上证 sh000001、创业板 sz399006 等**指数分钟K也给**——正好补上
+ * "东财不给指数分钟、同花顺指数尾部滞后"的短板。仅不复权。
+ *
+ * 列序实测：[时间, 开, 收, 高, 低, 量, {}, 额]（开收高低，与东财一致）。
+ * 只返回 bars 或 null，供选源链统一降级。
+ */
+function fetchTencentMinute(pure, period, limit, forced, isIndex) {
+  const txName = MINUTE_PERIODS[period] && MINUTE_PERIODS[period].tx;
+  if (!txName) return Promise.resolve(null);
+  const pre = txPrefix(pure, forced);
+  if (!pre) return Promise.resolve(null);
+  const lmt = Math.min(Math.max(limit, 1), 1000);
+  const url = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${pre}${pure},${txName},,${lmt}`;
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: { 'User-Agent': UA, Referer: 'https://gu.qq.com/' }, timeout: 9000,
+    }, res => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(d);
+          const node = j.data && j.data[pre + pure];
+          const rows = node && node[txName];
+          if (!Array.isArray(rows) || !rows.length) return resolve(null);
+          let bars = parseTencentMinuteRows(rows);
+          if (bars.length >= 2 && bars[0].date > bars[1].date) bars.reverse();
+          if (limit < bars.length) bars = bars.slice(bars.length - limit);
+          resolve({ code: pure, name: pure, period, adjust: 'none', bars, source: 'tencent' });
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('腾讯分钟K超时')); });
+    req.on('error', reject);
+  });
+}
+
+/** 取分钟K：按周期选源、逐个降级。isIndex 决定东财/同花顺的指数路径。 */
+async function fetchMinute(pure, period, limit, adjust, forced, isIndex) {
+  let chain;
+  if (isIndex) {
+    /* 指数分钟K：东财返0行；同花顺指数尾部会滞后到前一天（盯盘大忌）；
+     * 腾讯 mkline 本机实测给指数实时分钟K且稳定 → 指数走 腾讯(实时)→新浪→同花顺(补历史)。 */
+    chain = ['tencent', 'sina', 'ths'];
+  } else if (period === 'm30' || period === 'm60') {
+    /* 30/60 分历史深：同花顺优先；要复权时同花顺给不了，东财补；腾讯做实时备胎 */
+    chain = adjust && adjust !== 'none'
+      ? ['eastmoney', 'ths', 'tencent', 'sina']
+      : ['ths', 'eastmoney', 'tencent', 'sina'];
+  } else if (period === 'm1') {
+    chain = ['eastmoney', 'sina', 'ths'];
+  } else {
+    /* m5/m15 同花顺没有；东财 push2his 本机会被 TCP 拦；腾讯实测稳定 → 东财→腾讯→新浪 */
+    chain = ['eastmoney', 'tencent', 'sina'];
+  }
+
+  let lastErr;
+  for (const src of chain) {
+    try {
+      let r = null;
+      if (src === 'eastmoney') r = await fetchEastmoneyMinute(pure, period, limit, adjust, forced, isIndex);
+      else if (src === 'ths') r = await fetchThsMinute(pure, period, limit, isIndex, forced && forced.market);
+      else if (src === 'sina') r = await fetchSinaMinute(pure, period, limit, forced);
+      else if (src === 'tencent') r = await fetchTencentMinute(pure, period, limit, forced, isIndex);
+      if (r && r.bars && r.bars.length) return r;
+      lastErr = new Error(src + ' 返回空');
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error(`分钟K(${period})获取失败：${lastErr ? lastErr.message : '未知'}`);
+}
+
 /**
  * 取 K 线，腾讯主源失败降级到新浪。
  * @param {string} code 6位代码
@@ -162,8 +384,9 @@ function fetchSina(code, period, limit, forced) {
  * @param {object} [opts] { market:'sh'|'sz' } 显式指定市场，覆盖白名单判断
  */
 async function kline(code, period = 'day', limit = 60, adjust = 'none', opts = {}) {
-  const list = ['day', 'week', 'month'];
-  if (!list.includes(period)) period = 'day';
+  const dayList = ['day', 'week', 'month'];
+  const isMinute = Object.prototype.hasOwnProperty.call(MINUTE_PERIODS, period);
+  if (!dayList.includes(period) && !isMinute) period = 'day';
 
   /* 支持 'sz000001' / '000001.SZ' 这类显式写法 ——
    * 修完指数 bug 后 000001 默认返回上证指数，
@@ -175,6 +398,18 @@ async function kline(code, period = 'day', limit = 60, adjust = 'none', opts = {
   if ((m = /^(sh|sz|bj)(\d{6})$/i.exec(pure))) { market = m[1].toLowerCase(); pure = m[2]; }
   else if ((m = /^(\d{6})\.(sh|sz|bj)$/i.exec(pure))) { market = m[2].toLowerCase(); pure = m[1]; }
   const forced = market ? { market } : null;
+
+  /* 指数判定：显式带 sz 前缀/opts.market=sz 是"我就要个股"，
+   * 否则裸 000001 命中白名单按指数（上证指数）处理。 */
+  const indexHit = isIndexCode(pure);
+  const treatAsIndex = indexHit && !market;
+  const effMarket = market || (indexHit ? INDEX_MARKET[pure] : null);
+  const effForced = effMarket ? { market: effMarket } : forced;
+
+  /* ── 分钟级走独立选源链 ── */
+  if (isMinute) {
+    return fetchMinute(pure, period, limit, adjust, effForced, treatAsIndex);
+  }
 
   let lastErr;
   // 腾讯（前复权/后复权/不复权都支持）
@@ -241,4 +476,30 @@ function num(v) {
   return isFinite(x) ? x : null;
 }
 
-module.exports = { kline, indicators };
+module.exports = {
+  kline, indicators,
+  MINUTE_PERIODS,
+  emSecid, thsCode,
+  parseThsMinuteRows: (rows, period) => parseThsRows(rows, period),
+  parseTencentMinuteRows,
+};
+
+/* 供测试：把腾讯 mkline 行 [时间,开,收,高,低,量,...] 解析成标准 bar（开收高低） */
+function parseTencentMinuteRows(rows) {
+  return (rows || []).map(p => ({
+    date: `${p[0].slice(0, 4)}-${p[0].slice(4, 6)}-${p[0].slice(6, 8)} ${p[0].slice(8, 10)}:${p[0].slice(10, 12)}`,
+    open: num(p[1]), close: num(p[2]), high: num(p[3]), low: num(p[4]), volume: num(p[5]),
+  })).filter(b => b.close != null);
+}
+
+/* 供测试：把同花顺 data 行解析成标准 bar（锁定 开高低收 列序） */
+function parseThsRows(dataStr, period) {
+  return String(dataStr || '').split(';').filter(Boolean).map(line => {
+    const p = line.split(',');
+    const ts = p[0];
+    return {
+      date: `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)} ${ts.slice(8, 10)}:${ts.slice(10, 12)}`,
+      open: num(p[1]), high: num(p[2]), low: num(p[3]), close: num(p[4]), volume: num(p[5]),
+    };
+  });
+}
