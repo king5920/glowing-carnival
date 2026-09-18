@@ -1,13 +1,13 @@
 'use strict';
 /**
- * §5 情绪温度热力柱验证（C3-A 交付验收）
+ * §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布直方图）
  *
  * 断言：
- *   1. #mpHeatCanvas 存在、非零尺寸、非全透明（数据真的画上去）
- *   2. window.Charts 暴露 drawSentimentHeatmap + bindHover
- *   3. hover 触发 tooltip 出现，文本是整句中文（§5 通用条款 role=status）
+ *   1. #mpHeatCanvas + #scanDistCanvas 存在、非零尺寸、非全透明
+ *   2. window.Charts 暴露 drawSentimentHeatmap + drawDistribution + bindHover
+ *   3. 两图 hover 触发 tooltip 出现，文本是整句中文（§5 通用条款 role=status）
  *   4. tooltip DOM 有 role="status" + aria-live
- *   5. 图例（冷静/恐慌 梯度）+ X 轴稀疏 label 都在
+ *   5. 图例（冷静/恐慌 梯度）+（涨区/跌区 双色带）都在
  *   6. rAF 链数不变（图表不入 AnimGate.gatedLoop）
  *
  * CDP 端口 9338（9335=contrast, 9336=tbmenu, 9337=starmap-plus, 9338=charts）
@@ -17,7 +17,7 @@ const { spawn } = require('child_process');
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const CDP_PORT = 9338;
 const URL = 'http://127.0.0.1:3800/';
-const OUT = 'D:/jarvis/_shots/charts-sentiment.png';
+const OUT = 'D:/jarvis/_shots/charts-c3.png';
 const VP = { w: 1440, h: 900 };
 
 const READY = `(() => {
@@ -25,6 +25,7 @@ const READY = `(() => {
     return JSON.stringify({
       banner: !!document.getElementById('srcbanner'),
       heat:   !!document.getElementById('mpHeatCanvas'),
+      dist:   !!document.getElementById('scanDistCanvas'),
       charts: !!window.Charts,
       mems:   (window.STAR && window.STAR.stats) ? (STAR.stats().memories || 0) : 0,
     });
@@ -33,48 +34,17 @@ const READY = `(() => {
 
 const PROBE = `(() => {
   try {
-    const R = Math.round;
-    const cv = document.getElementById('mpHeatCanvas');
-    const box = document.getElementById('mpHeatbox');
-    const legend = box && box.querySelector('.mp-heat-legend');
-    const legendText = legend ? legend.textContent.replace(/\\s+/g,' ').trim() : '';
-    const legendGrad = legend ? getComputedStyle(legend.querySelector('.mhl-grad')).backgroundImage : '';
-
-    const out = {
-      canvasExists: !!cv,
-      canvasSize: cv ? { w: cv.clientWidth, h: cv.clientHeight,
-                         physicalW: cv.width, physicalH: cv.height } : null,
-      chartsModule: typeof window.Charts === 'object',
-      chartsFns: typeof window.Charts === 'object' ? {
-        drawSentimentHeatmap: typeof window.Charts.drawSentimentHeatmap,
-        bindHover: typeof window.Charts.bindHover,
-        colorLadder: typeof window.Charts.colorLadder,
-        drawHatch: typeof window.Charts.drawHatch,
-        drawCandle: typeof window.Charts.drawCandle,
-        css: typeof window.Charts.css,
-      } : null,
-      legendText: legendText,
-      legendGradHasGradient: legendGrad.indexOf('linear-gradient') !== -1,
-      titleText: (document.getElementById('mpHeatTitle') || {}).firstElementChild
-                 ? document.getElementById('mpHeatTitle').firstElementChild.textContent : null,
-
-      /* canvas 总数（starfield 有多个 GL canvas；本轮加 1 张数据图） */
-      canvasTotal: document.querySelectorAll('canvas').length,
-
-      /* 像素采样：中心一行的几个点，看有没有非透明像素（真画上去） */
-      pixelSample: null,
-
-      /* hover 测试：simulate 一次，读 tooltip DOM */
-      hoverTest: null,
-    };
-
-    if (cv) {
-      /* getImageData 需要 canvas 是本地非跨域的——本地 http://127.0.0.1 是安全的 */
+    /* ═══ 通用：单张图表的采样与 hover 测试 ═══ */
+    function probeOne(cvId, boxId, unitPattern){
+      const cv = document.getElementById(cvId);
+      const box = document.getElementById(boxId);
+      const out = { canvasExists: !!cv, canvasSize: null, paintedPct: null,
+                    nonEmptyPixels: 0, hoverTest: null };
+      if (!cv) return out;
+      out.canvasSize = { w: cv.clientWidth, h: cv.clientHeight,
+                         physicalW: cv.width, physicalH: cv.height };
       try {
         const ctx = cv.getContext('2d');
-        const img = ctx.getImageData(cv.width >> 1, cv.height >> 1, 1, 1);
-        out.pixelSample = { r: img.data[0], g: img.data[1], b: img.data[2], a: img.data[3] };
-        /* 再扫整幅 canvas 有多少非透明像素——比中心一点更硬的判据 */
         const full = ctx.getImageData(0, 0, cv.width, cv.height);
         let nonEmpty = 0, total = full.width * full.height;
         for (let i = 3; i < full.data.length; i += 4) {
@@ -83,23 +53,16 @@ const PROBE = `(() => {
         out.paintedPct = +(nonEmpty / total * 100).toFixed(2);
         out.nonEmptyPixels = nonEmpty;
       } catch(e) { out.pixelSample = { err: e.message }; }
-    }
 
-    /* hover 命中测试：
-     * 先直接通过 canvas 上的 mousemove 事件模拟 hover，
-     * 再检查 tooltip DOM 是否出现并有整句中文。 */
-    if (cv) {
+      /* hover：mousemove 中间 → mouseleave 检查隐藏 */
       const rect = cv.getBoundingClientRect();
-      /* 命中中间区域 —— 60 根柱中一根 */
       const x = rect.width * 0.5;
       const y = rect.height * 0.5;
-      const ev = new MouseEvent('mousemove', {
-        clientX: rect.left + x, clientY: rect.top + y,
-        bubbles: true,
-      });
-      cv.dispatchEvent(ev);
-
+      cv.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: rect.left + x, clientY: rect.top + y, bubbles: true,
+      }));
       const tip = box && box.querySelector('.chart-tip');
+      const unitRe = new RegExp(unitPattern);
       out.hoverTest = {
         x: x, y: y,
         tipFound: !!tip,
@@ -107,14 +70,55 @@ const PROBE = `(() => {
         tipText: tip ? tip.textContent : null,
         tipRole: tip ? tip.getAttribute('role') : null,
         tipAriaLive: tip ? tip.getAttribute('aria-live') : null,
-        tipTextHasChinese: tip ? /[\u4e00-\\u9fff]/.test(tip.textContent) : false,
-        tipTextHasUnit: tip ? /%|涨停|跌停|亿|封单/.test(tip.textContent) : false,
+        tipTextHasChinese: tip ? /[一-\\u9fff]/.test(tip.textContent) : false,
+        tipTextHasUnit: tip ? unitRe.test(tip.textContent) : false,
       };
-
-      /* mouseleave 后 tooltip 应隐藏 */
       cv.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
       out.hoverTest.tipAfterLeave = tip ? getComputedStyle(tip).display : null;
+      return out;
     }
+
+    /* ═══ C3-A 情绪温度热力柱 ═══ */
+    const heatBox = document.getElementById('mpHeatbox');
+    const heatLegend = heatBox && heatBox.querySelector('.mp-heat-legend');
+    const heat = probeOne('mpHeatCanvas', 'mpHeatbox', '%|涨停|跌停|亿|封单');
+    heat.legendText = heatLegend ? heatLegend.textContent.replace(/\\s+/g,' ').trim() : '';
+    heat.legendGradHasGradient = heatLegend
+      ? (getComputedStyle(heatLegend.querySelector('.mhl-grad')).backgroundImage.indexOf('linear-gradient') !== -1)
+      : false;
+    heat.titleText = (document.getElementById('mpHeatTitle') || {}).firstElementChild
+                     ? document.getElementById('mpHeatTitle').firstElementChild.textContent : null;
+
+    /* ═══ C3-B 板块涨幅分布直方图 ═══ */
+    const distBox = document.getElementById('scanDistbox');
+    const distLegend = distBox && distBox.querySelector('.scan-dist-legend');
+    const dist = probeOne('scanDistCanvas', 'scanDistbox', '%|个板块|占|跌区|涨区');
+    dist.legendText = distLegend ? distLegend.textContent.replace(/\\s+/g,' ').trim() : '';
+    dist.legendGradHasGradient = distLegend
+      ? (getComputedStyle(distLegend.querySelector('.dsl-mid')).backgroundImage.indexOf('linear-gradient') !== -1)
+      : false;
+    dist.titleText = (document.getElementById('scanDistTitle') || {}).firstElementChild
+                     ? document.getElementById('scanDistTitle').firstElementChild.textContent : null;
+
+    const out = {
+      heat: heat,
+      dist: dist,
+      chartsModule: typeof window.Charts === 'object',
+      chartsFns: typeof window.Charts === 'object' ? {
+        drawSentimentHeatmap: typeof window.Charts.drawSentimentHeatmap,
+        drawDistribution: typeof window.Charts.drawDistribution,
+        bindHover: typeof window.Charts.bindHover,
+        colorLadder: typeof window.Charts.colorLadder,
+        drawHatch: typeof window.Charts.drawHatch,
+        drawCandle: typeof window.Charts.drawCandle,
+        drawBar: typeof window.Charts.drawBar,
+        drawText: typeof window.Charts.drawText,
+        drawAxis: typeof window.Charts.drawAxis,
+        resizeCanvas: typeof window.Charts.resizeCanvas,
+        css: typeof window.Charts.css,
+      } : null,
+      canvasTotal: document.querySelectorAll('canvas').length,
+    };
 
     return JSON.stringify(out);
   } catch(e) { return 'ERR:'+e.message+' | '+e.stack; }
@@ -192,29 +196,25 @@ async function main() {
   await cdp.send('Runtime.enable');
   await cdp.send('Page.enable');
 
-  /* 等页面就绪 —— Charts 模块 + canvas + starfield 数据都到位 */
+  /* 等页面就绪 —— Charts 模块 + 两张 canvas 都到位 */
   const t0 = Date.now();
   for (;;) {
     const r = await cdp.send('Runtime.evaluate', { expression: READY, returnByValue: true });
     const raw = r.result && r.result.value;
     if (typeof raw === 'string' && raw.startsWith('ERR:')) die(2, '页面抛错：' + raw);
     const s = raw ? JSON.parse(raw) : null;
-    if (s && s.banner && s.heat && s.charts) break;
+    if (s && s.banner && s.heat && s.dist && s.charts) break;
     if (Date.now() - t0 > 60000) die(3, '等待超时（Charts/canvas 未就绪）');
     await sleep(500);
   }
-  await sleep(2500);   /* 让 /api/sentiment/heatmap 首拉完成并绘制 */
-
-  /* 抓 Console.error / Console.warning —— 图表绘制不能有报错 */
-  await cdp.send('Log.enable');
-  await cdp.send('Runtime.enable');
+  await sleep(3000);   /* 让 /api/sentiment/heatmap + /api/distribution 首拉完成并绘制 */
 
   const r2 = await cdp.send('Runtime.evaluate', { expression: PROBE, returnByValue: true });
   const raw2 = r2.result && r2.result.value;
   if (typeof raw2 === 'string' && raw2.startsWith('ERR:')) die(2, 'PROBE 抛错：' + raw2);
   const out = JSON.parse(raw2);
 
-  /* 截图（clip 到 #mpHeatbox 附近——顶栏以下到 canvas 底部） */
+  /* 截图（clip 到 #mpHeatbox 附近——顶栏以下到画布底部） */
   const clip = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
       const el = document.getElementById('mpHeatbox');
@@ -234,82 +234,127 @@ async function main() {
   require('fs').writeFileSync(OUT, Buffer.from(shot.data, 'base64'));
   const kb = (require('fs').statSync(OUT).size / 1024).toFixed(1);
 
+  /* 第二张：分布图所在区块截图 */
+  const clip2 = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.getElementById('scanDistbox');
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const y = Math.max(0, r.top - 8);
+      const h = Math.min(document.documentElement.scrollHeight, r.bottom - y + 8);
+      return JSON.stringify({ x: 0, y: Math.round(y), width: ${VP.w}, height: Math.round(h) });
+    })()`,
+    returnByValue: true,
+  });
+  if (clip2.result && clip2.result.value) {
+    const clip2Json = JSON.parse(clip2.result.value);
+    const shot2 = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      clip: { x: clip2Json.x, y: clip2Json.y, width: clip2Json.width, height: clip2Json.height, scale: 1 },
+    });
+    const out2 = OUT.replace('-c3.png', '-c3-dist.png');
+    require('fs').writeFileSync(out2, Buffer.from(shot2.data, 'base64'));
+  }
+
   cdp.close();
 
-  console.log('\n── §5 情绪温度热力柱验证 ──');
+  console.log('\n── §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布）──');
   console.log('截图 → ' + OUT + ' (' + kb + ' KB)');
 
   const fail = [];
 
-  /* 1. canvas 存在、尺寸正常 */
-  if (!out.canvasExists) fail.push('#mpHeatCanvas 不存在');
-  if (out.canvasSize && (out.canvasSize.w <= 0 || out.canvasSize.h <= 0))
-    fail.push('canvas 尺寸为零：' + JSON.stringify(out.canvasSize));
-  if (out.canvasSize && (out.canvasSize.physicalW !== out.canvasSize.w * 2))
-    console.log('  （提示）DPR 物理像素 ' + out.canvasSize.physicalW + ' × ' + out.canvasSize.physicalH +
-      '（CSS ' + out.canvasSize.w + ' × ' + out.canvasSize.h + '）');
-
-  /* 2. Charts 模块 API 齐全 */
+  /* ═══ 通用：单图断言 ═══ */
+  const FNS_EXPECTED = [
+    'drawSentimentHeatmap', 'drawDistribution', 'bindHover',
+    'colorLadder', 'drawHatch', 'drawCandle', 'drawBar', 'drawText',
+    'drawAxis', 'resizeCanvas', 'css',
+  ];
   if (!out.chartsModule) fail.push('window.Charts 未暴露');
   if (out.chartsFns) {
-    ['drawSentimentHeatmap', 'bindHover', 'colorLadder', 'drawHatch', 'drawCandle', 'css']
-      .forEach(k => {
-        if (out.chartsFns[k] !== 'function')
-          fail.push('Charts.' + k + ' 未暴露（typeof=' + out.chartsFns[k] + '）');
+    FNS_EXPECTED.forEach(k => {
+      if (out.chartsFns[k] !== 'function')
+        fail.push('Charts.' + k + ' 未暴露（typeof=' + out.chartsFns[k] + '）');
+    });
+  }
+
+  function assertChart(label, c, opts){
+    if (!c.canvasExists) { fail.push(label + ': canvas 不存在'); return; }
+    if (c.canvasSize && (c.canvasSize.w <= 0 || c.canvasSize.h <= 0))
+      fail.push(label + ': canvas 尺寸为零 ' + JSON.stringify(c.canvasSize));
+    if (c.paintedPct == null || c.paintedPct < (opts.minPct || 3))
+      fail.push(label + ': 像素绘制不足 ' + (c.paintedPct == null ? '采样失败' : c.paintedPct + '%'));
+    if (c.legendText && opts.mustHaveText) {
+      opts.mustHaveText.forEach(w => {
+        if (!new RegExp(w).test(c.legendText))
+          fail.push(label + ': 图例缺"' + w + '" → ' + c.legendText);
       });
-  }
-
-  /* 3. 图例齐全 */
-  if (out.legendText && !/冷静/.test(out.legendText))
-    fail.push('图例缺"冷静"端：' + out.legendText);
-  if (out.legendText && !/恐慌/.test(out.legendText))
-    fail.push('图例缺"恐慌"端：' + out.legendText);
-  if (!out.legendGradHasGradient)
-    fail.push('图例渐变色条缺失');
-
-  /* 4. 像素真的画上了（非全透明） */
-  if (out.paintedPct == null || out.paintedPct < 5)
-    fail.push('canvas 像素绘制不足：' + (out.paintedPct == null ? '采样失败' : out.paintedPct + '%'));
-  /* 注意：热力柱是"柱高 ∝ broken_rate"、柱下方是空的，
-     所以 canvas 中心像素（画布正中央）在低 broken_rate 日可能落在空区，
-     属正常。用整幅 paintedPct 而非中心点做判据。 */
-
-  /* 5. hover tooltip 出现且是整句中文 */
-  if (!out.hoverTest) fail.push('hover 测试未执行');
-  else {
-    if (!out.hoverTest.tipFound) fail.push('hover 后 tooltip DOM 未出现');
-    else {
-      if (out.hoverTest.tipDisplay === 'none')
-        fail.push('tooltip 命中后仍 display:none');
-      if (!out.hoverTest.tipTextHasChinese)
-        fail.push('tooltip 无中文文本（§5 通用条款违反）："' + (out.hoverTest.tipText || '') + '"');
-      if (!out.hoverTest.tipTextHasUnit)
-        fail.push('tooltip 缺数值单位（%/亿/涨停等）："' + (out.hoverTest.tipText || '') + '"');
-      if (out.hoverTest.tipRole !== 'status')
-        fail.push('tooltip 缺 role=status：role=' + out.hoverTest.tipRole);
-      if (!out.hoverTest.tipAriaLive)
-        fail.push('tooltip 缺 aria-live');
-      if (out.hoverTest.tipAfterLeave !== 'none')
-        fail.push('mouseleave 后 tooltip 未隐藏（display=' + out.hoverTest.tipAfterLeave + '）');
     }
+    if (c.legendGradHasGradient === false && opts.mustHaveGradient)
+      fail.push(label + ': 图例渐变色条缺失');
+    if (!c.hoverTest) { fail.push(label + ': hover 测试未执行'); return; }
+    if (!c.hoverTest.tipFound) { fail.push(label + ': hover 后 tooltip 未出现'); return; }
+    if (c.hoverTest.tipDisplay === 'none')
+      fail.push(label + ': tooltip 命中后仍 display:none');
+    if (!c.hoverTest.tipTextHasChinese)
+      fail.push(label + ': tooltip 无中文（§5 通用条款违反）："' + (c.hoverTest.tipText || '') + '"');
+    if (!c.hoverTest.tipTextHasUnit)
+      fail.push(label + ': tooltip 缺数值单位："' + (c.hoverTest.tipText || '') + '"');
+    if (c.hoverTest.tipRole !== 'status')
+      fail.push(label + ': tooltip 缺 role=status：role=' + c.hoverTest.tipRole);
+    if (!c.hoverTest.tipAriaLive)
+      fail.push(label + ': tooltip 缺 aria-live');
+    if (c.hoverTest.tipAfterLeave !== 'none')
+      fail.push(label + ': mouseleave 后 tooltip 未隐藏（display=' + c.hoverTest.tipAfterLeave + '）');
   }
+
+  /* ═══ C3-A 断言 ═══ */
+  assertChart('情绪温度热力柱', out.heat, {
+    minPct: 5,
+    mustHaveText: [/冷静/, /恐慌/],
+    mustHaveGradient: true,
+  });
+
+  /* ═══ C3-B 断言 ═══ */
+  assertChart('板块涨幅分布', out.dist, {
+    minPct: 3,
+    mustHaveText: [/跌区/, /涨区/, /中轴=0/],
+    mustHaveGradient: true,
+  });
+  /* 分布图标题应含"个板块"和 min~max 区间 */
+  if (out.dist.titleText && !/个板块/.test(out.dist.titleText))
+    fail.push('分布图标题缺"个板块"："' + out.dist.titleText + '"');
 
   /* ── 打印摘要 ── */
   console.log('  模块     window.Charts 暴露: ' + (out.chartsFns ?
-    ['drawSentimentHeatmap', 'bindHover', 'colorLadder', 'drawHatch', 'drawCandle', 'css']
-      .map(k => k + '=' + out.chartsFns[k]).join('  ') : '未暴露'));
-  console.log('  canvas   ' + (out.canvasSize ? (out.canvasSize.w + 'x' + out.canvasSize.h +
-    ' 物理 ' + out.canvasSize.physicalW + 'x' + out.canvasSize.physicalH) : '未找到'));
-  console.log('  绘制     非空像素 ' + (out.paintedPct || '?') + '%  (' + (out.nonEmptyPixels || 0) + ' 像素)');
-  console.log('  图例     "' + (out.legendText || '(空)') + '"  渐变=' + (out.legendGradHasGradient ? '✓' : '✗'));
-  console.log('  标题     "' + (out.titleText || '(空)') + '"');
-  console.log('  canvas 总数  ' + out.canvasTotal + ' 个（starfield 多 GL + 图表新增）');
-  if (out.hoverTest && out.hoverTest.tipFound) {
-    console.log('  hover    tooltip: "' + (out.hoverTest.tipText || '').slice(0, 80) +
-      (out.hoverTest.tipText && out.hoverTest.tipText.length > 80 ? '…' : '') + '"');
-    console.log('           role=' + out.hoverTest.tipRole + '  aria-live=' + out.hoverTest.tipAriaLive +
-      '  中文=' + (out.hoverTest.tipTextHasChinese ? '✓' : '✗') +
-      '  单位=' + (out.hoverTest.tipTextHasUnit ? '✓' : '✗'));
+    FNS_EXPECTED.map(k => k + '=' + out.chartsFns[k]).join('  ') : '未暴露'));
+  console.log('  canvas 总数  ' + out.canvasTotal + ' 个（starfield 多 GL + 图表 2 张新增）');
+
+  console.log('\n── C3-A 情绪温度热力柱 ──');
+  console.log('  canvas   ' + (out.heat.canvasSize ? (out.heat.canvasSize.w + 'x' + out.heat.canvasSize.h +
+    ' 物理 ' + out.heat.canvasSize.physicalW + 'x' + out.heat.canvasSize.physicalH) : '未找到'));
+  console.log('  绘制     非空像素 ' + (out.heat.paintedPct || '?') + '%  (' + (out.heat.nonEmptyPixels || 0) + ' 像素)');
+  console.log('  图例     "' + (out.heat.legendText || '(空)') + '"  渐变=' + (out.heat.legendGradHasGradient ? '✓' : '✗'));
+  console.log('  标题     "' + (out.heat.titleText || '(空)') + '"');
+  if (out.heat.hoverTest && out.heat.hoverTest.tipFound) {
+    console.log('  hover    tooltip: "' + (out.heat.hoverTest.tipText || '').slice(0, 80) +
+      (out.heat.hoverTest.tipText && out.heat.hoverTest.tipText.length > 80 ? '…' : '') + '"');
+    console.log('           role=' + out.heat.hoverTest.tipRole + '  aria-live=' + out.heat.hoverTest.tipAriaLive +
+      '  中文=' + (out.heat.hoverTest.tipTextHasChinese ? '✓' : '✗') +
+      '  单位=' + (out.heat.hoverTest.tipTextHasUnit ? '✓' : '✗'));
+  }
+
+  console.log('\n── C3-B 板块涨幅分布 ──');
+  console.log('  canvas   ' + (out.dist.canvasSize ? (out.dist.canvasSize.w + 'x' + out.dist.canvasSize.h +
+    ' 物理 ' + out.dist.canvasSize.physicalW + 'x' + out.dist.canvasSize.physicalH) : '未找到'));
+  console.log('  绘制     非空像素 ' + (out.dist.paintedPct || '?') + '%  (' + (out.dist.nonEmptyPixels || 0) + ' 像素)');
+  console.log('  图例     "' + (out.dist.legendText || '(空)') + '"  渐变=' + (out.dist.legendGradHasGradient ? '✓' : '✗'));
+  console.log('  标题     "' + (out.dist.titleText || '(空)') + '"');
+  if (out.dist.hoverTest && out.dist.hoverTest.tipFound) {
+    console.log('  hover    tooltip: "' + (out.dist.hoverTest.tipText || '').slice(0, 80) +
+      (out.dist.hoverTest.tipText && out.dist.hoverTest.tipText.length > 80 ? '…' : '') + '"');
+    console.log('           role=' + out.dist.hoverTest.tipRole + '  aria-live=' + out.dist.hoverTest.tipAriaLive +
+      '  中文=' + (out.dist.hoverTest.tipTextHasChinese ? '✓' : '✗') +
+      '  单位=' + (out.dist.hoverTest.tipTextHasUnit ? '✓' : '✗'));
   }
 
   console.log('\n── 判定 ──');
@@ -318,11 +363,13 @@ async function main() {
     console.log('  失败 ' + fail.length + ' 项');
     process.exit(1);
   }
-  console.log('  ✓ #mpHeatCanvas 有实际绘制（非全透明）');
-  console.log('  ✓ window.Charts 6 个 API 全部暴露');
-  console.log('  ✓ 图例齐全（冷静→恐慌 渐变）');
-  console.log('  ✓ hover tooltip 是整句中文，role=status + aria-live');
-  console.log('  ✓ mouseleave 后 tooltip 隐藏');
+  console.log('  ✓ 情绪温度热力柱：canvas 有实际绘制（非全透明）');
+  console.log('  ✓ 情绪温度热力柱：图例齐全（冷静→恐慌 渐变）');
+  console.log('  ✓ 情绪温度热力柱：hover tooltip 是整句中文，role=status + aria-live');
+  console.log('  ✓ 板块涨幅分布：canvas 有实际绘制（非全透明）');
+  console.log('  ✓ 板块涨幅分布：图例齐全（跌区→涨区 双色带 + 中轴=0 注释）');
+  console.log('  ✓ 板块涨幅分布：hover tooltip 是整句中文，role=status + aria-live');
+  console.log('  ✓ window.Charts ' + FNS_EXPECTED.length + ' 个 API 全部暴露');
   console.log('  ✓ 未新增 rAF 链（canvas 总数 ' + out.canvasTotal + '，图表数据驱动一次性绘制）');
   process.exit(0);
 }

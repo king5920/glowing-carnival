@@ -379,6 +379,107 @@
     return { hit: hit, tooltip: tooltip, bars: bars };
   }
 
+  /* ═══ §5 板块涨幅分布直方图 ═══
+   * 输入 data: {
+   *   date: 'YYYY-MM-DD',
+   *   buckets: [{ range: '<-3%', side: 'down', count: 128, pct: 13.3 }, ...],
+   *   total: 961,
+   *   min: -6.0, max: 7.86,
+   * }
+   *
+   * 编码（§1.1 双通道 + §5 表格 A 股口径）：
+   *   - 位置通道：中轴=0 分界，负档向左延伸（跌区），正档向右延伸（涨区）
+   *   - 色相通道：跌档 --gn 青绿 / 涨档 --rd 红（A 股口径）
+   *   - 明度通道：柱高 ∝ count（视觉高度 = 板块数量）
+   *   - 双通道备援：柱下方 range label（"-3~-1%"）+ hover 整句，形状不依赖色相
+   *
+   * 档界偏离 §5 参考值（原稿是 <-7/-7~-3/-3~0/0~3/3~7/>7，个股 scale）。
+   * 实际样本 961 板块 range 在 -6%~+7.9%、主体在 -2%~+2%，档界改为
+   * <-3/-3~-1/-1~0/0~1/1~3/>3 匹配板块 scale、中间带 ±1%。
+   * 见 DESIGN.md §5 涨跌分布注。
+   *
+   * Hover tooltip 整句（§5 通用条款 role=status）：
+   *   「-3~-1% 板块 128 个 · 占 13.3%」（跌区）/「0~1% 板块 342 个 · 占 35.6%」（涨区）
+   */
+  function drawDistribution(canvas, data){
+    const R = resizeCanvas(canvas);
+    if(!R) return null;
+    const { ctx, w, h } = R;
+    ctx.clearRect(0, 0, w, h);
+
+    if(!data || !data.buckets || !data.buckets.length){
+      drawText(ctx, '无分布数据', w / 2, h / 2, { align: 'center', font: 11, fill: css('--faint') || '#8ba0b8' });
+      return { hit: function(){ return null; } };
+    }
+
+    /* 布局：上留 6px 呼吸（柱顶余白），下留 16px 给 range label */
+    const padTop = 6, padBottom = 16, padLeft = 6, padRight = 6;
+    const plotW = w - padLeft - padRight;
+    const plotH = h - padTop - padBottom;
+    if(plotW <= 0 || plotH <= 0){
+      drawText(ctx, '无分布数据', w / 2, h / 2, { align: 'center', font: 11, fill: css('--faint') || '#8ba0b8' });
+      return { hit: function(){ return null; } };
+    }
+
+    const buckets = data.buckets;
+    const n = buckets.length;
+    const maxCount = buckets.reduce((m, b) => Math.max(m, b.count || 0), 0) || 1;
+    const slotW = plotW / n;
+    const gap = n > 8 ? 0 : 2;
+    const barW = Math.max(2, slotW - gap);
+
+    /* 预计算每档几何与数据引用 */
+    const bars = [];
+    for(let i = 0; i < n; i++){
+      const b = buckets[i];
+      const count = b.count || 0;
+      const t = count / maxCount;
+      const x = padLeft + i * slotW + gap / 2;
+      const barH = Math.max(2, t * plotH);
+      const y = padTop + plotH - barH;
+      const fill = b.side === 'down'
+        ? colorLadder(1, [{ v: 0, c: '--gn' }, { v: 1, c: '--gn' }], 0.85)   /* 青绿跌档 */
+        : colorLadder(1, [{ v: 0, c: '--rd' }, { v: 1, c: '--rd' }], 0.85);   /* 红涨档 */
+      bars.push({ x, y, w: barW, h: barH, d: b });
+      drawBar(ctx, x, y, barW, barH, fill);
+      /* range label 在柱下方（色盲备援：即使不看颜色也能识别档位） */
+      drawText(ctx, b.range, x + barW / 2, h - 3,
+        { align: 'center', font: 8.5, fill: css('--faint') || '#8ba0b8' });
+    }
+
+    /* 中轴虚线（0 分界）：位置通道的关键参照 */
+    const midIdx = buckets.findIndex(b => b.side === 'up');   /* 第一个 up 档位置 = 中轴右侧 */
+    const midX = midIdx > 0 ? (padLeft + midIdx * slotW) : (plotW / 2);
+    ctx.save();
+    ctx.strokeStyle = css('--line') || 'rgba(140,175,225,.3)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(midX, padTop);
+    ctx.lineTo(midX, padTop + plotH);
+    ctx.stroke();
+    ctx.restore();
+
+    /* Hit 检测：x 落在哪一档上 */
+    function hit(cx, cy){
+      if(cx < padLeft || cx > padLeft + plotW) return null;
+      if(cy < padTop || cy > padTop + plotH + padBottom) return null;
+      const idx = Math.floor((cx - padLeft) / slotW);
+      if(idx < 0 || idx >= n) return null;
+      return bars[idx].d;
+    }
+
+    /* Tooltip 整句（§5 通用条款）：range + count + pct 都带单位 */
+    function tooltip(d){
+      const count = (d.count == null) ? 0 : d.count;
+      const pct = (typeof d.pct === 'number') ? d.pct.toFixed(1) + '%' : '—';
+      const side = d.side === 'down' ? '跌区' : '涨区';
+      return d.range + ' ' + side + ' ' + count + ' 个板块 · 占 ' + pct;
+    }
+
+    return { hit: hit, tooltip: tooltip, bars: bars };
+  }
+
   window.Charts = {
     css,
     resizeCanvas,
@@ -389,6 +490,7 @@
     drawHatch,
     drawCandle,
     drawSentimentHeatmap,
+    drawDistribution,
     bindHover,
     /* 供测试用 */
     _hexToRgb: hexToRgb,

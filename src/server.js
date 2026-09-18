@@ -532,6 +532,56 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  /* 板块涨幅分布直方图（§5 第 5 项）：sector_daily 最新交易日的 change_pct 六档分桶。
+     档界偏离 §5 参考值（原稿 <-7/-7~-3/-3~0/0~3/3~7/>7 是给个股 scale），
+     因 stock_pool 无 change_pct，实际样本是 961 板块（range -6%~+7.9%，主体在 -2%~+2%），
+     档界改为 <-3/-3~-1/-1~0/0~1/1~3/>3 匹配板块 scale，中间带 ±1%。
+     只读、缺数据不编造——sector_daily 无记录时返回空 buckets 而非 0 计数假象。 */
+  if (url === '/api/distribution' || url.startsWith('/api/distribution?')) {
+    try {
+      const q = new URL(url, 'http://x').searchParams;
+      const which = q.get('source') || 'sector';   /* sector=sector_daily.change_pct */
+      const dbm = require('./db');
+      /* 取最新交易日的 change_pct——sector_daily 每日一条 code，多日累计会让分布失真 */
+      const latestDateRow = dbm.db.prepare('SELECT date FROM sector_daily ORDER BY date DESC LIMIT 1').get();
+      const latestDate = latestDateRow ? latestDateRow.date : null;
+      const vals = latestDateRow
+        ? dbm.db.prepare('SELECT change_pct FROM sector_daily WHERE date=? AND change_pct IS NOT NULL').all(latestDate).map(r => r.change_pct)
+        : [];
+
+      const BUCKETS = [
+        { range: '<-3%',   min: -Infinity, max: -3, side: 'down' },
+        { range: '-3~-1%', min: -3,        max: -1, side: 'down' },
+        { range: '-1~0%',  min: -1,        max: 0,  side: 'down' },
+        { range: '0~1%',   min: 0,         max: 1,  side: 'up'   },
+        { range: '1~3%',   min: 1,         max: 3,  side: 'up'   },
+        { range: '>3%',    min: 3,         max: Infinity, side: 'up' },
+      ];
+      const counts = new Array(BUCKETS.length).fill(0);
+      for (const v of vals) {
+        for (let i = 0; i < BUCKETS.length; i++) {
+          const b = BUCKETS[i];
+          /* 左闭右开 [min, max)；最末档 max=Infinity，用 >= 兜住上界 */
+          if (i === BUCKETS.length - 1) { if (v >= b.min) { counts[i]++; break; } }
+          else if (v >= b.min && v < b.max) { counts[i]++; break; }
+        }
+      }
+      const total = vals.length;
+      const buckets = BUCKETS.map((b, i) => ({
+        range: b.range, side: b.side, count: counts[i],
+        pct: total > 0 ? +(counts[i] / total * 100).toFixed(2) : 0,
+      }));
+      const min = vals.length ? Math.min.apply(null, vals) : null;
+      const max = vals.length ? Math.max.apply(null, vals) : null;
+      return sendJson(res, 200, {
+        ok: true, source: which, date: latestDate, total: total,
+        min: min, max: max, buckets: buckets,
+      });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: String(e.message || e) });
+    }
+  }
+
   /* 崩溃冰点基准历史回填（一次性/按需运维）：POST /api/fear_backfill?dry=1 预演。
      较慢（东财 QPS<1，约1-2分钟），只读外部+UPSERT本地，绝不把无保留日期写成0。 */
   if (url.startsWith('/api/fear_backfill') && req.method === 'POST') {
@@ -834,6 +884,7 @@ const server = http.createServer(async (req, res) => {
     const rate = parseInt(q.get('rate') || '0', 10) || 0;
     // 可选音色（id/中文名/昵称）；缺省用 voice.js 的当前音色 currentVoice
     const voiceId = q.get('voice') || undefined;
+    const text = q.get('text') || '';
     if (!text.trim()) return sendJson(res, 400, { error: 'text required' });
     try {
       const r = await voice.synthesize(text, rate, voiceId);

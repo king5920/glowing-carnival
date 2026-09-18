@@ -138,6 +138,77 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
 .tbm-meta{margin-top:9px;padding-top:8px;border-top:1px solid var(--hairline);
   font-size:10.5px;color:var(--dim);letter-spacing:.3px;line-height:1.5}
 
+/* ════════ 情景抽屉（§6 L1 层） ════════
+   遮罩 + 右侧滑入面板；320ms cubic-bezier(.22,1,.36,1) 符合 §4 L3。
+   z-index 30/31：高于 #memcard(12)/#backend-tip(20)，低于 #setmask(40)。
+   CSS 预留 .from-left（左栏滑入）和 @media(max-width:1400px)（底部上滑），本轮暂不实现。 */
+#drawerBackdrop{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.5);
+  opacity:0;pointer-events:none;transition:opacity .32s ease}
+#drawerBackdrop.open{opacity:1;pointer-events:auto}
+#drawerPanel{position:fixed;top:0;right:0;bottom:0;z-index:31;
+  width:min(480px,calc(100vw - 40px));
+  background:rgba(12,20,32,.96);border-left:1px solid var(--hairline);
+  backdrop-filter:blur(18px) saturate(1.1);-webkit-backdrop-filter:blur(18px) saturate(1.1);
+  box-shadow:-8px 0 30px rgba(0,0,0,.5);
+  display:flex;flex-direction:column;
+  transform:translateX(100%);transition:transform .32s cubic-bezier(.22,1,.36,1)}
+#drawerPanel.open{transform:translateX(0)}
+/* 左栏滑入（预留，本轮不实现） */
+#drawerPanel.from-left{left:0;right:auto;border-left:none;border-right:1px solid var(--hairline);
+  box-shadow:8px 0 30px rgba(0,0,0,.5);transform:translateX(-100%)}
+#drawerPanel.from-left.open{transform:translateX(0)}
+#drawerHeader{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 18px;border-bottom:1px solid var(--hairline);flex:none}
+#drawerTitle{font-size:var(--fs-sm);font-weight:700;color:var(--txt);
+  margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+#drawerClose{background:transparent;border:none;color:var(--faint);cursor:pointer;
+  font-size:18px;line-height:1;padding:4px 10px;border-radius:6px;flex:none;
+  transition:color .15s,background .15s}
+#drawerClose:hover{color:var(--txt);background:rgba(255,255,255,.08)}
+#drawerClose:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#drawerBody{flex:1;overflow-y:auto;padding:16px 18px;
+  scrollbar-width:thin;scrollbar-color:rgba(150,175,215,.22) transparent}
+#drawerBody::-webkit-scrollbar{width:4px}
+#drawerBody::-webkit-scrollbar-thumb{background:rgba(150,175,215,.22);border-radius:2px}
+#drawerBody::-webkit-scrollbar-track{background:transparent}
+/* 焦点锁：Tab 循环焦点可见（§7 反模式：禁 outline:none 无替代） */
+#drawerPanel *:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+#drawerPanel:focus{outline:none}
+/* 背景滚动锁定 */
+body.drawer-open{overflow:hidden}
+/* ═══ 抽屉内容样式 ═══ */
+.drw-sec{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--hairline)}
+.drw-title{font-size:16px;font-weight:700;color:var(--txt)}
+.drw-sub{font-size:11px;color:var(--faint);font-family:var(--num);margin-top:2px}
+.drw-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:14px;row-gap:8px;margin-bottom:14px}
+.drw-kv{display:flex;flex-direction:column;line-height:1.3}
+.drw-kv .k{font-size:10px;letter-spacing:.5px;color:var(--faint);text-transform:uppercase}
+.drw-kv .v{font-size:13px;color:var(--txt);font-family:var(--num);font-variant-numeric:var(--tnum)}
+.drw-reasons{margin-bottom:14px}
+.drw-rtitle{font-size:11px;color:var(--faint);letter-spacing:.5px;margin-bottom:6px}
+.drw-reasons ul{list-style:none;padding:0;margin:0}
+.drw-reasons li{font-size:12px;color:var(--dim);line-height:1.6;padding-left:10px;position:relative}
+.drw-reasons li::before{content:'·';position:absolute;left:1px;color:var(--accent)}
+.drw-time{font-size:10px;color:var(--faint);margin-bottom:14px}
+.drw-actions{display:flex;gap:8px}
+.drw-ask{background:rgba(63,208,255,.08);border:1px solid var(--hairline);color:var(--accent);
+  font-size:12px;padding:7px 16px;border-radius:8px;cursor:pointer;
+  transition:background .15s,border-color .15s}
+.drw-ask:hover{background:rgba(63,208,255,.15);border-color:var(--accent)}
+.drw-loading{padding:30px;text-align:center;font-size:12px;color:var(--faint)}
+.drw-error{padding:30px;text-align:center;font-size:12px;color:var(--warn)}
+
+/* 小屏 <1400px 底部全屏上滑（预留，本轮暂不实现） */
+@media (max-width:1400px){
+  #drawerPanel{top:auto;left:0;right:0;bottom:0;width:100%;
+    height:min(70vh,560px);border-left:none;border-top:1px solid var(--hairline);
+    box-shadow:0 -8px 30px rgba(0,0,0,.5);transform:translateY(100%);
+    border-radius:16px 16px 0 0}
+  #drawerPanel.open{transform:translateY(0)}
+  #drawerPanel.from-left{left:0;right:0;bottom:0;top:auto;transform:translateY(100%)}
+  #drawerPanel.from-left.open{transform:translateY(0)}
+}
+
 /* ════════ 预警横幅 ════════ */
 #srcbanner{display:none;position:fixed;left:50%;transform:translateX(-50%);
   top:40px;z-index:7;max-width:70%;font-size:var(--fs-xs);
@@ -358,6 +429,20 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
 .mp-heat-legend .mhl-grad{flex:1;height:5px;border-radius:2px;
   background:linear-gradient(90deg,var(--cy),var(--gd),var(--rd))}
 .mp-heat-legend .mhl-note{flex:0 0 auto}
+
+/* §5 板块涨幅分布直方图：与 mpHeatbox 同一纪律——独立 div、不入 #scanbox
+   IIFE 的 innerHTML 生命周期。位置：中轴 0 分界，跌档向左、涨档向右。 */
+#scanDistbox{position:relative;padding:8px 12px 6px;border-top:1px solid var(--hairline2)}
+#scanDistTitle{display:flex;align-items:baseline;justify-content:space-between;font-size:9.5px;
+  color:var(--faint);font-family:var(--num);margin-bottom:4px}
+#scanDistCanvas{display:block;width:100%;height:72px;cursor:crosshair}
+.scan-dist-legend{display:flex;align-items:center;gap:8px;margin-top:3px;
+  font-size:8.5px;color:var(--faint);font-family:var(--num)}
+.scan-dist-legend .dsl-key{flex:0 0 auto;display:inline-flex;align-items:center;gap:3px}
+.scan-dist-legend .dsl-sw{width:8px;height:6px;border-radius:1px}
+.scan-dist-legend .dsl-mid{flex:1;height:5px;border-radius:2px;
+  background:linear-gradient(90deg,var(--gn) 0%,var(--gn) 50%,var(--rd) 50%,var(--rd) 100%)}
+.scan-dist-legend .dsl-note{flex:0 0 auto}
 
 /* ════════ 收盘扫描面板（左栏盯盘主场） ════════ */
 .scan-time{margin-left:auto;font-size:9px;color:var(--faint);font-family:var(--num);font-weight:400}
@@ -987,6 +1072,18 @@ body.no-webgl #gl-fallback{display:grid}
   <div class="tbm-meta" id="tbmMeta">—</div>
 </div>
 
+<!-- ═══ 情景抽屉（§6 L1 层）：遮罩 + 滑入面板 ═══
+     从右栏 .lrow 点开（右滑）；Esc / 遮罩 / × 关闭；
+     focus 锁循环、hash 同步、关闭后还焦——详见 ui/drawer.js。 -->
+<div id="drawerBackdrop" aria-hidden="true"></div>
+<div id="drawerPanel" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-hidden="true" tabindex="-1">
+  <div id="drawerHeader">
+    <h2 id="drawerTitle"></h2>
+    <button id="drawerClose" type="button" aria-label="关闭抽屉" title="Esc">✕</button>
+  </div>
+  <div id="drawerBody"></div>
+</div>
+
 <!-- ═══ 预警横幅 ═══ -->
 <div id="srcbanner" role="status" aria-live="assertive">
   <i class="sb-dot"></i><span id="srcbanner-txt"></span><span class="sb-time" id="srcbanner-time"></span>
@@ -1018,6 +1115,18 @@ body.no-webgl #gl-fallback{display:grid}
     <section class="panel" data-panel="closescan">
       <div class="ph">板块定方向 <span class="en">MAINLINE</span> <span id="scanTime" class="scan-time"></span><span class="fold">▾</span></div>
       <div class="pb" id="scanbox"><div class="empty">读取中…</div></div>
+      <!-- §5 板块涨幅分布直方图：与主线扫描配对，先看总盘分布再看板块细节。
+           独立 div，不在 #scanbox IIFE 的 innerHTML 生命周期里。 -->
+      <div class="pb" id="scanDistbox">
+        <div id="scanDistTitle"><span>板块涨幅分布 · 六档直方图</span><span id="scanDistTime"></span></div>
+        <canvas id="scanDistCanvas"></canvas>
+        <div class="scan-dist-legend">
+          <span class="dsl-key"><span class="dsl-sw" style="background:var(--gn)"></span>跌区</span>
+          <span class="dsl-mid"></span>
+          <span class="dsl-key"><span class="dsl-sw" style="background:var(--rd)"></span>涨区</span>
+          <span class="dsl-note">中轴=0 · 柱高∝板块数</span>
+        </div>
+      </div>
     </section>
 
     <section class="panel" data-panel="galaxies">
@@ -1511,7 +1620,7 @@ body.no-webgl #gl-fallback{display:grid}
     let h = '';
     secs.forEach((s, i) => {
       const lpCls = (s.leaderPct >= 9.8) ? 'lp-limit' : (s.leaderPct >= 0 ? 'lp-up' : 'lp-dn');
-      h += '<div class="lrow" data-code="' + esc(s.leaderCode || '') + '" data-name="' + esc(s.leader || '') + '">'
+      h += '<div class="lrow" tabindex="0" data-code="' + esc(s.leaderCode || '') + '" data-name="' + esc(s.leader || '') + '" data-idx="' + i + '">'
         + '<div class="lsec">' + esc(s.name) + '</div>'
         + '<div class="lmain"><div class="lname">' + esc(s.leader || '—') + '</div>'
         + '<div class="lcode">' + esc(s.leaderCode || '') + '</div></div>'
@@ -1521,14 +1630,27 @@ body.no-webgl #gl-fallback{display:grid}
     });
     box.innerHTML = h;
     if (d.dataTime && timeEl) timeEl.textContent = d.dataTime;
-    /* 点击龙头 → 填入对话查询 */
+    /* 点击龙头 → 打开情景抽屉（§6 L1），抽屉内有"问 AI"按钮作为显式操作。
+     * 通过 data-idx 回查 sector 对象（secs 数组在闭包内，forEach 循环变量 s 不可达）。 */
     box.querySelectorAll('.lrow').forEach(row => row.addEventListener('click', () => {
       const name = row.dataset.name, code = row.dataset.code;
-      const inp = document.getElementById('inp');
-      if (inp && code) {
-        inp.value = name + '(' + code + ') 现在怎么样';
-        inp.focus();
-        if (typeof inp.dispatchEvent === 'function') inp.dispatchEvent(new Event('input', { bubbles: true }));
+      const idx = parseInt(row.dataset.idx, 10);
+      const s = secs[idx] || {};
+      if (window.Drawer) {
+        window.Drawer.open('leader', code, {
+          sourceEl: row,
+          side: 'right',
+          title: name || code,
+          data: s,
+        });
+      } else {
+        /* Drawer 不可用时回退到旧行为：填入对话查询 */
+        const inp = document.getElementById('inp');
+        if (inp && code) {
+          inp.value = name + '(' + code + ') 现在怎么样';
+          inp.focus();
+          if (typeof inp.dispatchEvent === 'function') inp.dispatchEvent(new Event('input', { bubbles: true }));
+        }
       }
     }));
   };
@@ -1557,9 +1679,78 @@ body.no-webgl #gl-fallback{display:grid}
 <script src="/markdown.js"></script>
 <script src="/animgate.js"></script>
 <script src="/charts.js"></script>
+<script src="/drawer.js"></script>
 <script src="/starfield.js"></script>
 <script src="/voicecore.js"></script>
 <script src="/app.js"></script>
+<script>
+/* ── §6 情景抽屉：leader 条目注册（fetcher + render） ──
+ * 点击右栏 .lrow 时数据已在手（opts.data），无需 fetch；
+ * hash 还原时走 fetcher 从 /api/closescan 重新取数。
+ * render 函数生成抽屉详情 Tab 的 HTML（名称/代码/板块/分级/资金/理由）。 */
+(function () {
+  'use strict';
+  if (typeof window.Drawer !== 'object' || !window.Drawer.register) return;
+
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const pct = v => (v == null || isNaN(v)) ? '—' : (v >= 0 ? '+' : '') + (+v).toFixed(2) + '%';
+  const yi = v => (v == null || isNaN(v)) ? '—' : (+v).toFixed(2) + '亿';
+
+  /* fetcher：hash 还原时从 /api/closescan 重新取数 */
+  function fetchLeader(code) {
+    return fetch('/api/closescan').then(r => r.json()).then(d => {
+      const secs = (d && d.sectors) || [];
+      return secs.find(s => s.leaderCode === code) || null;
+    });
+  }
+
+  /* render：生成抽屉详情 Tab HTML */
+  function renderLeader(data) {
+    if (!data) return '<div class="drw-error">未找到数据</div>';
+    let h = '<div class="drw-sec">';
+    h += '<div class="drw-title">' + esc(data.leader || '—') + '</div>';
+    h += '<div class="drw-sub">' + esc(data.leaderCode || '') + '</div>';
+    h += '</div>';
+
+    h += '<div class="drw-grid">';
+    h += '<div class="drw-kv"><span class="k">板块</span><span class="v">' + esc(data.name || '—') + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">类型</span><span class="v">' + esc(data.kind || '—') + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">分级</span><span class="v">' + esc(data.grade || '—') + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">评分</span><span class="v">' + (data.score != null ? data.score : '—') + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">龙头涨幅</span><span class="v">' + pct(data.leaderPct) + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">板块涨幅</span><span class="v">' + pct(data.mainPct) + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">10日资金</span><span class="v">' + yi(data.d10Yi) + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">5日资金</span><span class="v">' + yi(data.d5Yi) + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">今日资金</span><span class="v">' + yi(data.todayYi) + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">上涨家数</span><span class="v">' + (data.upCount != null ? data.upCount : '—') + '</span></div>';
+    h += '<div class="drw-kv"><span class="k">下跌家数</span><span class="v">' + (data.downCount != null ? data.downCount : '—') + '</span></div>';
+    h += '</div>';
+
+    if (data.reasons && data.reasons.length) {
+      h += '<div class="drw-reasons">';
+      h += '<div class="drw-rtitle">判断理由</div>';
+      h += '<ul>';
+      data.reasons.forEach(r => { h += '<li>' + esc(r) + '</li>'; });
+      h += '</ul>';
+      h += '</div>';
+    }
+
+    h += '<div class="drw-time">数据时间：' + esc(data.dataTime || data.dataTs || '—') + '</div>';
+
+    h += '<div class="drw-actions">';
+    h += '<button class="drw-ask" data-code="' + esc(data.leaderCode || '') + '" data-name="' + esc(data.leader || '') + '">问 AI</button>';
+    h += '</div>';
+
+    return h;
+  }
+
+  window.Drawer.register('leader', {
+    fetcher: fetchLeader,
+    render: renderLeader,
+    title: '龙头详情',
+  });
+})();
+</script>
 <script>
 /* ── §5 情绪温度 60 日热力柱（DESIGN.md §5 第 1 项） ──
  * 数据来自 /api/sentiment/heatmap（60 天 alert_samples 每条）。
@@ -1601,6 +1792,61 @@ body.no-webgl #gl-fallback{display:grid}
       timer = setTimeout(refresh, trading ? 5 * 60e3 : 30 * 60e3);
     } catch (e) {
       box.querySelector('#mpHeatTitle').firstElementChild.textContent = '情绪温度 · 连接失败';
+      timer = setTimeout(refresh, 60e3);
+    }
+  }
+  refresh();
+})();
+</script>
+<script>
+/* ── §5 板块涨幅分布直方图（DESIGN.md §5 第 5 项） ──
+ * 数据来自 /api/distribution（sector_daily 最新交易日 change_pct 六档分桶）。
+ * 与情绪温度同一纪律：独立 div、canvas 兄弟躲开 #scanbox innerHTML 替换；
+ * 数据到位一次性重画，不入 AnimGate.gatedLoop，不新增 rAF 链。
+ * 涨跌纪律（§1.1）：这是涨跌语义，走色相通道 --gn(跌) / --rd(涨) 加位置通道
+ * (中轴=0 左右)，双通道并行——不是单通道红绿禁则违反。 */
+(function () {
+  'use strict';
+  if (typeof window.Charts !== 'object' || !window.Charts.drawDistribution) return;
+  const canvas = document.getElementById('scanDistCanvas');
+  const box = document.getElementById('scanDistbox');
+  const timeEl = document.getElementById('scanDistTime');
+  if (!canvas || !box) return;
+
+  const C = window.Charts;
+  let hover = null;
+  let timer = null;
+
+  function render(data){
+    const title = box.querySelector('#scanDistTitle').firstElementChild;
+    if (!data || data.ok === false){
+      title.textContent = '板块涨幅分布 · 数据不可用';
+      return;
+    }
+    if (!data.total){
+      title.textContent = '板块涨幅分布 · 无数据';
+      if (hover){ hover.unbind(); hover = null; }
+      hover = C.bindHover(canvas, C.drawDistribution(canvas, data));
+      return;
+    }
+    const span = (data.min != null && data.max != null)
+      ? '  ' + data.min.toFixed(1) + '% ~ ' + data.max.toFixed(1) + '%'
+      : '';
+    title.textContent = '板块涨幅分布 · ' + data.total + ' 个板块' + span;
+    if (hover){ hover.unbind(); hover = null; }
+    hover = C.bindHover(canvas, C.drawDistribution(canvas, data));
+  }
+
+  async function refresh(){
+    try {
+      const r = await fetch('/api/distribution');
+      render(await r.json());
+      if (timeEl) timeEl.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      const now = new Date();
+      const trading = now.getDay() >= 1 && now.getDay() <= 5 && now.getHours() >= 9 && now.getHours() < 15;
+      timer = setTimeout(refresh, trading ? 5 * 60e3 : 30 * 60e3);
+    } catch (e) {
+      box.querySelector('#scanDistTitle').firstElementChild.textContent = '板块涨幅分布 · 连接失败';
       timer = setTimeout(refresh, 60e3);
     }
   }

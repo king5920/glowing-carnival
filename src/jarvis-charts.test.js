@@ -78,12 +78,14 @@ const C = window.Charts;
 function makeCanvas(w, h){
   const calls = { fillRect: [], strokeRect: [], fillText: [], rect: [],
                   stroke: 0, clip: 0, save: 0, restore: 0,
-                  setTransform: 0, clearRect: 0, beginPath: 0, moveTo: 0, lineTo: 0 };
+                  setTransform: 0, clearRect: 0, beginPath: 0, moveTo: 0, lineTo: 0,
+                  setLineDash: [] };
   const ctx = {
     setTransform(){ calls.setTransform++; }, save(){ calls.save++; }, restore(){ calls.restore++; },
     clearRect(){ calls.clearRect++; }, beginPath(){ calls.beginPath++; },
     moveTo(){ calls.moveTo++; }, lineTo(){ calls.lineTo++; },
     stroke(){ calls.stroke++; },
+    setLineDash(d){ calls.setLineDash.push(d); },
     fillRect(x, y, fw, fh){ calls.fillRect.push({ x, y, w: fw, h: fh }); },
     strokeRect(x, y, fw, fh){ calls.strokeRect.push({ x, y, w: fw, h: fh }); },
     fillText(t, x, y){ calls.fillText.push({ t, x, y }); },
@@ -388,6 +390,150 @@ test('drawSentimentHeatmap 数据缺字段（broken_rate 为 undefined）不炸�
   assert.strictEqual(calls.fillRect.length, 1, '缺字段的柱仍应画出');
   /* 兜底 50% 不算极值，不应触发斜纹 */
   assert.strictEqual(calls.clip, 0);
+});
+
+console.log('\n── drawDistribution() 板块涨幅分布直方图 ──');
+
+/* 6 档 mock 数据（服务端 BUCKETS 定义的镜像） */
+function mockDist(counts, total){
+  const ranges = ['<-3%', '-3~-1%', '-1~0%', '0~1%', '1~3%', '>3%'];
+  const sides  = ['down',  'down',  'down',  'up',   'up',   'up'];
+  return {
+    date: '2026-09-17',
+    total: total || counts.reduce((s, c) => s + c, 0),
+    min: -6.0, max: 7.86,
+    buckets: counts.map((c, i) => ({
+      range: ranges[i], side: sides[i], count: c,
+      pct: total ? +(c / total * 100).toFixed(2) : 0,
+    })),
+  };
+}
+
+test('drawDistribution 6 档全部画出（6 根柱 + 6 个 range label）', () => {
+  const { cv, calls } = makeCanvas(600, 90);
+  const d = mockDist([30, 128, 180, 220, 130, 73]);
+  const r = C.drawDistribution(cv, d);
+  assert(r, '返回值应为命中对象');
+  /* 每档 1 根柱 = 1 次 fillRect；共 6 次 */
+  assert.strictEqual(calls.fillRect.length, 6, '6 档应有 6 根柱，实得 ' + calls.fillRect.length);
+  /* 每档下方 range label = 1 次 fillText；共 6 次 */
+  assert.strictEqual(calls.fillText.length, 6, '6 档应有 6 个 label，实得 ' + calls.fillText.length);
+});
+
+test('drawDistribution 返回 hit/tooltip/bars 三件套', () => {
+  const { cv } = makeCanvas(600, 90);
+  const r = C.drawDistribution(cv, mockDist([10, 20, 30, 40, 50, 60]));
+  assert(typeof r.hit === 'function');
+  assert(typeof r.tooltip === 'function');
+  assert(Array.isArray(r.bars) && r.bars.length === 6);
+});
+
+test('drawDistribution hit 落在中间档（0~1%）返回对应桶', () => {
+  const { cv } = makeCanvas(600, 90);
+  const r = C.drawDistribution(cv, mockDist([30, 128, 180, 220, 130, 73]));
+  /* 600px / 6 档 = 100px/档；x=350 落在第 4 档（index=3，0~1%） */
+  const hit = r.hit(350, 45);
+  assert(hit, '图内 hover 应有命中');
+  assert.strictEqual(hit.range, '0~1%');
+  assert.strictEqual(hit.side, 'up');
+});
+
+test('drawDistribution hit 越界返回 null', () => {
+  const { cv } = makeCanvas(600, 90);
+  const r = C.drawDistribution(cv, mockDist([10, 20, 30, 40, 50, 60]));
+  assert.strictEqual(r.hit(-10, 45), null);
+  assert.strictEqual(r.hit(700, 45), null);
+  assert.strictEqual(r.hit(300, -10), null);
+  assert.strictEqual(r.hit(300, 200), null);
+});
+
+test('drawDistribution tooltip 是整句中文且含 % 和"个板块"和"占"', () => {
+  const { cv } = makeCanvas(600, 90);
+  const r = C.drawDistribution(cv, mockDist([30, 128, 180, 220, 130, 73]));
+  const tip = r.tooltip({ range: '-3~-1%', side: 'down', count: 128, pct: 13.32 });
+  assert(/[一-鿿]/.test(tip), 'tooltip 应含中文："' + tip + '"');
+  assert(tip.indexOf('-3~-1%') >= 0, '缺档位区间："' + tip + '"');
+  assert(tip.indexOf('个板块') >= 0, '缺"个板块"："' + tip + '"');
+  assert(tip.indexOf('占') >= 0, '缺"占"："' + tip + '"');
+  assert(/%/.test(tip), '缺 % 单位："' + tip + '"');
+  /* 跌区应有明确标记 */
+  assert(tip.indexOf('跌区') >= 0, '跌档 tooltip 缺"跌区"："' + tip + '"');
+});
+
+test('drawDistribution tooltip 涨档标注"涨区"', () => {
+  const { cv } = makeCanvas(600, 90);
+  const r = C.drawDistribution(cv, mockDist([30, 128, 180, 220, 130, 73]));
+  const tip = r.tooltip({ range: '0~1%', side: 'up', count: 220, pct: 22.9 });
+  assert(tip.indexOf('涨区') >= 0, '涨档 tooltip 应含"涨区"："' + tip + '"');
+  assert(tip.indexOf('-3~-1%') < 0, '涨档 tooltip 不应含跌档区间："' + tip + '"');
+});
+
+test('drawDistribution 涨档用 --rd 红、跌档用 --gn 青绿（colorLadder 输出）', () => {
+  const { cv, calls } = makeCanvas(600, 90);
+  const d = mockDist([30, 128, 180, 220, 130, 73]);
+  C.drawDistribution(cv, d);
+  /* 前 3 档跌区走 --gn，后 3 档涨区走 --rd。
+   * canvas ctx 每次 fillRect 前会写 fillStyle——但我们没记录 fillStyle，只能间接验证。
+   * 用色相检查：--rd 的 r 通道显著高于 --gn；调用 colorLadder 直接对两侧验证。 */
+  const upColor   = C.colorLadder(1, [{ v: 0, c: '--rd' }, { v: 1, c: '--rd' }], 0.85);
+  const downColor = C.colorLadder(1, [{ v: 0, c: '--gn' }, { v: 1, c: '--gn' }], 0.85);
+  const upM   = /^rgba\((\d+),(\d+),(\d+),[0-9.]+\)$/.exec(upColor);
+  const downM = /^rgba\((\d+),(\d+),(\d+),[0-9.]+\)$/.exec(downColor);
+  assert(upM, '涨档色应为 rgba()：' + upColor);
+  assert(downM, '跌档色应为 rgba()：' + downColor);
+  /* --rd=(240,72,94)、--gn=(8,153,129) */
+  assert.strictEqual(+upM[1], 240, '涨档 r 通道应为 240，实得 ' + upM[1]);
+  assert.strictEqual(+downM[1], 8,   '跌档 r 通道应为 8，实得 ' + downM[1]);
+  assert(+upM[1] > +downM[1], '涨档 r 应显著大于跌档（红 vs 青绿）');
+  assert(+upM[3] === 94 && +downM[3] === 129, '涨档 b=94、跌档 b=129');
+});
+
+test('drawDistribution 中轴虚线（beginPath + setLineDash 后 stroke）出现', () => {
+  const { cv, calls } = makeCanvas(600, 90);
+  C.drawDistribution(cv, mockDist([30, 128, 180, 220, 130, 73]));
+  /* 中轴虚线：setLineDash([2,3]) 后 stroke 一次 */
+  assert(calls.setLineDash.length >= 1, '应有 setLineDash 调用');
+  assert.deepStrictEqual(calls.setLineDash[0], [2, 3], '虚线应 [2,3]');
+  assert(calls.stroke >= 1, '应有中轴 stroke 调用，实得 ' + calls.stroke);
+});
+
+test('drawDistribution 空 buckets 画"无分布数据"占位', () => {
+  const { cv, calls } = makeCanvas(200, 80);
+  const r = C.drawDistribution(cv, { date: null, total: 0, buckets: [] });
+  assert(r);
+  assert(calls.fillText.length >= 1);
+  assert(/无分布数据/.test(calls.fillText[0].t), '应画"无分布数据"，实得"' + calls.fillText[0].t + '"');
+});
+
+test('drawDistribution 空 buckets 时 hit() 安全返回 null', () => {
+  const { cv } = makeCanvas(200, 80);
+  const r = C.drawDistribution(cv, { date: null, total: 0, buckets: [] });
+  assert.strictEqual(r.hit(100, 40), null);
+});
+
+test('drawDistribution data 为 null 时不炸、hit 安全', () => {
+  const { cv } = makeCanvas(200, 80);
+  const r = C.drawDistribution(cv, null);
+  assert(r);
+  assert.strictEqual(r.hit(100, 40), null);
+});
+
+test('drawDistribution 单档全 count=0 时柱高兜底 2px（maxCount 用 1 兜）', () => {
+  const { cv, calls } = makeCanvas(600, 90);
+  /* 所有 count=0：maxCount 兜底 1，柱高 = 0/1 * plotH = 0 → 应 clamp 到 2px */
+  const d = mockDist([0, 0, 0, 0, 0, 0]);
+  C.drawDistribution(cv, d);
+  /* 柱仍应画出（6 次 fillRect），高度兜底避免 0 柱不可见 */
+  assert.strictEqual(calls.fillRect.length, 6, 'count=0 时仍应画 6 根柱（高度兜底）');
+});
+
+test('drawDistribution hit 落在 padLeft/padRight 内边缘仍命中', () => {
+  const { cv } = makeCanvas(600, 90);
+  const r = C.drawDistribution(cv, mockDist([30, 128, 180, 220, 130, 73]));
+  /* x=padLeft(=6) 应命中第 0 档 */
+  const hit0 = r.hit(6, 45);
+  assert(hit0, 'x=padLeft 应命中第 0 档');
+  assert.strictEqual(hit0.range, '<-3%');
 });
 
 console.log('\n── bindHover() DOM tooltip 管理 ──');

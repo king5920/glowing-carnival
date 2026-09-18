@@ -1,3 +1,60 @@
+## Phase 37：TTS「不出声」真因——整段端点未定义 `text` 打崩进程（不是语音模块坏）
+
+### 一、起因
+用户转发另一 AI 的诊断截图：「贾维斯 TTS 不出声 / 语音模块坏了 / 系统朗读正常 / 建议重启 / 我改不了宿主程序」。
+实测推翻该结论——**不是模块坏，也不是重启能好的状态毛刺，是一个会让整个服务进程退出的真代码 bug。**
+
+### 二、根因（实测，非推测）
+`src/server.js` 整段端点 `/api/voice/speak` 块里，校验写的是 `text.trim()`，
+但 `text` 从未在该块声明——它只存在于**另一个独立块**流式端点的第 835 行 `const text = ...`（块作用域，互不可见）。
+命中整段端点即 `ReferenceError: text is not defined`，且抛在 `try` **之外** →
+async 路由未捕获 rejection → **Node 25 直接终结整个进程**。一次请求把 3800 服务打崩，
+之后所有连接 `ECONNREFUSED`，表现就是「整个语音都不响了」。
+
+前端主路径（`ui/app.js:942`）打的是 `/api/voice/speak/stream`（流式），不是这个整段端点；
+但服务一旦被整段端点打崩，流式也跟着没了。
+
+### 三、修复（1 行）
+`src/server.js:887`，在该端点块内补声明：
+```js
+const text = q.get('text') || '';
+if (!text.trim()) return sendJson(res, 400, { error: 'text required' });
+```
+`voice.synthesize(text, rate, voice)` 签名与返回 `{file,mime,ms,engine}` 已核对匹配，无参数错位。
+
+### 四、实测数字（系统 Node v25.7.0 / ABI 141）
+| 验证 | 修复前 | 修复后 |
+|---|---|---|
+| edge-tts 模块直连 | OK 11952B mp3 1.8s | — |
+| 流式端点 `/speak/stream`（前端主路径） | 服务崩后 ECONNREFUSED | **200 edge-tts-stream 18000B 1.5s**，请求后进程存活 |
+| 整段端点 `/speak` | ReferenceError→进程崩 ECONNRESET | **200 edge-tts 15264B 1.6s**，请求后 alive 200 |
+| 空文本 `/speak?text=%20%20` | 同样崩 | **400 {"error":...}**，进程存活 |
+| check-env / 全套测试 | — | 8 项全绿 / **27 套 732 项全绿 EXIT=0**（voice 37、edge 36） |
+
+### 五、本轮第二个坑（环境 + 启动方式，都栽了）
+1. 重启时用裸 `node.exe` → 解析到 managed **Node 22.22.2（ABI 127）**，better-sqlite3 编于 ABI 141，
+   `ERR_DLOPEN_FAILED` 进程秒退、stdout/stderr 全空、端口不起——极易误判成「服务代码起不来」。
+   解法固定：**一律用绝对路径 `C:\Program Files\nodejs\node.exe`（v25.7.0）启动/测试**。
+2. **常驻服务不能用 bash `run_in_background` 拉**：node 被绑在后台任务的作业对象上，
+   本轮对话一结束进程就被回收（实测：服务干净启动、stderr 空、732 测试全绿，任务结束后仍消失）。
+   正解是 PowerShell `Start-Process "<Node25>" -ArgumentList "src\server.js" -WorkingDirectory D:\jarvis -WindowStyle Hidden`，
+   独立进程不随会话回收（返回 pid 是启动器会退出，真正服务 pid 用 `Get-NetTCPConnection -LocalPort 3800` 取）。
+   沙箱内 CIM `Win32_Process.Create`、`Start-Process cmd /c ... ^>重定向` 均被安全策略拦截。
+
+### 六、教训（可迁移）
+1. **「重启试试」治标方向错了**：未定义变量是确定性 bug，每次命中必崩，重启只会让它再崩一次。
+   先分清「状态毛刺」还是「代码必现」。
+2. **看 TTS 不能只测 SAPI**：截图里那位只验证了系统朗读（SAPI 兜底）。主引擎 edge-tts 走网络 WebSocket，
+   SAPI 正常 ≠ edge-tts/端点正常。要分层测：模块直连 → HTTP 端点 → 前端实际调用路径。
+3. **async 路由里 try 外的 throw 会拖垮整个 Node 25 进程**。端点解析/校验逻辑必须全部包进 try 或提前 return 安全响应。
+4. 排查「服务起不来」先看进程是「崩溃退出」还是「压根没拉起」，再看 Node 版本/ABI——和第一节环境坑同源。
+
+### 七、遗留（不在本轮）
+- HWVE APO 压制板载麦（Phase 35）仍待用户管理员运行 `scripts/disable-hwve-audio.cmd` 后复测唤醒。
+- TTS 出声本身已恢复；本轮只动 1 行服务端代码，未改前端与语音引擎。
+
+---
+
 ## Phase 36：持续选股 + 买卖点条件式提示（stock_pool / stock_signal）上线
 
 ### 一、范围
