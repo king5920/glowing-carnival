@@ -1472,7 +1472,21 @@
     if (!window.STAR || !STAR.pick) return;
     const rect = graphEl.getBoundingClientRect();
     const hit = STAR.pick(ev.clientX - rect.left, ev.clientY - rect.top);
-    if (!hit || hit.memId == null) { hideCard(); if (STAR.unfocus) STAR.unfocus(); return; }
+    if (!hit || hit.memId == null) {
+      hideCard();
+      if (STAR.unfocus) STAR.unfocus();
+      /* C2-C2：点击实体节点（kind='entity'、memId=null）打开实体抽屉。
+       * pick() 对实体节点会返回 memId=null 但 kind='entity' + entity=实体名，
+       * 之前直接 return 导致点实体节点无任何反馈。 */
+      if (hit.kind === 'entity' && hit.entity && window.Drawer) {
+        window.Drawer.open('entity', hit.entity, {
+          side: 'right',
+          title: hit.entity,
+          sourceEl: graphEl,  // 关闭后还焦到星图 canvas
+        });
+      }
+      return;
+    }
     STAR.select(hit.nodeIndex);
     if (STAR.focus) STAR.focus(hit.nodeIndex);
     showMemoryCard(hit.memId, ev.clientX, ev.clientY);

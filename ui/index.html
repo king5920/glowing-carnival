@@ -215,6 +215,34 @@ body.drawer-open{overflow:hidden}
 .drw-loading{padding:30px;text-align:center;font-size:12px;color:var(--faint)}
 .drw-error{padding:30px;text-align:center;font-size:12px;color:var(--warn)}
 
+/* L3 stockDetail K 线图（C2-C）：与 §5 大盘 K 线同一纪律——canvas 一次性重画、
+   不入 AnimGate.gatedLoop、不新增 rAF 链；红涨绿跌走 --rd/--gn，MA 走 --cy/--gd/--info。
+   抽屉面板宽 480px - body padding 36px = 444px 内容区，canvas max-width:440px 留 4px 呼吸。 */
+.drw-kline{margin-bottom:14px}
+.drw-kline-title{font-size:11px;color:var(--faint);letter-spacing:.5px;margin-bottom:6px}
+#drwKlineCanvas{display:block;width:100%;max-width:440px;height:260px;cursor:crosshair;
+  margin:0 auto;background:transparent}
+/* 图例：复用 §5 .kline-legend 色块定义（.kl-sw-up/.kl-sw-dn/.kl-ln5/.kl-ln10/.kl-ln20/.kl-sw-vol）
+   ——图例与画面同源同色，零硬编码 hex，全部走 :root CSS 变量。 */
+.drw-kline-legend{display:flex;align-items:center;gap:9px;margin-top:6px;flex-wrap:wrap;
+  font-size:8.5px;color:var(--faint);font-family:var(--num);justify-content:center}
+.drw-kline-legend .kl-key{display:inline-flex;align-items:center;gap:3px;flex:0 0 auto}
+.drw-kline-legend .kl-sw{display:inline-block;width:8px;height:6px;border-radius:1px}
+.drw-kline-legend .kl-sw-up{background:var(--rd)}
+/* 空心色块 = 跌柱真实画法（--panel 底 + --gn 边框），图例与画面一致 */
+.drw-kline-legend .kl-sw-dn{background:var(--panel);border:1px solid var(--gn);box-sizing:border-box}
+/* 量柱随当日涨跌同色、alpha 0.5；color-mix 派生透明度，不写死任何 hex */
+.drw-kline-legend .kl-sw-vol{background:linear-gradient(90deg,
+  color-mix(in srgb,var(--rd) 50%,transparent) 0%,
+  color-mix(in srgb,var(--rd) 50%,transparent) 50%,
+  color-mix(in srgb,var(--gn) 50%,transparent) 50%,
+  color-mix(in srgb,var(--gn) 50%,transparent) 100%)}
+.drw-kline-legend .kl-ln{display:inline-block;width:12px;height:2px;border-radius:1px}
+.drw-kline-legend .kl-ln5{background:var(--cy)}
+.drw-kline-legend .kl-ln10{background:var(--gd)}
+.drw-kline-legend .kl-ln20{background:var(--info)}
+.drw-kline-legend .kl-note{flex:0 0 auto}
+
 /* 小屏 <1400px 底部全屏上滑（预留，本轮暂不实现） */
 @media (max-width:1400px){
   #drawerPanel{top:auto;left:0;right:0;bottom:0;width:100%;
@@ -1876,7 +1904,13 @@ body.no-webgl #gl-fallback{display:grid}
   }
 
   /* ═══ L3：stockDetail —— 个股 K 线 + 基本信息 ═══
-   * fetcher 走 /api/kline；渲染 60 日 K 线要点：最新价/区间涨跌/MA/波动率。 */
+   * fetcher 走 /api/kline；渲染 60 日 K 线要点：最新价/区间涨跌/MA/波动率。
+   * C2-C 图表 Tab：fetcher 已经把 bars 一起返回（同源同一次 /api/kline），
+   * render 直接用 bars 同步生成 <canvas id="drwKlineCanvas"> 占位，
+   * 再用 setTimeout(0) 后置调 Charts.drawKline 一次性重画——不入 gatedLoop。
+   * 后置绘制的理由：Drawer._renderBody 用 innerHTML 全替换 body，render 返回
+   * 时 canvas 尚未入 DOM，无法立刻 getContext；setTimeout 让绘制延到下一帧，
+   * 此时 canvas 已在 DOM 中、size 已定，drawKline 的 resizeCanvas 可正常拿 ctx。 */
   function fetchStockDetail(code) {
     return fetch('/api/kline?code=' + encodeURIComponent(code) + '&period=day&limit=60').then(r => r.json()).catch(() => null);
   }
@@ -1887,6 +1921,8 @@ body.no-webgl #gl-fallback{display:grid}
       return '<div class="drw-error">' + err + '</div>';
     }
     const ind = data.indicators || {};
+    /* 保留原 bars 引用（不 slice）——drawKline 只读，无副作用 */
+    const bars = Array.isArray(data.bars) ? data.bars : [];
     let h = '<div class="drw-sec">';
     h += '<div class="drw-title">' + esc(data.name || data.code) + '</div>';
     h += '<div class="drw-sub">' + esc(data.code) + '　·　' + esc(data.source || '') + '</div>';
@@ -1902,6 +1938,38 @@ body.no-webgl #gl-fallback{display:grid}
     h += '<div class="drw-kv"><span class="k">MA20</span><span class="v">' + num(ind.ma20) + '</span></div>';
     h += '<div class="drw-kv"><span class="k">年化波动</span><span class="v">' + (ind.annualized_volatility_pct != null ? ind.annualized_volatility_pct + '%' : '—') + '</span></div>';
     h += '</div>';
+
+    /* ── C2-C K 线图区域（60 日蜡烛 + MA5/10/20 + 底部成交量）──
+     * canvas 用固定 id，后置 setTimeout 拿到 DOM 引用后调 drawKline；
+     * 图例色块走 .kline-legend 已有的 .kl-* 类定义（§5 大盘 K 线同一套），
+     * 涨=--rd 实心、跌=--gn 空心描边、MA5=--cy、MA10=--gd、MA20=--info、量=双色半透渐变。 */
+    h += '<div class="drw-kline">';
+    h += '<div class="drw-kline-title">60 日 K 线　·　红涨绿跌</div>';
+    h += '<canvas id="drwKlineCanvas" width="440" height="260"></canvas>';
+    h += '<div class="drw-kline-legend">';
+    h += '<span class="kl-key"><span class="kl-sw kl-sw-up"></span>涨</span>';
+    h += '<span class="kl-key"><span class="kl-sw kl-sw-dn"></span>跌</span>';
+    h += '<span class="kl-key"><span class="kl-ln kl-ln5"></span>MA5</span>';
+    h += '<span class="kl-key"><span class="kl-ln kl-ln10"></span>MA10</span>';
+    h += '<span class="kl-key"><span class="kl-ln kl-ln20"></span>MA20</span>';
+    h += '<span class="kl-key"><span class="kl-sw kl-sw-vol"></span>量</span>';
+    h += '<span class="kl-note">A股红涨绿跌</span>';
+    h += '</div>';
+    h += '</div>';
+
+    /* 后置绘制：canvas 已在 DOM，此时 drawKline 可拿 ctx 一次性重画。
+     * 纪律：数据到位一次性重画，不入 AnimGate.gatedLoop、不新增 rAF 链。 */
+    setTimeout(function(){
+      var C = window.Charts;
+      if(!C || typeof C.drawKline !== 'function') return;
+      var cv = document.getElementById('drwKlineCanvas');
+      if(!cv) return;  // 抽屉已关闭或被替换，静默跳过
+      var res = C.drawKline(cv, bars, {});
+      /* 挂 hover tooltip：与 §5 大盘 K 线同一纪律，bindHover 返回句柄（不累积监听） */
+      if(res && typeof C.bindHover === 'function'){
+        C.bindHover(cv, res);
+      }
+    }, 0);
 
     if (ind.position_in_range_pct != null) {
       h += '<div class="drw-bar-wrap">';
@@ -1947,6 +2015,83 @@ body.no-webgl #gl-fallback{display:grid}
     fetcher: fetchStockDetail,
     render: renderStockDetail,
     title: '个股详情',
+  });
+})();
+</script>
+<script>
+/* ── §6 星图实体抽屉：C2-C2 —— 点击星图实体节点打开抽屉 ──
+ * 触发源：ui/app.js 的 graphEl click 处理器 —— 当 STAR.pick() 返回
+ * { kind:'entity', entity:'张三' } 时调用 Drawer.open('entity', ...)。
+ *
+ * 数据来源：/api/starmap（同 /api/starmap 端点，见 src/memory.js:starmap）。
+ * 渲染内容：实体名/类别/ID + 关联记忆条数 + 提及次数 + 记忆列表（前 20 条）。
+ *
+ * 约束：
+ *   - 零外部依赖、零硬编码 hex、全走 CSS 变量
+ *   - 复用现有 .drw-sec / .drw-grid / .drw-kv / .drw-reasons / .drw-actions 类
+ *   - 记忆列表最多显示 20 条，超出用省略行标注剩余条数
+ *   - "问 AI" 按钮：填对话框 + 关闭抽屉（走 drawer.js 事件委托） */
+(function () {
+  'use strict';
+  if (typeof window.Drawer !== 'object' || !window.Drawer.register) return;
+
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const CAT_CN = { person: '人物', place: '地点', event: '事件', interest: '兴趣', project: '项目' };
+  const DECAY_CN = { fresh: '新鲜', normal: '正常', fading: '正在变淡' };
+  const MAX_MEMS_SHOWN = 20;
+
+  function fetchEntity(entityName) {
+    return fetch('/api/starmap').then(r => r.json()).then(d => {
+      const ents = (d && d.entities) || [];
+      const mems = (d && d.memories) || [];
+      const ent = ents.find(e => e.name === entityName);
+      if (!ent) return null;
+      // 找到属于该实体的所有记忆
+      const entityMems = mems.filter(m => m.entity === entityName);
+      return { ...ent, memories: entityMems };
+    });
+  }
+
+  function renderEntity(data) {
+    if (!data) return '<div class="drw-error">未找到该实体</div>';
+    let h = '<div class="drw-sec">';
+    h += '<div class="drw-title">' + esc(data.name) + '</div>';
+    h += '<div class="drw-sub">' + (CAT_CN[data.category] || esc(data.category)) + ' · #' + esc(data.id != null ? data.id : '') + '</div>';
+    h += '</div>';
+
+    h += '<div class="drw-grid">';
+    h += '<div class="drw-kv"><span class="k">关联记忆</span><span class="v">' + (data.memCount || 0) + ' 条</span></div>';
+    h += '<div class="drw-kv"><span class="k">提及次数</span><span class="v">' + (data.mentions || 0) + '</span></div>';
+    h += '</div>';
+
+    if (data.memories && data.memories.length) {
+      h += '<div class="drw-reasons">';
+      h += '<div class="drw-rtitle">记忆条目（' + data.memories.length + ' 条）</div>';
+      h += '<ul>';
+      const showMems = data.memories.slice(0, MAX_MEMS_SHOWN);
+      showMems.forEach(m => {
+        const decayLabel = DECAY_CN[m.decayState] || '未知';
+        h += '<li>' + esc(m.content || '（无内容）') +
+             ' <span style="color:var(--faint);font-size:10px">[' + decayLabel + ' · ' + (m.ageDays != null ? m.ageDays : 0) + '天前]</span></li>';
+      });
+      if (data.memories.length > MAX_MEMS_SHOWN) {
+        h += '<li style="color:var(--faint)">…还有 ' + (data.memories.length - MAX_MEMS_SHOWN) + ' 条未显示</li>';
+      }
+      h += '</ul>';
+      h += '</div>';
+    }
+
+    h += '<div class="drw-actions">';
+    h += '<button class="drw-ask" data-code="" data-name="' + esc(data.name) + '">问 AI</button>';
+    h += '</div>';
+
+    return h;
+  }
+
+  window.Drawer.register('entity', {
+    fetcher: fetchEntity,
+    render: renderEntity,
+    title: '实体详情',
   });
 })();
 </script>

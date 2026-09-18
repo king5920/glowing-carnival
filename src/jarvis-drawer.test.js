@@ -788,6 +788,577 @@ test('L2 下钻后 pop 焦点仍在抽屉内（不还给外部）', () => {
   assert(document._activeElement !== source, 'pop 后焦点不应跳到外部 sourceEl');
 });
 
+/* ══════════════════════════════════════════════════════════
+   C2-C2: 星图实体抽屉
+   ══════════════════════════════════════════════════════════
+   注册 'entity' 类型 + 从 /api/starmap 取数 + 渲染实体名/类别/记忆列表。
+   index.html 里的 IIFE 与下列 fetcher/render 完全一致（此处内联复制以便测试）。
+*/
+
+console.log('\n── C2-C2 星图实体抽屉 ──');
+
+const CAT_CN = { person: '人物', place: '地点', event: '事件', interest: '兴趣', project: '项目' };
+const DECAY_CN = { fresh: '新鲜', normal: '正常', fading: '正在变淡' };
+const MAX_MEMS_SHOWN = 20;
+
+function _escForTest(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function fetchEntity(entityName) {
+  return fetch('/api/starmap').then(r => r.json()).then(d => {
+    const ents = (d && d.entities) || [];
+    const mems = (d && d.memories) || [];
+    const ent = ents.find(e => e.name === entityName);
+    if (!ent) return null;
+    const entityMems = mems.filter(m => m.entity === entityName);
+    return { ...ent, memories: entityMems };
+  });
+}
+
+function renderEntity(data) {
+  if (!data) return '<div class="drw-error">未找到该实体</div>';
+  let h = '<div class="drw-sec">';
+  h += '<div class="drw-title">' + _escForTest(data.name) + '</div>';
+  h += '<div class="drw-sub">' + (CAT_CN[data.category] || _escForTest(data.category)) + ' · #' + _escForTest(data.id != null ? data.id : '') + '</div>';
+  h += '</div>';
+
+  h += '<div class="drw-grid">';
+  h += '<div class="drw-kv"><span class="k">关联记忆</span><span class="v">' + (data.memCount || 0) + ' 条</span></div>';
+  h += '<div class="drw-kv"><span class="k">提及次数</span><span class="v">' + (data.mentions || 0) + '</span></div>';
+  h += '</div>';
+
+  if (data.memories && data.memories.length) {
+    h += '<div class="drw-reasons">';
+    h += '<div class="drw-rtitle">记忆条目（' + data.memories.length + ' 条）</div>';
+    h += '<ul>';
+    const showMems = data.memories.slice(0, MAX_MEMS_SHOWN);
+    showMems.forEach(m => {
+      const decayLabel = DECAY_CN[m.decayState] || '未知';
+      h += '<li>' + _escForTest(m.content || '（无内容）') +
+           ' <span style="color:var(--faint);font-size:10px">[' + decayLabel + ' · ' + (m.ageDays != null ? m.ageDays : 0) + '天前]</span></li>';
+    });
+    if (data.memories.length > MAX_MEMS_SHOWN) {
+      h += '<li style="color:var(--faint)">…还有 ' + (data.memories.length - MAX_MEMS_SHOWN) + ' 条未显示</li>';
+    }
+    h += '</ul>';
+    h += '</div>';
+  }
+
+  h += '<div class="drw-actions">';
+  h += '<button class="drw-ask" data-code="" data-name="' + _escForTest(data.name) + '">问 AI</button>';
+  h += '</div>';
+
+  return h;
+}
+
+/* 构造 /api/starmap 的响应 mock */
+function makeStarmapData(entityName, mems){
+  return {
+    counts: { messages: 0, memories: mems.length, entities: 1 },
+    galaxies: ['person', 'place', 'event', 'interest', 'project'],
+    entities: [{ id: 'e_' + entityName, name: entityName, category: 'person', memCount: mems.length, mentions: mems.length * 2 }],
+    memories: mems.map((c, i) => ({
+      id: 'm_' + i,
+      entity: entityName,
+      category: 'person',
+      weight: 3,
+      strength: 0.9,
+      retention: 0.9,
+      content: c,
+      readCount: 0,
+      ageDays: i * 1.0,
+      createdAt: '2026-01-01',
+      mergedCount: 0,
+      decayState: i % 3 === 0 ? 'fading' : (i % 3 === 1 ? 'normal' : 'fresh'),
+    })),
+  };
+}
+
+/* ── fetch stub ── */
+let _mockStarmapData = null;
+global.fetch = function(url){
+  if (url === '/api/starmap'){
+    /* 关键：在 fetch() 调用时捕获 _mockStarmapData，而非在 json() 调用时。
+     * 否则后续测试修改 _mockStarmapData 后，async 测试的 json() 会读到新值。 */
+    const captured = _mockStarmapData;
+    return Promise.resolve({ json: () => Promise.resolve(captured) });
+  }
+  return Promise.reject(new Error('unexpected fetch: ' + url));
+};
+
+/* 注册 entity 类型（与 index.html IIFE 一致） */
+D.register('entity', {
+  fetcher: fetchEntity,
+  render: renderEntity,
+  title: '实体详情',
+});
+
+test('entity 类型注册后可 open，isOpen=true 且 title 为实体名', () => {
+  resetState();
+  const source = makeEl('canvas');
+  D.open('entity', '张三', { side: 'right', title: '张三', sourceEl: source });
+  assert.strictEqual(D.isOpen(), true, '抽屉应打开');
+  assert.strictEqual(titleEl._text, '张三', 'title 应为实体名');
+});
+
+test('entity 类型 hash 为 #drawer=entity:<entityName>', () => {
+  resetState();
+  D.open('entity', '张三', { side: 'right', title: '张三' });
+  assert(global.location.hash.includes('entity:%E5%BC%A0%E4%B8%89'),
+    'hash 应含 entity:<URL-encoded 张三>，实际: ' + global.location.hash);
+});
+
+test('entity fetcher 返回正确数据形状（含 entity + memories 数组）', async () => {
+  resetState();
+  _mockStarmapData = makeStarmapData('张三', ['我喜欢篮球', '张三住在上海', '张三很努力']);
+  const data = await fetchEntity('张三');
+  assert(data && data.name === '张三', 'name 应为张三');
+  assert.strictEqual(data.category, 'person', 'category 应为 person');
+  assert.strictEqual(data.memCount, 3, 'memCount 应为 3');
+  assert.strictEqual(data.mentions, 6, 'mentions 应为 6');
+  assert(Array.isArray(data.memories), 'memories 应为数组');
+  assert.strictEqual(data.memories.length, 3, '该实体的记忆数应为 3');
+  assert.strictEqual(data.memories[0].content, '我喜欢篮球');
+  assert.strictEqual(data.memories[0].entity, '张三');
+  D.close();
+});
+
+test('entity fetcher 找不到实体返回 null', async () => {
+  resetState();
+  _mockStarmapData = makeStarmapData('张三', ['我喜欢篮球']);
+  const data = await fetchEntity('李四');
+  assert.strictEqual(data, null, '不存在的实体应返回 null');
+  D.close();
+});
+
+test('entity fetcher 在 memories 为空时仍返回实体（memories=[]）', async () => {
+  resetState();
+  _mockStarmapData = { entities: [{ id: 'e_1', name: '王五', category: 'place', memCount: 0, mentions: 0 }], memories: [] };
+  const data = await fetchEntity('王五');
+  assert(data && data.name === '王五');
+  assert(Array.isArray(data.memories), 'memories 应为数组（空）');
+  assert.strictEqual(data.memories.length, 0, '该实体无关联记忆时 memories 应为空数组');
+  D.close();
+});
+
+test('render 返回含实体名 + 类别中文 + 记忆列表的 HTML', () => {
+  resetState();
+  D.open('entity', '张三', {
+    side: 'right',
+    title: '张三',
+    data: {
+      id: 'e_1',
+      name: '张三',
+      category: 'person',
+      memCount: 2,
+      mentions: 5,
+      memories: [
+        { id: 'm_1', content: '我喜欢篮球', entity: '张三', decayState: 'fresh', ageDays: 1.0 },
+        { id: 'm_2', content: '张三住在上海', entity: '张三', decayState: 'normal', ageDays: 2.0 },
+      ],
+    },
+  });
+  assert(bodyEl._html.includes('张三'), 'HTML 应含实体名张三');
+  assert(bodyEl._html.includes('人物'), 'HTML 应含类别中文「人物」');
+  assert(bodyEl._html.includes('关联记忆'), 'HTML 应含"关联记忆"');
+  assert(bodyEl._html.includes('提及次数'), 'HTML 应含"提及次数"');
+  assert(bodyEl._html.includes('2 条'), '关联记忆数应显示 2 条');
+  assert(bodyEl._html.includes('5</span>'), '提及次数值应显示 5');
+  assert(bodyEl._html.includes('我喜欢篮球'), '记忆列表应含第一条内容');
+  assert(bodyEl._html.includes('张三住在上海'), '记忆列表应含第二条内容');
+  assert(bodyEl._html.includes('新鲜'), 'fresh 状态应显示中文「新鲜」');
+  assert(bodyEl._html.includes('正常'), 'normal 状态应显示中文「正常」');
+  assert(bodyEl._html.includes('drw-actions'), '应含 drw-actions 区块');
+  assert(bodyEl._html.includes('问 AI'), '应有问 AI 按钮');
+  D.close();
+});
+
+test('render 空记忆列表安全（无 memories 数组）', () => {
+  resetState();
+  D.open('entity', '王五', {
+    side: 'right',
+    title: '王五',
+    data: { id: 'e_2', name: '王五', category: 'place', memCount: 0, mentions: 0, memories: [] },
+  });
+  assert(bodyEl._html.includes('王五'), 'HTML 应含实体名');
+  assert(bodyEl._html.includes('0 条'), '关联记忆数应显示 0 条');
+  assert(!bodyEl._html.includes('drw-reasons'), '无记忆时不应出现记忆列表区块');
+  assert(!bodyEl._html.includes('drw-rtitle'), '无记忆时不应出现记忆标题');
+  D.close();
+});
+
+test('render 空记忆列表安全（memories 字段缺失）', () => {
+  resetState();
+  D.open('entity', '王五', {
+    side: 'right',
+    title: '王五',
+    data: { id: 'e_2', name: '王五', category: 'place', memCount: 0, mentions: 0 },
+  });
+  assert(bodyEl._html.includes('王五'));
+  assert(!bodyEl._html.includes('drw-reasons'), 'memories 字段缺失时不应出现记忆列表');
+  D.close();
+});
+
+test('render 超过 20 条记忆时截断显示 + 未显示提示', () => {
+  resetState();
+  const manyMems = [];
+  for (let i = 0; i < 25; i++) {
+    manyMems.push({ id: 'm_' + i, content: '记忆' + i, entity: '张三', decayState: 'normal', ageDays: i * 0.5 });
+  }
+  D.open('entity', '张三', {
+    side: 'right',
+    title: '张三',
+    data: { id: 'e_1', name: '张三', category: 'person', memCount: 25, mentions: 30, memories: manyMems },
+  });
+  // 前 20 条应显示
+  assert(bodyEl._html.includes('记忆0'), '应显示第 0 条');
+  assert(bodyEl._html.includes('记忆19'), '应显示第 19 条（最后一个可见）');
+  // 第 20 条之后应截断
+  assert(!bodyEl._html.includes('>记忆20<'), '不应显示第 20 条之后（截断）');
+  assert(!bodyEl._html.includes('>记忆24<'), '不应显示第 24 条（最后一条）');
+  // 显示总数 = 25
+  assert(bodyEl._html.includes('记忆条目（25 条）'), '记忆列表标题应显示总数 25');
+  // 应显示未显示提示
+  assert(bodyEl._html.includes('还有 5 条未显示'), '应有"还有 5 条未显示"提示，实际: ' + bodyEl._html);
+  D.close();
+});
+
+test('renderEntity(null) 返回"未找到该实体"错误 HTML', () => {
+  // 直接测试 renderEntity 函数（不通过 D.open）：
+  // drawer.js 的 _renderBody 在 data=null + 有 fetcher 时会走 fetcher 路径，
+  // 只有当 fetcher 返回 null（实体确实不存在）时才会调用 renderEntity(null)。
+  // 这里直接测纯函数，覆盖"实体不存在"分支。
+  const html = renderEntity(null);
+  assert.strictEqual(html, '<div class="drw-error">未找到该实体</div>',
+    'renderEntity(null) 应返回错误提示 HTML，实际: ' + html);
+});
+
+test('render HTML 转义用户内容（防 XSS）', () => {
+  resetState();
+  D.open('entity', '<script>alert(1)</script>', {
+    side: 'right',
+    title: '<script>alert(1)</script>',
+    data: {
+      id: 'e_1',
+      name: '<script>alert(1)</script>',
+      category: 'person',
+      memCount: 0,
+      mentions: 0,
+      memories: [],
+    },
+  });
+  assert(!bodyEl._html.includes('<script>alert(1)</script>'),
+    '不应含未转义的 <script> 标签，实际: ' + bodyEl._html);
+  assert(bodyEl._html.includes('&lt;script&gt;'),
+    '应含转义后的 &lt;script&gt;，实际: ' + bodyEl._html);
+  D.close();
+});
+
+test('entity 抽屉走 fetcher 路径：open 后 body 先显示加载中', () => {
+  resetState();
+  _mockStarmapData = makeStarmapData('张三', ['我喜欢篮球']);
+  D.open('entity', '张三', { side: 'right', title: '张三' });
+  // fetcher 被调用，Promise 未 resolve 前应显示加载中
+  assert(bodyEl._html.includes('加载中'), 'fetcher 路径下 body 应立即显示加载中，实际: ' + bodyEl._html);
+  D.close();
+});
+
+test('entity 抽屉 close 后焦点还给 sourceEl（星图 canvas）', () => {
+  resetState();
+  const canvas = makeEl('canvas');
+  _elements.graphEl = canvas;
+  document._activeElement = null;
+  D.open('entity', '张三', { sourceEl: canvas, side: 'right', title: '张三', data: { name: '张三', category: 'person', memCount: 0, mentions: 0, memories: [] } });
+  assert(document._activeElement !== canvas, '打开时焦点应离开 canvas');
+  D.close();
+  assert(document._activeElement === canvas, '关闭后焦点应还给 canvas（星图）');
+});
+
+test('entity Esc 关闭抽屉（星图不关闭）', () => {
+  resetState();
+  D.open('entity', '张三', { side: 'right', title: '张三', data: { name: '张三', category: 'person', memCount: 0, mentions: 0, memories: [] } });
+  assert.strictEqual(D.isOpen(), true);
+  document.dispatchEvent({ type: 'keydown', key: 'Escape', _capture: true, preventDefault: () => {}, stopPropagation: () => {} });
+  assert.strictEqual(D.isOpen(), false, 'Esc 后抽屉应关闭');
+  assert.strictEqual(D.stackSize(), 0, 'Esc 后栈应清空');
+  assert.strictEqual(global.location.hash, '', 'Esc 后 hash 应清空');
+});
+
+/* ══════════════════════════════════════════════════════════
+   C2-C: stockDetail K 线图 Tab
+   ══════════════════════════════════════════════════════════
+   fetcher 走 /api/kline 同时返回 bars + indicators；render 同步返回
+   <canvas id="drwKlineCanvas"> 占位 HTML，再用 setTimeout(0) 后置调
+   Charts.drawKline 一次性重画（不入 gatedLoop、不新增 rAF 链）。
+
+   测试策略：index.html IIFE 里的 renderStockDetail 无法直接 require，
+   按 C2-C2 同一纪律内联复制一份等价 render（HTML 结构逐字一致），
+   验证 Drawer.push 后的 body HTML 契约：
+     - 含 #drwKlineCanvas 元素（width=440 height=260）
+     - 含 K 线图例（涨/跌/MA5/MA10/MA20/量 + A股红涨绿跌 note）
+     - 图例色块类名 kl-sw-up/kl-sw-dn/kl-ln5/kl-ln10/kl-ln20/kl-sw-vol
+     - fetcher 返回的 bars 数组形状正确
+     - fetcher 失败/未 ok 时 render 返回错误提示（不崩溃）
+*/
+
+console.log('\n── C2-C stockDetail K 线图 Tab ──');
+
+/* 内联 copy：与 index.html §6 IIFE 里的 renderStockDetail 逐字一致
+   （除 esc/num/pct 复用上方 _escForTest 与内联 num/pct 助手） */
+const _pctForTest = v => (v == null || isNaN(v)) ? '—' : (v >= 0 ? '+' : '') + (+v).toFixed(2) + '%';
+const _numForTest = v => (v == null || isNaN(v)) ? '—' : String(+v);
+
+function fetchStockDetail(code){
+  return fetch('/api/kline?code=' + encodeURIComponent(code) + '&period=day&limit=60')
+    .then(r => r.json())
+    .catch(() => null);
+}
+
+function renderStockDetail(data){
+  if (!data || !data.ok) {
+    const err = (data && data.error) ? _escForTest(data.error) : '数据暂不可用';
+    return '<div class="drw-error">' + err + '</div>';
+  }
+  const ind = data.indicators || {};
+  const bars = Array.isArray(data.bars) ? data.bars : [];
+  let h = '<div class="drw-sec">';
+  h += '<div class="drw-title">' + _escForTest(data.name || data.code) + '</div>';
+  h += '<div class="drw-sub">' + _escForTest(data.code) + '　·　' + _escForTest(data.source || '') + '</div>';
+  h += '</div>';
+
+  h += '<div class="drw-grid">';
+  h += '<div class="drw-kv"><span class="k">最新收盘</span><span class="v">' + _numForTest(ind.latest_close) + '</span></div>';
+  h += '<div class="drw-kv"><span class="k">区间涨跌</span><span class="v">' + _pctForTest(ind.period_change_pct) + '</span></div>';
+  h += '<div class="drw-kv"><span class="k">区间高</span><span class="v">' + _numForTest(ind.period_high) + '</span></div>';
+  h += '<div class="drw-kv"><span class="k">区间低</span><span class="v">' + _numForTest(ind.period_low) + '</span></div>';
+  h += '<div class="drw-kv"><span class="k">MA5</span><span class="v">' + _numForTest(ind.ma5) + '</span></div>';
+  h += '<div class="drw-kv"><span class="k">MA10</span><span class="v">' + _numForTest(ind.ma10) + '</span></div>';
+  h += '<div class="drw-kv"><span class="k">MA20</span><span class="v">' + _numForTest(ind.ma20) + '</span></div>';
+  h += '<div class="drw-kv"><span class="k">年化波动</span><span class="v">' + (ind.annualized_volatility_pct != null ? ind.annualized_volatility_pct + '%' : '—') + '</span></div>';
+  h += '</div>';
+
+  /* K 线图区域 —— C2-C 契约核心：canvas + 图例 */
+  h += '<div class="drw-kline">';
+  h += '<div class="drw-kline-title">60 日 K 线　·　红涨绿跌</div>';
+  h += '<canvas id="drwKlineCanvas" width="440" height="260"></canvas>';
+  h += '<div class="drw-kline-legend">';
+  h += '<span class="kl-key"><span class="kl-sw kl-sw-up"></span>涨</span>';
+  h += '<span class="kl-key"><span class="kl-sw kl-sw-dn"></span>跌</span>';
+  h += '<span class="kl-key"><span class="kl-ln kl-ln5"></span>MA5</span>';
+  h += '<span class="kl-key"><span class="kl-ln kl-ln10"></span>MA10</span>';
+  h += '<span class="kl-key"><span class="kl-ln kl-ln20"></span>MA20</span>';
+  h += '<span class="kl-key"><span class="kl-sw kl-sw-vol"></span>量</span>';
+  h += '<span class="kl-note">A股红涨绿跌</span>';
+  h += '</div>';
+  h += '</div>';
+
+  /* setTimeout(0) 后置绘制（测试中 window.Charts 不存在，setTimeout 会同步执行
+     但立即被 !window.Charts 守卫短路，不影响 HTML 契约测试） */
+  setTimeout(function(){
+    var C = window.Charts;
+    if(!C || typeof C.drawKline !== 'function') return;
+    var cv = document.getElementById('drwKlineCanvas');
+    if(!cv) return;
+    var res = C.drawKline(cv, bars, {});
+    if(res && typeof C.bindHover === 'function'){ C.bindHover(cv, res); }
+  }, 0);
+
+  if (ind.position_in_range_pct != null) {
+    h += '<div class="drw-bar-wrap">';
+    h += '<div class="drw-rtitle">当前价在区间中的位置</div>';
+    h += '<div class="drw-bar"><div class="drw-bar-fill" style="width:' + Math.max(0, Math.min(100, ind.position_in_range_pct)) + '%"></div></div>';
+    h += '</div>';
+  }
+
+  if (data.bars && data.bars.length) {
+    h += '<div class="drw-reasons">';
+    h += '<div class="drw-rtitle">最近 ' + Math.min(5, data.bars.length) + ' 根日线</div>';
+    h += '<ul>';
+    data.bars.slice(-5).reverse().forEach(b => {
+      const d = b.date || b.bar_time || '';
+      const chg = b.open ? ((b.close - b.open) / b.open * 100) : null;
+      h += '<li>' + _escForTest(String(d)) + '　开 ' + _numForTest(b.open) + '　收 ' + _numForTest(b.close) +
+           '　(' + _pctForTest(chg) + ')</li>';
+    });
+    h += '</ul>';
+    h += '</div>';
+  }
+
+  h += '<div class="drw-time">周期：' + _escForTest(data.period || '') + '　·　来源：' + _escForTest(data.source || '') + '</div>';
+
+  h += '<div class="drw-actions">';
+  h += '<button class="drw-ask" data-code="' + _escForTest(data.code || '') + '" data-name="' + _escForTest(data.name || data.code || '') + '">问 AI</button>';
+  h += '</div>';
+  return h;
+}
+
+/* 构造 /api/kline 的响应 mock */
+function makeKlineData(code, name){
+  const bars = [];
+  let base = 100;
+  for(let i = 0; i < 60; i++){
+    const open = base;
+    const close = base + (i % 5 === 0 ? -1.2 : 0.8);
+    const high = Math.max(open, close) + 0.5;
+    const low = Math.min(open, close) - 0.5;
+    bars.push({
+      date: '2026-' + String((i % 12) + 1).padStart(2, '0') + '-' + String((i % 28) + 1).padStart(2, '0'),
+      open: open, high: high, low: low, close: close,
+      volume: 1e8 + i * 1e6
+    });
+    base = close;
+  }
+  return {
+    ok: true,
+    code: code,
+    name: name,
+    period: 'day',
+    adjust: 'forward',
+    source: '腾讯财经',
+    days: bars.length,
+    indicators: {
+      latest_close: bars[bars.length - 1].close,
+      period_change_pct: 8.5,
+      period_high: 120,
+      period_low: 95,
+      ma5: 105.2,
+      ma10: 103.8,
+      ma20: 102.1,
+      annualized_volatility_pct: 22.5,
+      position_in_range_pct: 65,
+      volatility: 0.032,
+    },
+    bars: bars,
+  };
+}
+
+/* 注册 stockDetail 类型（与 index.html IIFE 一致） */
+D.register('stockDetail', {
+  fetcher: fetchStockDetail,
+  render: renderStockDetail,
+  title: '个股详情',
+});
+
+test('stockDetail 类型注册后可 open，isOpen=true', () => {
+  resetState();
+  D.open('stockDetail', '600519', { side: 'right', data: makeKlineData('600519', '贵州茅台') });
+  assert.strictEqual(D.isOpen(), true);
+});
+
+test('stockDetail render 返回的 HTML 含 #drwKlineCanvas', () => {
+  resetState();
+  D.open('stockDetail', '600519', { side: 'right', data: makeKlineData('600519', '贵州茅台') });
+  assert(bodyEl._html.includes('id="drwKlineCanvas"'),
+    'HTML 应含 #drwKlineCanvas 元素，实际片段: ' + bodyEl._html.slice(bodyEl._html.indexOf('drw-kline') || 0, (bodyEl._html.indexOf('drw-kline') || 0) + 250));
+  assert(bodyEl._html.includes('<canvas'), 'HTML 应含 canvas 标签');
+  assert(bodyEl._html.includes('width="440"'), 'canvas width 应为 440');
+  assert(bodyEl._html.includes('height="260"'), 'canvas height 应为 260');
+  D.close();
+});
+
+test('stockDetail render 返回的 HTML 含 K 线图例（6 色块 + note）', () => {
+  resetState();
+  D.open('stockDetail', '600519', { side: 'right', data: makeKlineData('600519', '贵州茅台') });
+  const html = bodyEl._html;
+  // 图例容器
+  assert(html.includes('drw-kline-legend'), '应含 drw-kline-legend 容器');
+  // 涨/跌 色块
+  assert(html.includes('kl-sw-up'), '应含 kl-sw-up（涨 实心红）');
+  assert(html.includes('kl-sw-dn'), '应含 kl-sw-dn（跌 空心绿描边）');
+  assert(html.includes('>涨</span>'), '应含「涨」标签');
+  assert(html.includes('>跌</span>'), '应含「跌」标签');
+  // MA5/MA10/MA20 三色
+  assert(html.includes('kl-ln5'), '应含 kl-ln5（MA5 青）');
+  assert(html.includes('kl-ln10'), '应含 kl-ln10（MA10 金）');
+  assert(html.includes('kl-ln20'), '应含 kl-ln20（MA20 蓝）');
+  assert(html.includes('MA5'), '应含 MA5 标签');
+  assert(html.includes('MA10'), '应含 MA10 标签');
+  assert(html.includes('MA20'), '应含 MA20 标签');
+  // 量
+  assert(html.includes('kl-sw-vol'), '应含 kl-sw-vol（量 双色半透渐变）');
+  assert(html.includes('>量</span>'), '应含「量」标签');
+  // A股红涨绿跌 note
+  assert(html.includes('A股红涨绿跌'), '应含 A股红涨绿跌 note');
+  D.close();
+});
+
+test('K 线 canvas 元素存在（body 内完整闭合的 <canvas id="drwKlineCanvas">）', () => {
+  resetState();
+  D.open('stockDetail', '600519', { side: 'right', data: makeKlineData('600519', '贵州茅台') });
+  const m = bodyEl._html.match(/<canvas\s+id="drwKlineCanvas"\s+width="440"\s+height="260"\s*>\s*<\/canvas>/);
+  assert(m !== null,
+    'body HTML 应含完整闭合的 canvas 元素 <canvas id="drwKlineCanvas" width="440" height="260"></canvas>，实际: ' + bodyEl._html);
+  D.close();
+});
+
+test('stockDetail fetcher 返回 {ok, code, name, period, adjust, source, days, indicators, bars} 形状', async () => {
+  resetState();
+  const realFetch = global.fetch;
+  global.fetch = function(url){
+    if (typeof url === 'string' && url.startsWith('/api/kline')) {
+      const code = (url.match(/code=([^&]+)/) || [,'600519'])[1];
+      return Promise.resolve({ json: () => Promise.resolve(makeKlineData(decodeURIComponent(code), '贵州茅台')) });
+    }
+    if (url === '/api/starmap') {
+      return Promise.resolve({ json: () => Promise.resolve(_mockStarmapData) });
+    }
+    return Promise.reject(new Error('unexpected fetch: ' + url));
+  };
+  const data = await fetchStockDetail('600519');
+  global.fetch = realFetch;
+  assert(data && data.ok === true, 'ok 应为 true');
+  assert.strictEqual(data.code, '600519');
+  assert.strictEqual(data.name, '贵州茅台');
+  assert.strictEqual(data.period, 'day');
+  assert(Array.isArray(data.bars), 'bars 应为数组');
+  assert.strictEqual(data.bars.length, 60, 'bars 应有 60 条日线');
+  assert(data.bars[0].open != null && data.bars[0].close != null && data.bars[0].high != null && data.bars[0].low != null,
+    'bars 元素应含 open/high/low/close');
+  assert.strictEqual(typeof data.bars[0].volume, 'number', 'bars 元素应含 volume 数值');
+  assert(data.indicators && typeof data.indicators.ma5 === 'number', 'indicators 应含 ma5');
+  D.close();
+});
+
+test('stockDetail render 无 bars 时 canvas 与图例仍显示（空数据不崩溃）', () => {
+  resetState();
+  D.open('stockDetail', '600519', { side: 'right', data: {
+    ok: true, code: '600519', name: '贵州茅台', period: 'day', source: '腾讯财经',
+    days: 0, indicators: {}, bars: []
+  } });
+  assert(bodyEl._html.includes('id="drwKlineCanvas"'), '无 bars 时 canvas 元素仍应存在（drawKline 会在后置绘制时显示「暂无K线数据」）');
+  assert(bodyEl._html.includes('drw-kline-legend'), '无 bars 时图例仍应存在');
+  D.close();
+});
+
+test('stockDetail render data.ok=false 返回错误提示（不出现 canvas）', () => {
+  resetState();
+  D.open('stockDetail', '600519', { side: 'right', data: { ok: false, error: '网络错误' } });
+  assert(bodyEl._html.includes('drw-error'), '应含 drw-error 容器');
+  assert(bodyEl._html.includes('网络错误'), '应含错误消息');
+  assert(!bodyEl._html.includes('drwKlineCanvas'), '错误时不应出现 canvas');
+  assert(!bodyEl._html.includes('drw-kline-legend'), '错误时不应出现图例');
+  D.close();
+});
+
+test('stockDetail render data=null 返回"数据暂不可用"（不崩溃）', () => {
+  const html = renderStockDetail(null);
+  assert.strictEqual(html, '<div class="drw-error">数据暂不可用</div>',
+    'renderStockDetail(null) 应返回错误提示 HTML，实际: ' + html);
+});
+
+test('stockDetail 走 Drawer.push 下钻路径（L1→L2 stockDetail）', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  const ok = D.push('stockDetail', '600519', { data: makeKlineData('600519', '贵州茅台') });
+  assert.strictEqual(ok, true, 'push 应返回 true');
+  assert.strictEqual(D.stackSize(), 2, 'push 后栈应为 2');
+  assert(bodyEl._html.includes('id="drwKlineCanvas"'), 'L2 body 应含 K 线 canvas');
+  assert(bodyEl._html.includes('贵州茅台'), 'L2 body 应含股票名');
+  assert.strictEqual(D.pop(), true);
+  assert(bodyEl._html.includes('LEADER-'), 'pop 后应回到 L1 内容');
+});
+
 /* ── 结果 ── */
 console.log('\n═══════════════════════════════════════');
 console.log('通过: ' + pass + ' | 失败: ' + fail);

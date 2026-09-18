@@ -1,3 +1,66 @@
+## Phase 39：C2-C1 图表 Tab + C2-C2 星图实体 3D Tab——设计系统 C2 五连收官
+
+### 一、范围
+DESIGN.md §13 剩余 P1 任务两项并行交付：
+- **C2-C1**：stockDetail 抽屉 L2 个股详情页集成 K 线图表（复用 C3-C 的 `drawKline` + `/api/kline`）
+- **C2-C2**：星图实体点击 → 抽屉 3D Tab（`ui/app.js` 点击处理 + entity 类型注册）
+
+### 二、交付明细
+
+**C2-C1 图表 Tab（stockDetail K 线图）**
+- `ui/index.html` `renderStockDetail` 重写：指标网格后新增 K 线图区域（`<canvas id="drwKlineCanvas" width="440" height="260">` + 6 色块图例 + A 股红涨绿跌注释）
+- 数据流：fetcher 一次 `/api/kline` 返回 `{ok, bars, indicators}`，render 直接用 `data.bars`（不二次 fetch）
+- 后置绘制：`setTimeout(0)` 拿 DOM 引用后调 `Charts.drawKline(cv, bars, {})`，再 `bindHover` 挂 tooltip
+- 守卫：`!window.Charts || !cv` 静默跳过（抽屉已关闭或被替换的场景安全）
+- CSS 新增 `.drw-kline`/`.drw-kline-title`/`#drwKlineCanvas`/`.drw-kline-legend` + 全套 `.kl-*` 色块（涨=`--rd`、跌=`--gn` 空心 `--panel` 底 + `--gn` 描边、MA5=`--cy`、MA10=`--gd`、MA20=`--info`、量柱=红/绿 `color-mix` 50% 半透渐变），全部走 CSS 变量
+- 75 项单测全绿（新增 14 项 stockDetail K 线图覆盖）
+
+**C2-C2 星图实体 → 抽屉 3D Tab**
+- `ui/app.js` 修改 `graphEl` 点击处理器：`hit.kind === 'entity' && hit.memId == null` 时调用 `Drawer.open('entity', hit.entity, { side: 'right', title: hit.entity, sourceEl: graphEl })`，关闭后焦点还焦到星图 canvas
+- 记忆节点点击（`hit.memId != null`）走原有 `showMemoryCard` 路径不受影响
+- `ui/index.html` 追加 entity 注册 IIFE：
+  - fetcher：调用 `/api/starmap` 按 name 查找实体，`filter(m => m.entity === entityName)` 提取该实体所有记忆
+  - render：`.drw-sec`（实体名+类别中文 person→人物/place→地点/event→事件/interest→兴趣/project→项目+#ID）+ `.drw-grid`（关联记忆条数+提及次数）+ `.drw-reasons`（记忆列表最多 20 条含 decay 中文标签 fresh→新鲜/normal→正常/fading→正在变淡+天数，超出 20 条显示"还有 X 条未显示"）+ `.drw-actions`（"问 AI"按钮）
+  - 所有用户内容经 `esc()` 转义防 XSS
+- 75 项单测全绿（新增 9 项 entity 覆盖——注册后 open/hash 格式/fetcher 数据形状/fetcher 找不到实体/空记忆安全/render 含实体名+类别+记忆列表/空 memories 安全/超 20 条截断/XSS 转义/关闭后还焦星图/Esc 不关星图）
+
+### 三、测试结果
+
+| 套件 | 项数 | 结果 |
+|------|------|------|
+| `src/jarvis-drawer.test.js` | 75 | 全绿 |
+| `src/jarvis-charts.test.js` | 68 | 全绿 |
+| `src/jarvis-minkline.test.js` | 12 | 全绿 |
+| `scripts/verify-drawer.js` CDP | 44 断言 | 全绿 |
+| `scripts/verify-charts.js` CDP | 12 断言 | 全绿 |
+
+### 四、C2 系列总结（DESIGN.md §13 C2 五连收官）
+
+| ID | 任务 | 状态 |
+|----|------|------|
+| C2-A | 抽屉基础层 | ✅ |
+| C2-B | L2 下钻带返回 | ✅ |
+| C2-C1 | 图表 Tab（stockDetail K 线图） | ✅ |
+| C2-C2 | 星图实体 → 抽屉 3D Tab | ✅ |
+| C2-D | 小屏 <1400px 底部全屏上滑 | ✅ |
+
+**暂缓**：左栏从左滑出（CSS 已预留 `.from-left`，独立轮次）
+
+### 五、教训
+
+1. **后置绘制必须用 `setTimeout(0)`**：Drawer 的 `_renderBody` 用 `_bodyEl.innerHTML = entry.render(data)` 全替换 body，render 返回时 canvas 尚未入 DOM，无法立刻 `getContext`。`setTimeout(0)` 让绘制延到下一帧。测试环境 `setTimeout` 被 stub 为同步执行，不影响 HTML 契约测试。
+2. **星图 Esc 与抽屉 Esc 不冲突**：抽屉的 Esc 处理器在 keydown capture 阶段拦截（`document.addEventListener('keydown', ..., true)`），星图的 Esc 处理器（`app.js:1482`）在冒泡阶段不会触发，关闭抽屉不关闭星图。
+3. **entity render 的"问 AI"按钮 `data-code` 为空**：走 drawer.js 的事件委托（填对话框 + 关闭），`data-name` 为实体名，用户可以直接问 AI 关于该实体的问题。
+
+### 六、遗留（不在本轮）
+
+- C1 rAF 链重构 ≤3（架构变更，需单独评审）
+- §5-2 个股 K 线（需个股数据抓取链路）
+- §5-4 实时流面积图/TAPE（需流式端点基建）
+- 左栏从左滑出（CSS 已预留 `.from-left`）
+
+---
+
 ## Phase 38：C2-D 小屏上滑 + C2-B L2 下钻 + C3-C 大盘 K 线——设计系统 C2/C3 三连收官
 
 ### 一、范围
