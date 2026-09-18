@@ -480,6 +480,235 @@
     return { hit: hit, tooltip: tooltip, bars: bars };
   }
 
+  /* ═══ §5 大盘 K 线图（C3-C）═══
+   * 输入 bars: [{ date, open, close, high, low, volume }, ...]（按 date 升序）
+   * opts: { volRatio?: number } 成交量区占 plotH 的比例，默认 0.25（§5 底部 25%）
+   *
+   * 编码（§1.1 双通道 + A 股红涨绿跌）：
+   *   - 色相通道：close>open → --rd 红；close<open → --gn 绿（A 股口径，与美股相反）
+   *   - 形状通道：涨=实心实体、跌=空心实体（色盲备援，不依赖色相判涨跌）
+   *   - 位置通道：影线贯穿 high/low，实体上下由 open/close 决定
+   *   - 均线：MA5 --cy 青 / MA10 --gd 金 / MA20 --info 蓝，三色相分离
+   *   - 成交量：底部 25% 区域柱状，颜色随当日涨跌同色、透明度 0.5（不与价格抢位）
+   *
+   * Hover tooltip 整句（§5 通用条款 role=status）：
+   *   「2026-09-18 开3892.0 高3920.0 低3889.0 收3911.9 · +0.51% · 量4.86亿」
+   *
+   * 纪律：纯 canvas 绘制、不建任何 DOM（tooltip 由共享 bindHover 负责）；
+   * 数据到位一次性重画，不入 AnimGate.gatedLoop、不新增 rAF 链。 */
+  function drawKline(canvas, bars, opts){
+    opts = opts || {};
+    const num = function(v){ return (typeof v === 'number' && isFinite(v)) ? v : null; };
+    const EMPTY = '暂无K线数据';
+    const fallback = { hit: function(){ return null; },
+                       tooltip: function(){ return EMPTY; }, bars: [], mas: [], layout: null };
+    const empty = function(ctx, w, h){
+      drawText(ctx, EMPTY, w / 2, h / 2,
+        { align: 'center', font: 11, fill: css('--faint') || '#8ba0b8' });
+      return fallback;
+    };
+
+    const R = resizeCanvas(canvas);
+    if(!R) return null;
+    const { ctx, w, h } = R;
+    ctx.clearRect(0, 0, w, h);
+
+    if(!bars || !bars.length) return empty(ctx, w, h);
+
+    /* 颜色：A 股红涨绿跌（--rd 涨 / --gn 跌），全部走 :root CSS 变量 */
+    const upColor   = css('--rd') || '#F0485E';
+    const downColor = css('--gn') || '#089981';
+    const maSpec = [
+      { k: 5,  c: css('--cy')   || '#3FD0FF' },
+      { k: 10, c: css('--gd')   || '#F2B23E' },
+      { k: 20, c: css('--info') || '#4F8CFF' },
+    ];
+
+    /* 布局：右留 48px 放价格刻度，下留 16px 放日期；
+     * 价格区占上 75%，成交量区占底部 25%，中间 4px 呼吸 */
+    const padTop = 8, padBottom = 16, padLeft = 6, padRight = 48;
+    const plotW = w - padLeft - padRight;
+    const plotH = h - padTop - padBottom;
+    if(plotW <= 12 || plotH <= 28) return empty(ctx, w, h);
+
+    const volRatio = (typeof opts.volRatio === 'number')
+      ? Math.max(0.1, Math.min(0.4, opts.volRatio)) : 0.25;
+    const paneGap = 4;
+    const volH = Math.max(6, plotH * volRatio);
+    const priceH = Math.max(6, plotH - volH - paneGap);
+    const priceTop = padTop;
+    const volTop = padTop + priceH + paneGap;
+
+    const n = bars.length;
+    /* 价格量程：取 high/low 极值，全缺时用 close/open 兜底 */
+    let minL = Infinity, maxH = -Infinity, maxVol = 0;
+    for(let i = 0; i < n; i++){
+      const lo = num(bars[i].low), hi = num(bars[i].high);
+      if(lo != null && lo < minL) minL = lo;
+      if(hi != null && hi > maxH) maxH = hi;
+      const v = num(bars[i].volume);
+      if(v != null && v > maxVol) maxVol = v;
+    }
+    if(!isFinite(minL) || !isFinite(maxH)){
+      for(let i = 0; i < n; i++){
+        for(let f = 0; f < 2; f++){
+          const x2 = num(f === 0 ? bars[i].open : bars[i].close);
+          if(x2 == null) continue;
+          if(x2 < minL) minL = x2;
+          if(x2 > maxH) maxH = x2;
+        }
+      }
+    }
+    if(!isFinite(minL) || !isFinite(maxH)) return empty(ctx, w, h);
+
+    const span = (maxH - minL) || Math.abs(maxH) * 0.02 || 1;
+    const minP = minL - span * 0.05, maxP = maxH + span * 0.05;
+
+    const slotW = plotW / n;
+    const candleW = Math.max(1, Math.min(11, slotW * 0.62));
+    const cx = function(i){ return padLeft + (i + 0.5) * slotW; };
+    const py = function(v){ return priceTop + priceH - (v - minP) / (maxP - minP || 1) * priceH; };
+    const fmtPrice = function(v){
+      if(v == null || !isFinite(v)) return '—';
+      const a = Math.abs(v);
+      return a >= 10 ? v.toFixed(1) : a >= 1 ? v.toFixed(2) : v.toFixed(3);
+    };
+
+    /* ── 背景：价格区横向网格 + 双区边框 + 右轴价格刻度 ── */
+    const yTicks = [];
+    const NT = 4;
+    for(let t = 0; t <= NT; t++){
+      const v = minP + (maxP - minP) * t / NT;
+      yTicks.push({ y: py(v), label: fmtPrice(v) });
+    }
+    ctx.save();
+    ctx.strokeStyle = css('--line') || 'rgba(140,175,225,.20)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    yTicks.forEach(function(t){
+      const y = Math.round(t.y) + 0.5;
+      ctx.moveTo(padLeft, y);
+      ctx.lineTo(padLeft + plotW, y);
+    });
+    ctx.stroke();
+    ctx.beginPath();
+    const pTop = Math.round(priceTop) + 0.5, pBot = Math.round(priceTop + priceH) + 0.5;
+    const vTop = Math.round(volTop) + 0.5, vBot = Math.round(volTop + volH) + 0.5;
+    ctx.moveTo(padLeft, pTop); ctx.lineTo(padLeft, pBot); ctx.lineTo(padLeft + plotW, pBot);
+    ctx.moveTo(padLeft, vTop); ctx.lineTo(padLeft, vBot); ctx.lineTo(padLeft + plotW, vBot);
+    ctx.stroke();
+    ctx.restore();
+    yTicks.forEach(function(t){
+      drawText(ctx, t.label, padLeft + plotW + 4, t.y + 3,
+        { align: 'left', font: 9, fill: css('--faint') || '#8ba0b8' });
+    });
+
+    /* ── 蜡烛（涨=实心 --rd / 跌=空心 --gn）+ 底部成交量柱 ── */
+    const rects = [];
+    for(let i = 0; i < n; i++){
+      const b = bars[i];
+      const o = num(b.open), c = num(b.close), hi = num(b.high), lo = num(b.low);
+      const ref = c != null ? c : (o != null ? o : (hi != null ? hi : lo));
+      const bodyHi = Math.max(o == null ? ref : o, c == null ? ref : c);
+      const bodyLo = Math.min(o == null ? ref : o, c == null ? ref : c);
+      const wickHi = hi != null ? hi : bodyHi;
+      const wickLo = lo != null ? lo : bodyLo;
+      const up = (c != null && o != null) ? c > o : false;
+      const x = cx(i);
+      /* 注意 drawCandle 第 8 参是遗留的 down 标志（未使用），必须显式传 !up，
+       * 否则 upFill/downFill 会整体错位一位、涨柱被当成 --gn 画 */
+      drawCandle(ctx, x, py(bodyHi), py(bodyLo), py(wickHi), py(wickLo), candleW, up, !up, upColor, downColor);
+
+      let volRect = null;
+      const vol = num(b.volume);
+      if(vol != null && vol > 0 && maxVol > 0){
+        const vh = Math.max(1, vol / maxVol * volH);
+        const vy = volTop + volH - vh;
+        const vf = up
+          ? colorLadder(1, [{ v: 0, c: upColor }, { v: 1, c: upColor }], 0.5)
+          : colorLadder(1, [{ v: 0, c: downColor }, { v: 1, c: downColor }], 0.5);
+        drawBar(ctx, x - candleW / 2, vy, Math.max(1, candleW), vh, vf);
+        volRect = { x: x - candleW / 2, y: vy, w: Math.max(1, candleW), h: vh };
+      }
+      rects.push({ i: i, x: x, d: b, up: up, fill: up ? upColor : downColor,
+                   bodyTop: py(bodyHi), bodyBot: py(bodyLo), vol: volRect });
+    }
+
+    /* ── 均线 MA5 / MA10 / MA20（三色相分离）── */
+    const mas = [];
+    for(let m = 0; m < maSpec.length; m++){
+      const spec = maSpec[m];
+      const pts = [];
+      for(let i = spec.k - 1; i < n; i++){
+        let sum = 0, ok = true;
+        for(let j = i - spec.k + 1; j <= i; j++){
+          const v = num(bars[j].close);
+          if(v == null){ ok = false; break; }
+          sum += v;
+        }
+        if(ok) pts.push({ x: cx(i), y: py(sum / spec.k) });
+      }
+      mas.push({ k: spec.k, color: spec.c, pts: pts });
+      if(pts.length < 2) continue;
+      ctx.save();
+      ctx.strokeStyle = spec.c;
+      ctx.lineWidth = 1;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for(let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    /* ── X 轴稀疏日期 label（起止 + 中点）── */
+    const fmtDay = function(s){
+      const m2 = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+      return m2 ? (m2[2] + '-' + m2[3]) : String(s || '').slice(0, 10);
+    };
+    [0, n > 8 ? Math.floor(n / 2) : 1, n - 1].forEach(function(i){
+      if(i < 0 || i >= n) return;
+      drawText(ctx, fmtDay(bars[i].date), cx(i), h - 4,
+        { align: 'center', font: 9, fill: css('--faint') || '#8ba0b8' });
+    });
+
+    /* Hit 检测：x 落在哪一根蜡烛的槽位（覆盖价格区 + 量区） */
+    function hit(hx, hy){
+      if(hx < padLeft || hx > padLeft + plotW) return null;
+      if(hy < padTop || hy > padTop + plotH) return null;
+      const idx = Math.floor((hx - padLeft) / slotW);
+      if(idx < 0 || idx >= n) return null;
+      return bars[idx];
+    }
+
+    /* 成交量人话化：≥1亿→亿、≥1万→万 */
+    function fmtVol(v){
+      if(v == null) return '—';
+      if(v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
+      if(v >= 1e4) return (v / 1e4).toFixed(1) + '万';
+      return String(Math.round(v));
+    }
+
+    /* Tooltip 整句（§5 通用条款）：开高低收 + 涨跌幅% + 量，全带单位 */
+    function tooltip(b){
+      const o = num(b.open), c = num(b.close), hi = num(b.high), lo = num(b.low);
+      const chg = (c != null && o != null && o !== 0) ? (c - o) / o * 100 : null;
+      const pct = chg == null ? '—' : (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+      return String(b.date || '').slice(0, 10)
+        + ' 开' + fmtPrice(o) + ' 高' + fmtPrice(hi) + ' 低' + fmtPrice(lo) + ' 收' + fmtPrice(c)
+        + ' · ' + pct + ' · 量' + fmtVol(num(b.volume));
+    }
+
+    return {
+      hit: hit, tooltip: tooltip, bars: rects, mas: mas,
+      layout: { padLeft: padLeft, padTop: padTop, padRight: padRight, padBottom: padBottom,
+                plotW: plotW, plotH: plotH, priceTop: priceTop, priceH: priceH,
+                volTop: volTop, volH: volH, slotW: slotW, candleW: candleW,
+                minP: minP, maxP: maxP, maxVol: maxVol },
+    };
+  }
+
   window.Charts = {
     css,
     resizeCanvas,
@@ -491,6 +720,7 @@
     drawCandle,
     drawSentimentHeatmap,
     drawDistribution,
+    drawKline,
     bindHover,
     /* 供测试用 */
     _hexToRgb: hexToRgb,

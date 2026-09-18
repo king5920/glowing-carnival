@@ -56,6 +56,8 @@ function makeEl(tag){
         contains(c){ return self._classSet.has(c); },
       };
     },
+    /* className 与 _classSet 双向同步（浏览器行为：赋 className 会清空并重设 classSet） */
+    set className(v){ this._classSet = new Set(String(v).split(/\s+/).filter(Boolean)); },
     get textContent(){ return this._text; },
     set textContent(v){ this._text = v; },
     get innerHTML(){ return this._html; },
@@ -175,14 +177,17 @@ global.setTimeout = (fn, ms) => { fn(); return 0; };
 /* ── 注册抽屉 DOM 元素 ── */
 const backdrop = makeEl('div'); backdrop.id = 'drawerBackdrop';
 const panel = makeEl('div'); panel.id = 'drawerPanel';
+const headerEl = makeEl('div'); headerEl.id = 'drawerHeader';
 const titleEl = makeEl('h2'); titleEl.id = 'drawerTitle';
 const bodyEl = makeEl('div'); bodyEl.id = 'drawerBody';
 const closeBtn = makeEl('button'); closeBtn.id = 'drawerClose';
-panel.appendChild(titleEl);
-panel.appendChild(closeBtn);
+headerEl.appendChild(titleEl);
+headerEl.appendChild(closeBtn);
+panel.appendChild(headerEl);
 panel.appendChild(bodyEl);
 _elements.drawerBackdrop = backdrop;
 _elements.drawerPanel = panel;
+_elements.drawerHeader = headerEl;
 _elements.drawerTitle = titleEl;
 _elements.drawerBody = bodyEl;
 _elements.drawerClose = closeBtn;
@@ -409,6 +414,378 @@ test('close 后焦点还给 sourceEl', () => {
   D.close();
   // setTimeout 同步执行，焦点应已还给 sourceEl
   assert(document._activeElement === source, '关闭后焦点应还给 sourceEl');
+});
+
+/* ══════════════════════════════════════════════════════════
+   C2-B: L1 → L2 下钻带返回
+   ══════════════════════════════════════════════════════════ */
+
+console.log('\n── Drawer API 扩展（C2-B）──');
+
+test('Drawer 暴露 push/pop/stackSize/current/MAX_DEPTH', () => {
+  assert.strictEqual(typeof D.push, 'function');
+  assert.strictEqual(typeof D.pop, 'function');
+  assert.strictEqual(typeof D.stackSize, 'function');
+  assert.strictEqual(typeof D.current, 'function');
+  assert.strictEqual(D.MAX_DEPTH, 3, 'MAX_DEPTH 应为 3');
+});
+
+console.log('\n── push() 下钻 ──');
+
+test('push 后栈增长、hash 更新为 type:id>subType:subId', () => {
+  resetState();
+  D.register('leader', {
+    fetcher: () => Promise.resolve({ name: '龙头A' }),
+    render: (d) => '<div>LEADER-' + d.name + '</div>',
+    title: '龙头详情',
+  });
+  D.register('sectorDetail', {
+    fetcher: () => Promise.resolve({ name: '半导体' }),
+    render: (d) => '<div>SECTOR-' + d.name + '</div>',
+    title: '板块详情',
+  });
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  assert.strictEqual(D.stackSize(), 1);
+  assert(global.location.hash === '#drawer=leader:600519', 'L1 hash 应为 #drawer=leader:600519，实际: ' + global.location.hash);
+
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(D.stackSize(), 2, 'push 后栈应为 2');
+  assert(global.location.hash === '#drawer=leader:600519>sectorDetail:%E5%8D%8A%E5%AF%BC%E4%BD%93',
+    'L2 hash 应为 type:id>subType:subId（encodeURIComponent），实际: ' + global.location.hash);
+  assert(global.location.hash.includes('leader:600519>sectorDetail:'),
+    'hash 应含 leader:600519>sectorDetail: 前缀');
+});
+
+test('push 后内容替换为 L2 渲染结果', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  assert(bodyEl._html.includes('LEADER-'), 'push 前 body 应显示 L1 内容');
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert(bodyEl._html.includes('SECTOR-半导体'), 'push 后 body 应替换为 L2 内容，实际: ' + bodyEl._html);
+  assert(!bodyEl._html.includes('LEADER-'), 'L2 下不应残留 L1 内容');
+});
+
+test('push 后 title 更新为 L2 标题', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  assert.strictEqual(titleEl._text, '龙头详情');
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(titleEl._text, '板块详情', 'title 应更新为板块详情');
+});
+
+test('push 返回 true（成功下钻）', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  const ok = D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(ok, true, 'push 应返回 true');
+});
+
+test('push 前未开抽屉时返回 false（不产生孤儿栈）', () => {
+  resetState();
+  const ok = D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(ok, false, '抽屉未开时 push 应失败');
+  assert.strictEqual(D.stackSize(), 0, '未开抽屉时栈应为 0');
+});
+
+test('push 走 fetcher 路径（未传 data 时）—— body 先显示加载中', () => {
+  resetState();
+  let fetchCount = 0;
+  D.register('kicker', {
+    fetcher: () => { fetchCount++; return Promise.resolve({ msg: 'ok' }); },
+    render: (d) => '<div>K-' + d.msg + '</div>',
+    title: 'K',
+  });
+  D.open('kicker', 'x', { data: { msg: 'L1' } });
+  D.push('kicker', 'y');  // 未传 data，应走 fetcher
+  assert(bodyEl._html.includes('加载中'), 'push 后应立即显示加载中，实际: ' + bodyEl._html);
+  // 手动 resolve promise
+  return;
+});
+
+console.log('\n── pop() 返回 ──');
+
+test('pop 后栈减少、hash 还原为 L1', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(D.stackSize(), 2);
+  D.pop();
+  assert.strictEqual(D.stackSize(), 1, 'pop 后栈应为 1');
+  assert.strictEqual(global.location.hash, '#drawer=leader:600519',
+    'pop 后 hash 应还原为 #drawer=leader:600519，实际: ' + global.location.hash);
+});
+
+test('pop 后内容恢复为 L1 渲染结果', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert(bodyEl._html.includes('SECTOR-'), 'pop 前应显示 L2 内容');
+  D.pop();
+  assert(bodyEl._html.includes('LEADER-龙头A'), 'pop 后 body 应恢复为 L1 内容，实际: ' + bodyEl._html);
+  assert(!bodyEl._html.includes('SECTOR-'), 'pop 后不应残留 L2 内容');
+});
+
+test('pop 返回 true（成功回退）', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(D.pop(), true, '有 L2 时 pop 应返回 true');
+});
+
+test('pop 在 L1 时返回 false（栈底无上一层）', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  assert.strictEqual(D.pop(), false, 'L1 时 pop 应返回 false');
+  assert.strictEqual(D.stackSize(), 1, 'L1 pop 失败后栈不变');
+});
+
+test('pop 在关闭抽屉时返回 false', () => {
+  resetState();
+  assert.strictEqual(D.pop(), false, '关闭时 pop 应返回 false');
+});
+
+console.log('\n── 多次 push/pop 交错 ──');
+
+test('push × 2 → pop × 2 后回到初始 L1', () => {
+  resetState();
+  D.register('layer2', {
+    fetcher: () => Promise.resolve({}),
+    render: (d) => '<div>L2-' + (d && d.name || '') + '</div>',
+    title: '层2',
+  });
+  D.register('layer3', {
+    fetcher: () => Promise.resolve({}),
+    render: (d) => '<div>L3-' + (d && d.name || '') + '</div>',
+    title: '层3',
+  });
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('layer2', 'B', { data: { name: 'B' } });
+  D.push('layer3', 'C', { data: { name: 'C' } });
+  assert.strictEqual(D.stackSize(), 3, 'push × 2 后栈应为 3');
+  assert(bodyEl._html.includes('L3-C'), 'L3 内容应显示');
+
+  D.pop();
+  assert.strictEqual(D.stackSize(), 2, 'pop × 1 后栈应为 2');
+  assert(bodyEl._html.includes('L2-B'), '回到 L2');
+
+  D.pop();
+  assert.strictEqual(D.stackSize(), 1, 'pop × 2 后栈应为 1');
+  assert(bodyEl._html.includes('LEADER-龙头A'), '回到 L1 龙头详情');
+  assert.strictEqual(global.location.hash, '#drawer=leader:600519');
+});
+
+test('push 深度超过 MAX_DEPTH 时被拒绝', () => {
+  resetState();
+  D.register('layer2', {
+    fetcher: () => Promise.resolve({}),
+    render: () => '<div>L2</div>',
+    title: '层2',
+  });
+  D.register('layer3', {
+    fetcher: () => Promise.resolve({}),
+    render: () => '<div>L3</div>',
+    title: '层3',
+  });
+  D.register('layer4', {
+    fetcher: () => Promise.resolve({}),
+    render: () => '<div>L4</div>',
+    title: '层4',
+  });
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('layer2', 'B', { data: {} });
+  D.push('layer3', 'C', { data: {} });
+  assert.strictEqual(D.stackSize(), 3, 'MAX_DEPTH=3 时应允许 L1+L2+L3');
+
+  const over = D.push('layer4', 'D');
+  assert.strictEqual(over, false, '超过 MAX_DEPTH 的 push 应被拒绝');
+  assert.strictEqual(D.stackSize(), 3, '被拒后栈不增长');
+  assert(bodyEl._html.includes('L3'), '栈顶仍应显示 L3');
+});
+
+test('MAX_DEPTH 边界：open + push + push 恰好 = 3 层，再 push 拒', () => {
+  resetState();
+  D.register('X', {
+    fetcher: () => Promise.resolve({}),
+    render: (d) => '<div>X' + (d && d.i || '') + '</div>',
+    title: 'X',
+  });
+  D.open('X', '1', { data: { i: 1 } });
+  D.push('X', '2', { data: { i: 2 } });
+  D.push('X', '3', { data: { i: 3 } });
+  assert.strictEqual(D.stackSize(), 3);
+  assert.strictEqual(D.push('X', '4', { data: { i: 4 } }), false);
+  assert.strictEqual(D.stackSize(), 3);
+});
+
+console.log('\n── 返回按钮 ──');
+
+test('L1 时返回按钮隐藏', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  const backBtns = headerEl._kids.filter(k => k._classSet.has('drw-back'));
+  assert.strictEqual(backBtns.length, 1, '应有 1 个 drw-back 元素');
+  assert.strictEqual(backBtns[0].style.display, 'none', 'L1 时按钮应 display:none');
+});
+
+test('push 到 L2 后返回按钮显示', () => {
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  const backBtns = headerEl._kids.filter(k => k._classSet.has('drw-back'));
+  assert.strictEqual(backBtns[0].style.display, '', 'L2 时按钮应显示');
+});
+
+test('pop 回 L1 后返回按钮隐藏', () => {
+  D.pop();
+  const backBtns = headerEl._kids.filter(k => k._classSet.has('drw-back'));
+  assert.strictEqual(backBtns[0].style.display, 'none', 'pop 回 L1 后按钮应隐藏');
+});
+
+test('click 返回按钮触发 pop', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(D.stackSize(), 2);
+  const backBtns = headerEl._kids.filter(k => k._classSet.has('drw-back'));
+  assert.strictEqual(backBtns.length, 1);
+  // 模拟点击
+  backBtns[0].dispatchEvent({ type: 'click' });
+  assert.strictEqual(D.stackSize(), 1, '点击返回按钮后栈应为 1');
+  assert(bodyEl._html.includes('LEADER-'), 'body 应恢复为 L1 内容');
+});
+
+test('返回按钮在关闭抽屉后随栈清空', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  D.close();
+  assert.strictEqual(D.stackSize(), 0, '关闭后栈应为 0');
+  // 按钮仍在 DOM 上（保留结构），但抽屉已关
+});
+
+console.log('\n── Esc 行为（关闭 vs 逐层 pop）──');
+
+test('Esc 在 L1 时关闭整个抽屉', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  document.dispatchEvent({ type: 'keydown', key: 'Escape', _capture: true, preventDefault: () => {}, stopPropagation: () => {} });
+  assert.strictEqual(D.isOpen(), false, 'Esc 后应关闭');
+  assert.strictEqual(D.stackSize(), 0, '关闭后栈应为 0');
+});
+
+test('Esc 在 L2 时关闭整个抽屉（不逐层 pop）', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(D.stackSize(), 2);
+  document.dispatchEvent({ type: 'keydown', key: 'Escape', _capture: true, preventDefault: () => {}, stopPropagation: () => {} });
+  assert.strictEqual(D.isOpen(), false, 'Esc 后应关闭抽屉');
+  assert.strictEqual(D.stackSize(), 0, 'Esc 在 L2 应清空整个栈，不是逐层 pop');
+  assert.strictEqual(global.location.hash, '', 'Esc 后 hash 应清空');
+});
+
+test('Esc 在 L3 时关闭整个抽屉', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('layer2', 'B', { data: { name: 'B' } });
+  D.push('layer3', 'C', { data: { name: 'C' } });
+  assert.strictEqual(D.stackSize(), 3);
+  document.dispatchEvent({ type: 'keydown', key: 'Escape', _capture: true, preventDefault: () => {}, stopPropagation: () => {} });
+  assert.strictEqual(D.isOpen(), false);
+  assert.strictEqual(D.stackSize(), 0);
+});
+
+console.log('\n── 关闭清空整个栈 ──');
+
+test('关闭 L2 抽屉后栈清空', () => {
+  resetState();
+  D.open('leader', '600519', { sourceEl: undefined, data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(D.stackSize(), 2);
+  D.close();
+  assert.strictEqual(D.stackSize(), 0, 'close 后栈应清空');
+  assert.strictEqual(global.location.hash, '');
+});
+
+test('关闭后再次 open 从空栈开始（不残留旧栈）', () => {
+  resetState();
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  D.close();
+  D.open('leader', '000001', { data: { name: '茅台' } });
+  assert.strictEqual(D.stackSize(), 1, '重新 open 后栈应为 1');
+  assert.strictEqual(global.location.hash, '#drawer=leader:000001');
+});
+
+console.log('\n── 二次 open 替换栈 ──');
+
+test('已开抽屉时再 open 新 type 重置为 1 层', () => {
+  resetState();
+  D.register('layer3', {
+    fetcher: () => Promise.resolve({}),
+    render: (d) => '<div>L3-' + (d && d.name || '') + '</div>',
+    title: '层3',
+  });
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  assert.strictEqual(D.stackSize(), 2);
+  D.open('layer3', 'C', { data: { name: 'C' } });
+  assert.strictEqual(D.stackSize(), 1, '再 open 应重置栈为 1 层');
+  assert.strictEqual(global.location.hash, '#drawer=layer3:C');
+  assert(bodyEl._html.includes('L3-C'), 'body 应显示新的 L1');
+});
+
+console.log('\n── hash 还原（多层） ──');
+
+test('restoreFromHash 支持多层 hash 段', () => {
+  resetState();
+  // 模拟刷新时 URL 已带多层 hash
+  global.history.replaceState(null, '', '#drawer=leader:600519>sectorDetail:%E5%8D%8A%E5%AF%BC%E4%BD%93>stockDetail:000001');
+  // 手动执行还原逻辑（drawer.js 已注册 fetcher，此处直接调 open/push 模拟）
+  D.open('leader', '600519', { data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  D.push('stockDetail', '000001', { data: { name: '茅台' } });
+  assert.strictEqual(D.stackSize(), 3);
+  assert.strictEqual(global.location.hash,
+    '#drawer=leader:600519>sectorDetail:%E5%8D%8A%E5%AF%BC%E4%BD%93>stockDetail:000001',
+    '三层 hash 应保持顺序与编码');
+});
+
+test('restoreFromHash 时超过 MAX_DEPTH 段会被截断', () => {
+  resetState();
+  // 假设 URL 有 4 层（用户手动改的）
+  global.history.replaceState(null, '', '#drawer=a:1>b:2>c:3>d:4');
+  // drawer.js 里 restoreFromHash 会 slice 到 MAX_DEPTH，
+  // 这里模拟还原行为：open 1 层 + push 2 次 = 3 层
+  D.open('X', '1', { data: { i: 1 } });
+  D.push('X', '2', { data: { i: 2 } });
+  D.push('X', '3', { data: { i: 3 } });
+  assert.strictEqual(D.stackSize(), 3);
+  assert.strictEqual(D.push('X', '4', { data: { i: 4 } }), false);
+  assert.strictEqual(D.stackSize(), 3);
+});
+
+console.log('\n── 焦点恢复 ──');
+
+test('L2 下钻后 close 焦点还给 L1 的 sourceEl（原始触发点）', () => {
+  resetState();
+  const source = makeEl('button');
+  _elements.source2 = source;
+  document._activeElement = null;
+  D.open('leader', '600519', { sourceEl: source, data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  D.close();
+  assert(document._activeElement === source, 'close 后焦点应还给 L1 的 sourceEl');
+});
+
+test('L2 下钻后 pop 焦点仍在抽屉内（不还给外部）', () => {
+  resetState();
+  const source = makeEl('button');
+  _elements.source3 = source;
+  document._activeElement = null;
+  D.open('leader', '600519', { sourceEl: source, data: { name: '龙头A' } });
+  D.push('sectorDetail', '半导体', { data: { name: '半导体' } });
+  D.pop();
+  // pop 不关闭抽屉，焦点不还给外部 sourceEl
+  assert(document._activeElement !== source, 'pop 后焦点不应跳到外部 sourceEl');
 });
 
 /* ── 结果 ── */

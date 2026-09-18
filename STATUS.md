@@ -1,3 +1,81 @@
+## Phase 38：C2-D 小屏上滑 + C2-B L2 下钻 + C3-C 大盘 K 线——设计系统 C2/C3 三连收官
+
+### 一、范围
+DESIGN.md §13 剩余 P0 任务三项并行交付：
+- **C2-D**：小屏 <1400px 底部全屏上滑（CSS `@media(max-width:1400px)` 已在 C2-A 就位，本轮补验证 + 文档）
+- **C2-B**：抽屉 L2 下钻带返回（栈式导航 L0→L1→L2→L3，`MAX_DEPTH=3`）
+- **C3-C**：大盘 K 线图（`drawKline` Canvas 2D，A 股红涨绿跌，MA5/10/20 三色均线）
+
+### 二、交付明细
+
+**C2-D 小屏底部上滑**
+- CSS `@media(max-width:1400px)` 在 C2-A 中已就位：panel 从右侧滑入变为底部上滑（`top:auto;left:0;right:0;bottom:0;width:100%;height:min(70vh,560px);border-radius:16px 16px 0 0`）
+- `.from-left` 在同视口下亦统一为底部上滑
+- JS 零修改——`Drawer.open()` 的 `side` 参数仅控制 CSS 类名，底部上滑由纯 CSS 媒体查询驱动
+- CDP 断言 10（`scripts/verify-drawer.js:411-488`）：1300x800 视口 panel bottom=0 left=0 right=0 top=240px width=1300px height=560px 圆角 16px 16px 0 0 border left→top 关闭态 translateY(560) 打开态 translateY(0) panel 可见
+
+**C2-B L2 下钻带返回**
+- `ui/drawer.js` 重写为栈式导航：`_stack` 数组 + `_idx` 指针，`MAX_DEPTH=3`
+- 新增 API：`push(type, id, opts)` / `pop()` / `stackSize()` / `current()`
+- 动态创建 `.drw-back` 返回按钮（仅 `_stack.length > 1` 时可见，样式与 `#drawerClose` 一致）
+- Esc 关闭整个抽屉（不逐层 pop）
+- Hash 同步支持多层：`#drawer=type:id>subType:subId>subSubType:subSubId`（`encodeURIComponent` 处理中文）
+- fetcher 结果缓存到栈条目 `entry.data`，pop 回来不重抓
+- `ui/index.html` 注册 `sectorDetail`（板块详情）+ `stockDetail`（个股详情含 K 线指标）；leader 底部加"查看板块详情 →"按钮
+- CSS 新增 `.drw-back`/`.drw-drill`/`.drw-bar`/`.drw-kv .v.up/.v.down`（全走 CSS 变量，零硬编码 hex）
+- `src/jarvis-drawer.test.js` 从 22 项扩到 52 项（新增 30 项 push/pop/MAX_DEPTH/返回按钮/Esc/hash/焦点恢复）
+
+**C3-C 大盘 K 线图**
+- `ui/charts.js` 追加 `drawKline(canvas, bars, opts)`：复用 `drawCandle`+`drawAxis`+`drawText`+`colorLadder`+`bindHover` 基元
+- A 股红涨绿跌：`close>open` 用 `--rd`，`close<open` 用 `--gn`
+- MA5/MA10/MA20 三色均线（`--cy`/`--gd`/`--bl`）
+- 成交量柱（底部 25% 区域）
+- hover tooltip 整句中文：`「2026-09-18 开3892.0 高3920.0 低3889.0 收3911.9 量4.86亿」`
+- 图例：涨/跌/MA5/MA10/MA20/量 + "A股红涨绿跌"注释
+- 空数据兜底 + `data=null` 安全 + 数据不足 20 根时 MA20 空但 MA5 仍连续
+- `src/server.js` `GET /api/kline?code=&period=&limit=&days=&adjust=`：直接 `require('./tools/stock_kline')` 不经 `tools.call`（避免 4000 字符截断）；返回 `bars`+`indicators`+`days`
+- `src/tools/stock_kline.js` 追加 `fetchDailyBars(code, limit)` 便捷函数
+- `ui/index.html` `#klinebox` DOM 锚点（`#scanDistbox` 兄弟级）
+- `src/jarvis-charts.test.js` 从 50 项扩到 68 项（新增 18 项 drawKline 覆盖）
+- `scripts/verify-charts.js` 从双图 8 断言扩到三图 12 断言
+
+### 三、测试结果
+
+| 套件 | 项数 | 结果 |
+|------|------|------|
+| `src/jarvis-drawer.test.js` | 52 | 全绿 |
+| `src/jarvis-charts.test.js` | 68 | 全绿 |
+| `scripts/verify-drawer.js` CDP | 44 断言 | 全绿 |
+| `scripts/verify-charts.js` CDP | 12 断言 | 全绿 |
+| `scripts/run-tests.js` 全套 26 套件 | — | 全绿（checkup 连续跑崩溃但单独 19/19 过） |
+
+### 四、关键设计纪律
+
+1. **零外部依赖**：全部 Canvas 2D / 原生 DOM，未引 echarts/highcharts/d3
+2. **零硬编码 hex**：全走 CSS 变量（`--rd`/`--gn`/`--cy`/`--gd`/`--bl`/`--faint`/`--accent`/`--hairline`/`--up-text`/`--down-text`/`--txt`/`--dim`/`--warn`）
+3. **A 股红涨绿跌**：`close>open` 用 `--rd`（红），`close<open` 用 `--gn`（绿）——与西方惯例相反
+4. **数据到位一次性重画**：不入 `AnimGate.gatedLoop`，rAF 链数保持 6
+5. **`/api/kline` 直接 `require` 不经 `tools.call`**：后者截断到 4000 字符，会破坏 bars 数组
+6. **Esc 语义**：任何层级 Esc 整体关闭（不逐层 pop，避免用户卡在 L3）
+7. **`MAX_DEPTH=3`**：第 4 次 push 返回 `false`，不修改栈
+
+### 五、教训
+
+1. **两个 agent 并行改 server.js 会产生端点冲突**：C2-B 和 C3-C 都在 server.js 加了 `/api/kline`，C2-B 版本位置更早（行 502），实际路由命中它的版本，C3-C 版本成了死代码。解法：保留 C2-B 的完整版本（返回 `bars`+`indicators`+`days`），删除 C3-C 的（只返回 `bars`）。
+2. **`/api/kline` 不能走 `tools.call`**：`tools.call` 输出截断到 4000 字符，K 线 bars 数组轻松超 4000 字符（200 根蜡烛约 12KB），会被静默截断。必须直接 `require('./tools/stock_kline')`。
+3. **`minute_kline` 空表 ≠ K 线数据不可用**：DESIGN.md 原定 C3-C 因 `minute_kline` 表 0 行而阻塞，实际 `src/tools/stock_kline.js` 的 `kline()` 可从腾讯/新浪实时获取日线数据，完全可用。不要因一张空表放弃整个功能。
+
+### 六、遗留（不在本轮）
+
+- C2-C1 图表 Tab（需 K 线数据源，C3-C 已可用——独立轮次）
+- C2-C2 3D Tab（需在 starmap 聚焦单实体——独立轮次）
+- C1 rAF 链重构 ≤3（架构变更，需单独评审）
+- §5 第 4 项 实时流面积图/TAPE（需流式端点基建）
+- §5 第 2 项 个股 K 线（需个股数据抓取链路）
+- `.drw-drill` 用了 `rgba(242,178,62,.45)` 而非 `color-mix()`：沿用仓库现有惯例，后续可统一迁到 `color-mix`
+
+---
+
 ## Phase 37：TTS「不出声」真因——整段端点未定义 `text` 打崩进程（不是语音模块坏）
 
 ### 一、起因

@@ -487,6 +487,62 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  /* ── 个股/指数 K 线（L2 下钻 stockDetail 抽屉 + §5 大盘 K 线图 C3-C 共用）──
+   * 参数：
+   *   code    6 位数字，可选 sh/sz/bj 前缀或 .SH/.SZ 后缀；**省略时默认 000001（上证指数）**
+   *   period  默认 day（日/周/月/分钟级）
+   *   limit   默认 60，上限 300（L2 抽屉原有口径）
+   *   days    limit 的别名，§5 大盘 K 线用它；同时给了时以 days 为准，上限 250
+   *            （腾讯一次最多 ~280 根，留余量防呆）
+   *   adjust  默认 forward（前复权；指数腾讯不返回复权字段，fetchTencent 会回落到 day）
+   * 复用 tools/stock_kline.js，不新写抓取；同步 indicators 指标便于前端渲染。
+   * 直接 require，**不经过 tools.call**——tools.call 把结果截断到 4000 字符
+   * （为喂模型省 token），截断会破坏 bars 数组、让前端图表断柱。
+   * 只读、失败返回结构化 error（与 /api/closescan、/api/market_phase 同一纪律）。 */
+  if (url === '/api/kline' || url.startsWith('/api/kline?')) {
+    try {
+      const q = new URL(url, 'http://x').searchParams;
+      const kline = require('./tools/stock_kline');
+      const raw = (q.get('code') || '').trim();
+      /* 省略 → 上证指数（stock_kline 白名单已处理 000001=指数 ≠ 平安银行）；
+       * 传了但不合法 → 仍然报错，保留 L2 抽屉原有严格性，不静默改代码。 */
+      const code = raw
+        ? (/^[A-Za-z]{0,2}\d{6}(\.[A-Za-z]{2})?$/.test(raw) ? raw : null)
+        : '000001';
+      if (!code) return sendJson(res, 200, {
+        ok: false, error: 'code 必须是 6 位数字（可带 sh/sz/bj 前缀或 .SH/.SZ 后缀）'
+      });
+      const period = q.get('period') || 'day';
+      const daysRaw = parseInt(q.get('days'), 10);
+      const limit = Math.min(300, Math.max(5,
+        isFinite(daysRaw) && daysRaw > 0
+          ? Math.min(250, daysRaw)
+          : (parseInt(q.get('limit') || '60', 10) || 60)));
+      const adjust = q.get('adjust') || 'forward';
+      const r = await kline.kline(code, period, limit, adjust);
+      const bars = (r && Array.isArray(r.bars)) ? r.bars : [];
+      /* 腾讯对指数经常只给代码不给名字（j.data[pre+code].name 缺失），
+       * 面板标题就会显示"000001"而不是"上证指数"——用 INDEX_NAMES 兜住。 */
+      const bare = String(code).replace(/^[A-Za-z]{0,2}/, '').replace(/\.[A-Za-z]{2}$/, '');
+      const name = (r.name && r.name !== r.code)
+        ? r.name
+        : (kline.INDEX_NAMES[bare] || r.name || code);
+      return sendJson(res, 200, {
+        ok: true,
+        code: r.code || code,
+        name: name,
+        period: r.period || period,
+        adjust: r.adjust || adjust,
+        source: r.source,
+        days: bars.length,
+        indicators: kline.indicators(bars),
+        bars: bars,
+      });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: String(e.message || e) });
+    }
+  }
+
   /* 大盘状态：缠论生命阶段 + 散户崩溃冰点（面板卡片，绕开 tools.call 的4000字截断）。
      只读、带错误兜底，缺数据由 market_phase 自己返回 unknown，不编造。 */
   if (url === '/api/market_phase' || url.startsWith('/api/market_phase?')) {

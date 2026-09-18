@@ -78,6 +78,17 @@ function isIndexCode(code) {
   return Object.prototype.hasOwnProperty.call(INDEX_MARKET, String(code));
 }
 
+/* INDEX_MARKET 的中文名。腾讯 j.data[pre+code].name 对指数经常不返回
+ * （只给代码），面板标题就会显示"000001"而不是"上证指数"——与上面那个
+ * "000001=银行股"的 bug 同类：**错的身份比没有身份更危险**。
+ * key 与 INDEX_MARKET 一一对应，新增指数时两处一起加。 */
+const INDEX_NAMES = {
+  '000001': '上证指数', '000300': '沪深300', '000905': '中证500',
+  '000852': '中证1000', '000016': '上证50', '000688': '科创50',
+  '000010': '上证180', '399001': '深证成指', '399006': '创业板指',
+  '399005': '中小100', '399300': '沪深300', '399905': '中证500',
+};
+
 function txPrefix(code, forced) {
   if (!/^\d{6}$/.test(code)) return null;
   // 显式指定的市场优先级最高（调用方明确知道自己要什么）
@@ -480,6 +491,7 @@ module.exports = {
   kline, indicators,
   MINUTE_PERIODS,
   emSecid, thsCode,
+  INDEX_MARKET, INDEX_NAMES, isIndexCode,
   parseThsMinuteRows: (rows, period) => parseThsRows(rows, period),
   parseTencentMinuteRows,
 };

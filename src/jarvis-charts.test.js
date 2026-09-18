@@ -91,7 +91,13 @@ function makeCanvas(w, h){
     fillText(t, x, y){ calls.fillText.push({ t, x, y }); },
     rect(x, y, fw, fh){ calls.rect.push({ x, y, w: fw, h: fh }); },
     clip(){ calls.clip++; },
-    fillStyle: '', strokeStyle: '', lineWidth: 1,
+    /* 记录每次赋色——让"红涨绿跌""量柱 alpha"这类断言校验的是
+     * 真正写进 canvas 的颜色，而不是图表返回值里的元数据。 */
+    get fillStyle(){ return this._fs == null ? '' : this._fs; },
+    set fillStyle(v){ this._fs = v; if(!calls.fillStyles) calls.fillStyles = []; calls.fillStyles.push(v); },
+    get strokeStyle(){ return this._ss == null ? '' : this._ss; },
+    set strokeStyle(v){ this._ss = v; if(!calls.strokeStyle) calls.strokeStyle = []; calls.strokeStyle.push(v); },
+    lineWidth: 1,
     font: '', textAlign: '', textBaseline: '',
   };
   const host = {
@@ -534,6 +540,257 @@ test('drawDistribution hit 落在 padLeft/padRight 内边缘仍命中', () => {
   const hit0 = r.hit(6, 45);
   assert(hit0, 'x=padLeft 应命中第 0 档');
   assert.strictEqual(hit0.range, '<-3%');
+});
+
+console.log('\n── drawKline() 大盘 K 线图（C3-C）──');
+
+/* 120 日 mock K 线：open 逐日递推、close 周期性摆动，
+ * 保证同时出现涨（close>open）与跌（close<open）两形态，
+ * 且 120 根足够 MA5/MA10/MA20 全部有连续点位。 */
+function mockKBars(n){
+  const out = [];
+  let base = 3800;
+  for(let i = 0; i < n; i++){
+    const open = base;
+    const close = +(base + ((i * 37) % 121 - 60)).toFixed(2);
+    const high = Math.max(open, close) + ((i * 13) % 30 + 5);
+    const low  = Math.min(open, close) - ((i * 17) % 25 + 3);
+    out.push({
+      date: '2026-' + String(1 + Math.floor(i / 30)).padStart(2, '0')
+                  + '-' + String(1 + (i % 30)).padStart(2, '0'),
+      open: +open.toFixed(2), close: close,
+      high: +high.toFixed(2), low: +low.toFixed(2),
+      volume: 400000000 + (i % 12) * 50000000,
+    });
+    base = close;
+  }
+  return out;
+}
+const KBARS = mockKBars(120);
+
+test('drawKline 暴露于 window.Charts 且返回 hit/tooltip/bars/mas/layout 五件套', () => {
+  assert.strictEqual(typeof C.drawKline, 'function', 'drawKline 未暴露');
+  const { cv } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS);
+  assert(typeof r.hit === 'function', 'hit 应为函数');
+  assert(typeof r.tooltip === 'function', 'tooltip 应为函数');
+  assert(Array.isArray(r.bars) && r.bars.length === 120, 'bars 应 120 条，实得 ' + (r.bars && r.bars.length));
+  assert(Array.isArray(r.mas) && r.mas.length === 3, 'mas 应 3 条');
+  assert(r.layout && r.layout.plotW > 0 && r.layout.plotH > 0, 'layout 应有正尺寸');
+});
+
+test('drawKline 120 根蜡烛 + 120 根量柱（fillRect 240 次、stroke 125 次）', () => {
+  const { cv, calls } = makeCanvas(600, 220);
+  C.drawKline(cv, KBARS);
+  /* 每根蜡烛恰好 1 次 fillRect（涨=实心 / 跌=空心填底），再加 120 根成交量柱 */
+  assert.strictEqual(calls.fillRect.length, 240,
+    '120 蜡烛实体 + 120 量柱 = 240，实得 ' + calls.fillRect.length);
+  /* stroke：价格区网格 1 + 双区边框 1 + 120 影线 + 3 均线 = 125 */
+  assert.strictEqual(calls.stroke, 125, 'stroke 应为 125，实得 ' + calls.stroke);
+});
+
+test('drawKline 红涨绿跌（A 股口径：close>open 用 --rd，close<open 用 --gn）', () => {
+  const { cv, calls } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS);
+  const upColor = C.css('--rd'), downColor = C.css('--gn');
+  let upN = 0, downN = 0;
+  r.bars.forEach(b => {
+    const expectUp = b.d.close > b.d.open;
+    if (expectUp) upN++; else downN++;
+    assert.strictEqual(b.fill, expectUp ? upColor : downColor,
+      '第 ' + b.i + ' 根 fill 与涨跌不符（' + b.d.open + '→' + b.d.close + '）');
+  });
+  assert(upN > 0 && downN > 0, '测试数据应同时含涨与跌，实得 涨' + upN + '/跌' + downN);
+  /* 校验真正写进 canvas 的颜色，而不只是返回值元数据。
+   * drawCandle 的既有约定：涨=实心（fillStyle=--rd），跌=空心
+   * （fillStyle=--panel 底色 + strokeStyle=--gn 边框）。
+   * 所以红只出现在 fillStyle、绿只出现在 strokeStyle，两条通道分开断言。 */
+  assert(calls.fillStyles.indexOf(upColor) >= 0,
+    '涨柱应 fillStyle=--rd 红，实得 ' + JSON.stringify([...new Set(calls.fillStyles)]));
+  assert(calls.strokeStyle.indexOf(downColor) >= 0,
+    '跌柱影线/空心边框应 strokeStyle=--gn 绿，实得 ' + JSON.stringify([...new Set(calls.strokeStyle)]));
+  assert(calls.fillStyles.indexOf(C.css('--panel')) >= 0,
+    '空心跌柱应填 --panel 底色（形状通道，色盲兜底）');
+  /* 色相可分性：红 r 通道显著大于绿 r 通道（色盲备援由"实心/空心"形状通道兜底） */
+  const upRgb = C._hexToRgb(upColor), downRgb = C._hexToRgb(downColor);
+  assert.strictEqual(upRgb[0], 240, '涨 --rd r 应为 240');
+  assert.strictEqual(downRgb[0], 8, '跌 --gn r 应为 8');
+  assert(upRgb[0] > downRgb[0], '涨(红) r 应显著大于跌(绿) r');
+});
+
+test('drawKline MA5/MA10/MA20 三色相分离、起点正确、颜色取自 CSS 变量', () => {
+  const { cv } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS);
+  assert.deepStrictEqual(r.mas.map(m => m.k), [5, 10, 20]);
+  const colors = r.mas.map(m => m.color);
+  assert.strictEqual(new Set(colors).size, 3, '三条均线应三色相分离：' + colors.join(','));
+  assert.strictEqual(colors[0], C.css('--cy'), 'MA5 应取 --cy');
+  assert.strictEqual(colors[1], C.css('--gd'), 'MA10 应取 --gd');
+  assert.strictEqual(colors[2], C.css('--info'), 'MA20 应取 --info');
+  /* MA_k 从 index k-1 起：120-5+1=116，120-20+1=101 */
+  assert.strictEqual(r.mas[0].pts.length, 116, 'MA5 点位应为 116');
+  assert.strictEqual(r.mas[1].pts.length, 111, 'MA10 点位应为 111');
+  assert.strictEqual(r.mas[2].pts.length, 101, 'MA20 点位应为 101');
+  /* 三条线各自 stroke 一次（已含在 125 次总 stroke 里） */
+  r.mas.forEach(m => assert(m.pts.length >= 2, 'MA' + m.k + ' 应有 >=2 点位'));
+});
+
+test('drawKline 数据不足 20 根时 MA20 为空、MA5 仍连续绘制', () => {
+  const { cv } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS.slice(0, 8));
+  assert.strictEqual(r.mas[0].pts.length, 4, '8-5+1=4');
+  assert.strictEqual(r.mas[1].pts.length, 0, '8<10 无 MA10');
+  assert.strictEqual(r.mas[2].pts.length, 0, '8<20 无 MA20');
+});
+
+test('drawKline 成交量柱落在底部 25% 区域、颜色带 0.5 透明度', () => {
+  const { cv, calls } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS);
+  const L = r.layout;
+  assert(Math.abs(L.volH / L.plotH - 0.25) < 1e-9,
+    '成交量区应为 plotH 的 25%，实得 ' + (L.volH / L.plotH));
+  assert(L.volTop > L.priceTop + L.priceH, '量区应在价格区之下');
+  assert(L.volTop + L.volH <= L.padTop + L.plotH, '量区不得越出绘图区');
+  const volRects = calls.fillRect.filter(f =>
+    f.y >= L.volTop - 0.01 && f.y + f.h <= L.volTop + L.volH + 0.01);
+  assert.strictEqual(volRects.length, 120, '应有 120 根量柱，实得 ' + volRects.length);
+  assert(volRects.some(f => f.y <= L.volTop + 1), '应有量柱顶到量区顶（maxVol 那根）');
+  /* 量柱颜色随当日涨跌同色、alpha=0.5（不与价格蜡烛抢视觉层级） */
+  assert(calls.fillStyles.some(f => /^rgba\(\d+,\d+,\d+,0\.5\)$/.test(f)),
+    '量柱应为 alpha 0.5 的 rgba：' + calls.fillStyles.slice(-6).join(','));
+});
+
+test('drawKline tooltip 是整句中文且含 开/高/低/收/量 + % + 亿', () => {
+  const { cv } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS);
+  const tip = r.tooltip(KBARS[100]);
+  assert(/[一-鿿]/.test(tip), 'tooltip 应含中文："' + tip + '"');
+  ['开', '高', '低', '收', '量'].forEach(k =>
+    assert(tip.indexOf(k) >= 0, '缺"' + k + '"："' + tip + '"'));
+  assert(/%/.test(tip), '缺 % 单位："' + tip + '"');
+  assert(/亿|万/.test(tip), '缺 亿/万 单位："' + tip + '"');
+  assert(/\d{4}-\d{2}-\d{2}/.test(tip), '缺 YYYY-MM-DD 日期："' + tip + '"');
+});
+
+test('drawKline tooltip 数值格式（价格 1 位小数 / 涨跌带符号 / 量 亿 两位小数）', () => {
+  const { cv } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS);
+  const tip = r.tooltip({ date: '2026-09-18', open: 3891.96, close: 3911.87,
+                          high: 3919.67, low: 3888.5, volume: 485712507 });
+  assert(tip.indexOf('开3892.0') >= 0, '开价应 1 位小数："' + tip + '"');
+  assert(tip.indexOf('高3919.7') >= 0, '高价应 1 位小数："' + tip + '"');
+  assert(tip.indexOf('低3888.5') >= 0, '低价应 1 位小数："' + tip + '"');
+  assert(tip.indexOf('收3911.9') >= 0, '收价应 1 位小数："' + tip + '"');
+  assert(tip.indexOf('量4.86亿') >= 0, '量应为 亿 单位两位小数："' + tip + '"');
+  assert(tip.indexOf('+0.51%') >= 0, '涨幅应带 + 号："' + tip + '"');
+});
+
+test('drawKline tooltip 跌日涨跌幅为负号、中等量级用"万"', () => {
+  const { cv } = makeCanvas(600, 220);
+  const r = C.drawKline(cv, KBARS);
+  const tip = r.tooltip({ date: '2026-09-18', open: 3900, close: 3855,
+                          high: 3905, low: 3850, volume: 52000000 });
+  assert(tip.indexOf('-1.15%') >= 0, '跌幅应带 - 号："' + tip + '"');
+  assert(tip.indexOf('量5200.0万') >= 0, '量应为 万 单位："' + tip + '"');
+});
+
+test('drawKline hit 返回对应 bar、越界（含右轴价格刻度区）返回 null', () => {
+  const { cv } = makeCanvas(1200, 220);
+  const r = C.drawKline(cv, KBARS);
+  /* plotW = 1200-6-48 = 1146；slotW = 1146/120 = 9.55；x=100 → idx = floor(94/9.55) = 9 */
+  const hit = r.hit(100, 110);
+  assert(hit, '图内 hover 应有命中');
+  assert.strictEqual(hit.date, KBARS[9].date, 'x=100 应命中第 10 根');
+  assert.strictEqual(r.hit(-10, 110), null, '左侧越界应 null');
+  assert.strictEqual(r.hit(1250, 110), null, '右轴刻度区应 null（不参与命中）');
+  assert.strictEqual(r.hit(600, -10), null, '上方越界应 null');
+  assert.strictEqual(r.hit(600, 300), null, '下方越界应 null');
+});
+
+test('drawKline + bindHover tooltip 有 role=status + aria-live=polite + 整句中文', () => {
+  const { cv, host } = makeCanvas(600, 220);
+  const hv = C.bindHover(cv, C.drawKline(cv, KBARS));
+  hv.simulate(300, 110);
+  const tip = hv.getTip();
+  assert(tip, 'hover 后应创建 tooltip DOM');
+  assert.strictEqual(tip.getAttribute('role'), 'status');
+  assert.strictEqual(tip.getAttribute('aria-live'), 'polite');
+  assert(tip.style.display === 'block', '命中后 tooltip 应可见');
+  assert(tip.textContent.indexOf('开') >= 0 && tip.textContent.indexOf('收') >= 0,
+    'tooltip 应含开/收："' + tip.textContent + '"');
+  assert(/%/.test(tip.textContent), 'tooltip 应含 %："' + tip.textContent + '"');
+  assert(tip.parentElement === host, 'tooltip 应挂到 canvas 父元素');
+  hv.unbind();
+  assert.strictEqual(hv.getTip(), null, 'unbind 后 getTip 应为 null');
+});
+
+test('drawKline 空数据画"暂无K线数据"占位、hit/mas 安全', () => {
+  const { cv, calls } = makeCanvas(200, 80);
+  const r = C.drawKline(cv, []);
+  assert(r && r.layout === null, '空数据 layout 应为 null');
+  assert(calls.fillText.length >= 1, '应画占位文字');
+  assert(/暂无K线数据/.test(calls.fillText[0].t), '应画"暂无K线数据"，实得"' + calls.fillText[0].t + '"');
+  assert.strictEqual(r.hit(100, 40), null, '空数据 hit 应 null');
+  assert(Array.isArray(r.mas) && r.mas.length === 0, '空数据 mas 应为空数组');
+});
+
+test('drawKline bars 为 null 时不炸、hit 安全返回 null', () => {
+  const { cv } = makeCanvas(200, 80);
+  const r = C.drawKline(cv, null);
+  assert(r);
+  assert.strictEqual(r.hit(100, 40), null);
+});
+
+test('drawKline canvas 尺寸过小（不足以布局）时画占位不炸', () => {
+  const { cv, calls } = makeCanvas(10, 20);
+  const r = C.drawKline(cv, KBARS);
+  assert(r && r.layout === null);
+  assert(/暂无K线数据/.test(calls.fillText[0].t), '应画占位，实得"' + calls.fillText[0].t + '"');
+});
+
+test('drawKline 缺少 volume 字段不炸（只画蜡烛与均线，无量柱）', () => {
+  const { cv, calls } = makeCanvas(600, 220);
+  const d = KBARS.map(b => ({ date: b.date, open: b.open, close: b.close, high: b.high, low: b.low }));
+  const r = C.drawKline(cv, d);
+  assert(r && r.layout, '应正常绘制');
+  assert.strictEqual(calls.fillRect.length, 120, '无 volume 时只有 120 根蜡烛实体，实得 ' + calls.fillRect.length);
+  assert(r.bars.every(x => !x.vol), '无 volume 时 volRect 应全空');
+  assert.strictEqual(r.layout.maxVol, 0, 'maxVol 应为 0');
+});
+
+test('drawKline 缺少 close 字段不炸（实体退化为单点、tooltip 收价显示 —）', () => {
+  const { cv } = makeCanvas(600, 220);
+  const d = [{ date: '2026-09-01', open: 3800, high: 3850, low: 3790, volume: 1e8 }];
+  const r = C.drawKline(cv, d);
+  assert(r && r.layout, '缺 close 时仍应布局');
+  const b0 = r.bars[0];
+  assert.strictEqual(b0.bodyTop, b0.bodyBot, '缺 close 时实体应退化为单点');
+  assert.strictEqual(b0.up, false, '缺 close 时不应判为涨');
+  const tip = r.tooltip(d[0]);
+  assert(tip.indexOf('收—') >= 0, '缺 close 时收价应显示 —："' + tip + '"');
+  assert(tip.indexOf(' · — ·') >= 0, '缺 close 时涨跌幅应显示 —："' + tip + '"');
+});
+
+test('drawKline 全部价格字段缺失时画占位、不编造数值', () => {
+  const { cv, calls } = makeCanvas(300, 120);
+  const d = [{ date: '2026-09-01' }, { date: '2026-09-02' }];
+  const r = C.drawKline(cv, d);
+  assert(r && r.layout === null);
+  assert(/暂无K线数据/.test(calls.fillText[0].t), '应画占位，实得"' + calls.fillText[0].t + '"');
+  assert.strictEqual(r.hit(150, 60), null);
+});
+
+test('drawKline 右轴价格刻度存在（5 条横线 + 5 个价格 label）', () => {
+  const { cv, calls } = makeCanvas(600, 220);
+  C.drawKline(cv, KBARS);
+  /* 价格 label 全部写在右轴外侧（x = padLeft + plotW + 4 = 6 + 546 + 4 = 556）；
+   * X 轴日期 label 在 h-4 处且居中 */
+  const priceLabels = calls.fillText.filter(t => t.x === 6 + 546 + 4);
+  assert.strictEqual(priceLabels.length, 5, '应有 5 条价格刻度，实得 ' + priceLabels.length);
+  priceLabels.forEach(t => assert(/^\d+\.\d+$/.test(t.t), '价格 label 应为数字："' + t.t + '"'));
+  const dateLabels = calls.fillText.filter(t => t.y === 220 - 4);
+  assert.strictEqual(dateLabels.length, 3, '应有 3 个日期 label，实得 ' + dateLabels.length);
+  dateLabels.forEach(t => assert(/^\d{2}-\d{2}$/.test(t.t), '日期 label 应为 MM-DD："' + t.t + '"'));
 });
 
 console.log('\n── bindHover() DOM tooltip 管理 ──');

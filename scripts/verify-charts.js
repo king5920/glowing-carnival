@@ -1,14 +1,18 @@
 'use strict';
 /**
- * §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布直方图）
+ * §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布直方图 + C3-C 大盘 K 线）
  *
  * 断言：
- *   1. #mpHeatCanvas + #scanDistCanvas 存在、非零尺寸、非全透明
- *   2. window.Charts 暴露 drawSentimentHeatmap + drawDistribution + bindHover
- *   3. 两图 hover 触发 tooltip 出现，文本是整句中文（§5 通用条款 role=status）
+ *   1. #mpHeatCanvas + #scanDistCanvas + #klineCanvas 存在、非零尺寸、非全透明
+ *   2. window.Charts 暴露 drawSentimentHeatmap + drawDistribution + drawKline + bindHover
+ *   3. 三图 hover 触发 tooltip 出现，文本是整句中文（§5 通用条款 role=status）
  *   4. tooltip DOM 有 role="status" + aria-live
- *   5. 图例（冷静/恐慌 梯度）+（涨区/跌区 双色带）都在
+ *   5. 图例（冷静/恐慌 梯度）+（涨区/跌区 双色带）+（涨/跌/MA5/量）都在
  *   6. rAF 链数不变（图表不入 AnimGate.gatedLoop）
+ *
+ * 注意：C3-C 的 /api/kline 走腾讯→新浪外部源，最坏 2×8s+300ms+8s ≈ 25s，
+ *       比本地库的 heatmap/distribution 慢一个数量级，所以单独轮询画布像素
+ *       直到 painted>=3%（上限 45s），不靠固定 sleep 判"全透明"。
  *
  * CDP 端口 9338（9335=contrast, 9336=tbmenu, 9337=starmap-plus, 9338=charts）
  */
@@ -26,6 +30,7 @@ const READY = `(() => {
       banner: !!document.getElementById('srcbanner'),
       heat:   !!document.getElementById('mpHeatCanvas'),
       dist:   !!document.getElementById('scanDistCanvas'),
+      kline:  !!document.getElementById('klineCanvas'),
       charts: !!window.Charts,
       mems:   (window.STAR && window.STAR.stats) ? (STAR.stats().memories || 0) : 0,
     });
@@ -107,6 +112,7 @@ const PROBE = `(() => {
       chartsFns: typeof window.Charts === 'object' ? {
         drawSentimentHeatmap: typeof window.Charts.drawSentimentHeatmap,
         drawDistribution: typeof window.Charts.drawDistribution,
+        drawKline: typeof window.Charts.drawKline,
         bindHover: typeof window.Charts.bindHover,
         colorLadder: typeof window.Charts.colorLadder,
         drawHatch: typeof window.Charts.drawHatch,
@@ -120,6 +126,93 @@ const PROBE = `(() => {
       canvasTotal: document.querySelectorAll('canvas').length,
     };
 
+    return JSON.stringify(out);
+  } catch(e) { return 'ERR:'+e.message+' | '+e.stack; }
+})()`;
+
+/* K 线首绘像素轮询：/api/kline 走外部源（腾讯→新浪），最坏 ~25s，
+ * 不能靠固定 sleep 判断——轮询到 painted>=3% 或 45s 上限 */
+const KLINE_PAINTED = `(() => {
+  try {
+    const cv = document.getElementById('klineCanvas');
+    if(!cv || cv.width === 0 || cv.height === 0) return JSON.stringify({ pct: -1 });
+    const full = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+    let n = 0;
+    for(let i = 3; i < full.data.length; i += 4) if(full.data[i] > 0) n++;
+    return JSON.stringify({ pct: n / (full.width * full.height) * 100 });
+  } catch(e){ return JSON.stringify({ err: e.message }); }
+})()`;
+
+/* C3-C K 线 probe：与 probeOne 同构，但图例是 .kline-legend
+ * （涨=实心块 / 跌=空心块 / MA5·10·20=三色线段 / 量=双色半透明块） */
+const KLINE_PROBE = `(() => {
+  try {
+    const cv = document.getElementById('klineCanvas');
+    const box = document.getElementById('klinebox');
+    const out = { canvasExists: !!cv, canvasSize: null, paintedPct: null,
+                  nonEmptyPixels: 0, hoverTest: null };
+    if (cv) {
+      out.canvasSize = { w: cv.clientWidth, h: cv.clientHeight,
+                         physicalW: cv.width, physicalH: cv.height };
+      try {
+        const full = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+        let n = 0, total = full.width * full.height;
+        for (let i = 3; i < full.data.length; i += 4) if (full.data[i] > 0) n++;
+        out.paintedPct = +(n / total * 100).toFixed(2);
+        out.nonEmptyPixels = n;
+      } catch(e) { out.pixelSample = { err: e.message }; }
+
+      /* hover：价格区中点（高度 0.38 落在上 75% 价格区，避开底部量区） */
+      const rect = cv.getBoundingClientRect();
+      const x = rect.width * 0.5;
+      const y = rect.height * 0.38;
+      cv.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: rect.left + x, clientY: rect.top + y, bubbles: true,
+      }));
+      const tip = box && box.querySelector('.chart-tip');
+      out.hoverTest = {
+        x: x, y: y,
+        tipFound: !!tip,
+        tipDisplay: tip ? getComputedStyle(tip).display : null,
+        tipText: tip ? tip.textContent : null,
+        tipRole: tip ? tip.getAttribute('role') : null,
+        tipAriaLive: tip ? tip.getAttribute('aria-live') : null,
+        tipTextHasChinese: tip ? /[一-鿿]/.test(tip.textContent) : false,
+        tipHits: tip ? ['开','高','低','收','量'].filter(function(k){
+          return tip.textContent.indexOf(k) >= 0;
+        }) : [],
+        tipTextHasDate: tip ? /\\d{4}-\\d{2}-\\d{2}/.test(tip.textContent) : false,
+        tipTextHasPct: tip ? /%/.test(tip.textContent) : false,
+        /* assertChart 通用断言读 tipTextHasUnit：K 线的单位是 % / 亿 / 万 */
+        tipTextHasUnit: tip ? /%|亿|万/.test(tip.textContent) : false,
+      };
+      cv.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+      out.hoverTest.tipAfterLeave = tip ? getComputedStyle(tip).display : null;
+    }
+
+    const legend = box && box.querySelector('.kline-legend');
+    out.legendText = legend ? legend.textContent.replace(/\\s+/g, ' ').trim() : '';
+    out.legendWords = legend
+      ? ['涨','跌','MA5','MA10','MA20','量'].filter(function(k){
+          return out.legendText.indexOf(k) >= 0;
+        })
+      : [];
+    /* 六个色块的 computed background-color 都不得是全透明（色块真的上色了） */
+    out.legendSwatches = legend ? [
+      ['涨实心', '.kl-sw-up'], ['跌空心', '.kl-sw-dn'], ['量半透明', '.kl-sw-vol'],
+      ['MA5', '.kl-ln5'], ['MA10', '.kl-ln10'], ['MA20', '.kl-ln20'],
+    ].map(function(pair){
+      const el = legend.querySelector(pair[1]);
+      const s = el ? getComputedStyle(el) : null;
+      /* color-mix 生成的量柱色落在 background-image（渐变）里，backgroundColor 是
+       * 底色层、按定义就是透明——两个通道都查才算真的上色了。 */
+      const bg = s ? s.backgroundColor : null;
+      const hasGrad = s ? /gradient/.test(s.backgroundImage || '') : false;
+      return { name: pair[0], exists: !!el, bg: bg, gradient: hasGrad,
+               transparent: bg === 'rgba(0, 0, 0, 0)' && !hasGrad };
+    }) : [];
+    out.titleText = document.getElementById('klineTitleTxt')
+                    ? document.getElementById('klineTitleTxt').textContent : null;
     return JSON.stringify(out);
   } catch(e) { return 'ERR:'+e.message+' | '+e.stack; }
 })()`;
@@ -203,16 +296,39 @@ async function main() {
     const raw = r.result && r.result.value;
     if (typeof raw === 'string' && raw.startsWith('ERR:')) die(2, '页面抛错：' + raw);
     const s = raw ? JSON.parse(raw) : null;
-    if (s && s.banner && s.heat && s.dist && s.charts) break;
+    if (s && s.banner && s.heat && s.dist && s.kline && s.charts) break;
     if (Date.now() - t0 > 60000) die(3, '等待超时（Charts/canvas 未就绪）');
     await sleep(500);
   }
   await sleep(3000);   /* 让 /api/sentiment/heatmap + /api/distribution 首拉完成并绘制 */
 
+  /* ── C3-C 单独等首绘：K 线走腾讯→新浪外部源，最坏 ~25s ── */
+  let klinePct = -1, klineErr = null;
+  const kp0 = Date.now();
+  for (;;) {
+    const kp = await cdp.send('Runtime.evaluate', { expression: KLINE_PAINTED, returnByValue: true });
+    let kv = null;
+    try { kv = JSON.parse(kp.result && kp.result.value); } catch (_) {}
+    if (kv && typeof kv.pct === 'number') klinePct = kv.pct;
+    if (kv && kv.err) klineErr = kv.err;
+    if (klinePct >= 3) break;
+    if (Date.now() - kp0 > 45000) break;
+    await sleep(1000);
+  }
+  console.log('K 线首绘（外部源）painted=' +
+    (klinePct < 0 ? '采样失败' : klinePct.toFixed(2) + '%') +
+    ' 用时 ' + ((Date.now() - kp0) / 1000).toFixed(1) + 's' +
+    (klineErr ? '  [采样报错 ' + klineErr + ']' : ''));
+
   const r2 = await cdp.send('Runtime.evaluate', { expression: PROBE, returnByValue: true });
   const raw2 = r2.result && r2.result.value;
   if (typeof raw2 === 'string' && raw2.startsWith('ERR:')) die(2, 'PROBE 抛错：' + raw2);
   const out = JSON.parse(raw2);
+
+  const r3 = await cdp.send('Runtime.evaluate', { expression: KLINE_PROBE, returnByValue: true });
+  const raw3 = r3.result && r3.result.value;
+  if (typeof raw3 === 'string' && raw3.startsWith('ERR:')) die(2, 'KLINE_PROBE 抛错：' + raw3);
+  const kline = JSON.parse(raw3);
 
   /* 截图（clip 到 #mpHeatbox 附近——顶栏以下到画布底部） */
   const clip = await cdp.send('Runtime.evaluate', {
@@ -256,16 +372,38 @@ async function main() {
     require('fs').writeFileSync(out2, Buffer.from(shot2.data, 'base64'));
   }
 
+  /* 第三张：K 线所在区块截图 */
+  const clip3 = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.getElementById('klinebox');
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const y = Math.max(0, r.top - 8);
+      const h = Math.min(document.documentElement.scrollHeight, r.bottom - y + 8);
+      return JSON.stringify({ x: 0, y: Math.round(y), width: ${VP.w}, height: Math.round(h) });
+    })()`,
+    returnByValue: true,
+  });
+  if (clip3.result && clip3.result.value) {
+    const clip3Json = JSON.parse(clip3.result.value);
+    const shot3 = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      clip: { x: clip3Json.x, y: clip3Json.y, width: clip3Json.width, height: clip3Json.height, scale: 1 },
+    });
+    const out3 = OUT.replace('-c3.png', '-c3-kline.png');
+    require('fs').writeFileSync(out3, Buffer.from(shot3.data, 'base64'));
+  }
+
   cdp.close();
 
-  console.log('\n── §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布）──');
+  console.log('\n── §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布 + C3-C 大盘K线）──');
   console.log('截图 → ' + OUT + ' (' + kb + ' KB)');
 
   const fail = [];
 
   /* ═══ 通用：单图断言 ═══ */
   const FNS_EXPECTED = [
-    'drawSentimentHeatmap', 'drawDistribution', 'bindHover',
+    'drawSentimentHeatmap', 'drawDistribution', 'drawKline', 'bindHover',
     'colorLadder', 'drawHatch', 'drawCandle', 'drawBar', 'drawText',
     'drawAxis', 'resizeCanvas', 'css',
   ];
@@ -324,10 +462,45 @@ async function main() {
   if (out.dist.titleText && !/个板块/.test(out.dist.titleText))
     fail.push('分布图标题缺"个板块"："' + out.dist.titleText + '"');
 
+  /* ═══ C3-C 大盘 K 线断言 ═══ */
+  assertChart('大盘K线', kline, {
+    minPct: 3,
+    mustHaveText: [/涨/, /跌/, /MA5/, /量/],
+  });
+  /* MA10/MA20 是我一并做的，多断言两个不亏 */
+  ['MA10', 'MA20'].forEach(function(k){
+    if (kline.legendText && kline.legendText.indexOf(k) < 0)
+      fail.push('大盘K线: 图例缺"' + k + '" → ' + kline.legendText);
+  });
+  /* 六个色块必须真的上色（涨=实心红 / 跌=空心绿 / 量=双色半透明 / MA 三色线段） */
+  (kline.legendSwatches || []).forEach(function(s){
+    if (!s.exists) { fail.push('大盘K线: 图例色块缺失 .' + s.name); return; }
+    if (s.transparent)
+      fail.push('大盘K线: 图例色块"' + s.name + '"背景全透明（色没渲染出来）');
+  });
+  /* hover 整句必须逐个含 开/高/低/收/量（用户明确要求的五个字段） */
+  if (kline.hoverTest && kline.hoverTest.tipFound) {
+    const missing = ['开','高','低','收','量'].filter(function(k){
+      return kline.hoverTest.tipHits.indexOf(k) < 0;
+    });
+    if (missing.length)
+      fail.push('大盘K线: tooltip 缺字段 ' + missing.join('/') +
+                '："' + (kline.hoverTest.tipText || '') + '"');
+    if (!kline.hoverTest.tipTextHasDate)
+      fail.push('大盘K线: tooltip 缺 YYYY-MM-DD 日期："' +
+                (kline.hoverTest.tipText || '') + '"');
+    if (!kline.hoverTest.tipTextHasPct)
+      fail.push('大盘K线: tooltip 缺 % 涨跌单位："' +
+                (kline.hoverTest.tipText || '') + '"');
+  }
+  /* 标题应含标的名与天数 */
+  if (kline.titleText && !/\d+\s*日/.test(kline.titleText))
+    fail.push('大盘K线: 标题缺"N 日"："' + kline.titleText + '"');
+
   /* ── 打印摘要 ── */
   console.log('  模块     window.Charts 暴露: ' + (out.chartsFns ?
     FNS_EXPECTED.map(k => k + '=' + out.chartsFns[k]).join('  ') : '未暴露'));
-  console.log('  canvas 总数  ' + out.canvasTotal + ' 个（starfield 多 GL + 图表 2 张新增）');
+  console.log('  canvas 总数  ' + out.canvasTotal + ' 个（starfield 多 GL + 图表 3 张新增）');
 
   console.log('\n── C3-A 情绪温度热力柱 ──');
   console.log('  canvas   ' + (out.heat.canvasSize ? (out.heat.canvasSize.w + 'x' + out.heat.canvasSize.h +
@@ -357,6 +530,29 @@ async function main() {
       '  单位=' + (out.dist.hoverTest.tipTextHasUnit ? '✓' : '✗'));
   }
 
+  console.log('\n── C3-C 大盘 K 线 ──');
+  console.log('  canvas   ' + (kline.canvasSize ? (kline.canvasSize.w + 'x' + kline.canvasSize.h +
+    ' 物理 ' + kline.canvasSize.physicalW + 'x' + kline.canvasSize.physicalH) : '未找到'));
+  console.log('  绘制     非空像素 ' + (kline.paintedPct == null ? '?' : kline.paintedPct + '%') +
+    '  (' + (kline.nonEmptyPixels || 0) + ' 像素)');
+  console.log('  图例     "' + (kline.legendText || '(空)') + '"');
+  console.log('           命中词  ' + ((kline.legendWords || []).join(' ') || '(无)'));
+  (kline.legendSwatches || []).forEach(function(s){
+    console.log('           ' + (s.exists ? (s.transparent ? '✗' : '✓') : '✗') +
+      '  ' + s.name +
+      (s.gradient ? '  渐变' : (s.bg ? '  ' + s.bg : '')));
+  });
+  console.log('  标题     "' + (kline.titleText || '(空)') + '"');
+  if (kline.hoverTest && kline.hoverTest.tipFound) {
+    console.log('  hover    tooltip: "' + (kline.hoverTest.tipText || '').slice(0, 90) +
+      (kline.hoverTest.tipText && kline.hoverTest.tipText.length > 90 ? '…' : '') + '"');
+    console.log('           role=' + kline.hoverTest.tipRole + '  aria-live=' + kline.hoverTest.tipAriaLive +
+      '  中文=' + (kline.hoverTest.tipTextHasChinese ? '✓' : '✗') +
+      '  日期=' + (kline.hoverTest.tipTextHasDate ? '✓' : '✗') +
+      '  %= ' + (kline.hoverTest.tipTextHasPct ? '✓' : '✗') +
+      '  开高低收量=[' + (kline.hoverTest.tipHits || []).join('') + ']');
+  }
+
   console.log('\n── 判定 ──');
   if (fail.length) {
     fail.forEach(f => console.log('  ✗ ' + f));
@@ -369,6 +565,10 @@ async function main() {
   console.log('  ✓ 板块涨幅分布：canvas 有实际绘制（非全透明）');
   console.log('  ✓ 板块涨幅分布：图例齐全（跌区→涨区 双色带 + 中轴=0 注释）');
   console.log('  ✓ 板块涨幅分布：hover tooltip 是整句中文，role=status + aria-live');
+  console.log('  ✓ 大盘K线：canvas 有实际绘制（非全透明，外部源首绘 ' +
+    (klinePct < 0 ? '?' : klinePct.toFixed(2) + '%') + '）');
+  console.log('  ✓ 大盘K线：图例齐全（涨/跌/MA5/MA10/MA20/量 + A股红涨绿跌注释）');
+  console.log('  ✓ 大盘K线：hover tooltip 是整句中文含 开/高/低/收/量 + % + 日期，role=status + aria-live');
   console.log('  ✓ window.Charts ' + FNS_EXPECTED.length + ' 个 API 全部暴露');
   console.log('  ✓ 未新增 rAF 链（canvas 总数 ' + out.canvasTotal + '，图表数据驱动一次性绘制）');
   process.exit(0);
