@@ -1,3 +1,71 @@
+## Phase 40：左栏左滑出 + §5-2 个股 K 线——设计系统 §5/§6 收官
+
+### 一、范围
+DESIGN.md §13 剩余 P0/P1 任务两项并行交付：
+- **左栏从左滑出**：`#galaxies .gal[data-cat]` 点击 → `Drawer.open('category', cat, { side: 'left' })`
+- **§5-2 个股 K 线**：`#klinebox` 加个股/周期选择器，任意龙头个股可看日/周/月 K 线
+
+### 二、交付明细
+
+**左栏从左滑出**
+- `ui/index.html` 注册 `category` 类型：fetcher 从 `/api/starmap` 按 category 过滤实体+记忆（上限 30 条），render 渲染类别名+实体列表+记忆列表含 decay 中文标签
+- `ui/app.js` `loadStarmap` 中 `.gal` 加 `tabindex="0" data-cat="${k}" role="button" aria-label="查看${GAL_CN[k]}详情"` + 模块级事件委托（click + keydown Enter/Space）调 `Drawer.open('category', cat, { side: 'left', title, sourceEl: gal })`
+- CSS `.gal[data-cat]` 加 `cursor:pointer` + hover 背景 `rgba(63,208,255,.06)` + `:focus-visible` 焦点环（`var(--accent)`）
+- `.from-left` CSS 已在 C2-A 就位，小屏 <1400px 自动变底部上滑
+- 94 项单测全绿（新增 20 项 category 覆盖）
+
+**§5-2 个股 K 线**
+- `ui/index.html` `#klinebox` 加 `.kline-toolbar`（`#klineCode` 下拉 optgroup 大盘指数 3 项 + optgroup 龙头动态填充 + `#klinePeriod` 日/周/月）
+- 重写 K 线 IIFE：`codeEl.value`/`periodEl.value` 取代硬编码；标题按 `INDICES[key]` 判指数"大盘 K 线"/"个股 K 线"切换；`switchAll()` = `round++` → `ctrl.abort()` → `clearTimeout(timer)` → `persist()` → `refresh()`
+- `populate(scan)` 从 `s.leaderCode`/`s.leader` 补码，Set 去重、`/^\d{6}$/` 过滤、`bareCode` 归一化 `sh600519`/`000858.SZ`
+- 启动顺序 `populate(__closescanData)` → `readCfg()` → `applyDesired()` → `refresh()`
+- 记忆走 `localStorage['jarvis.kline.cfg']`（`typeof localStorage === 'undefined'` + try/catch 双保险）
+- `setTimeout` 自调度链（非 `setInterval`，避免日 K 25s 最坏路径并发重叠）
+- `AbortController` 作废在途请求
+- CSS `.kline-toolbar`/`.kline-select` 全走 CSS 变量（`color-mix` 派生 alpha，`option`/`optgroup` 显式 `var(--bg)` 底色防跳出主题）
+- 97 项单测全绿（新增 29 项——启动默认/切换标的周期/月K URL/补码去重脏数据前缀归一化/__closescanData 缓存/round 作废/定时器不残留/abort/记忆读写/坏 JSON/emSecid/isIndexCode）
+
+### 三、测试结果
+
+| 套件 | 项数 | 结果 |
+|------|------|------|
+| `src/jarvis-drawer.test.js` | 94 | 全绿 |
+| `src/jarvis-charts.test.js` | 97 | 全绿 |
+| `scripts/verify-drawer.js` CDP | 44 断言 | 全绿 |
+| `scripts/verify-charts.js` CDP | 12 断言 | 全绿 |
+| 全套 21 套件 | 873 | 全绿 |
+
+### 四、关键设计决策
+
+1. **`setInterval` → 单条 `setTimeout` 自调度链**：日 K 拉取走腾讯→新浪最坏约 25s，`setInterval` 5 分钟会叠出并发重叠请求。改为刷新成功后再排下一次（交易时段 5min / 收盘后 30min / 出错 60s），`switchAll` 里 `clearTimeout` 拆链。
+2. **K 线 IIFE 绝不直接 fetch `/api/closescan`**：该端点未缓存且很贵。龙头代码只走 `__closescanData` 缓存 + 回调钩子（closescan 加载时自动挂 `window.__populateKlineCodes`）。
+3. **`applyDesired()` 存在意义**：记忆的龙头可能启动时还没补进下拉，得等收盘扫描回来再套用。
+4. **Node `setTimeout(fn, 0)` 有 1ms 下限**，`setImmediate` 驱动的 `settle()` 几十微秒就排空——假 fetch 用 `setTimeout(0)` 回包会有 17 个测试全部拿到空标题。改用 `setImmediate` 后一次性从 80/17 提到 90/7。
+5. **Node v25.7.0 里 `AbortSignal` 没有 `.abort`**（abort 在控制器上）。断言改为 `calls[0].signal.aborted` 从 false 变 true。
+
+### 五、DESIGN.md §13 最终状态
+
+| ID | 任务 | 状态 |
+|----|------|------|
+| C2-A | 抽屉基础层 | ✅ |
+| C2-B | L2 下钻带返回 | ✅ |
+| C2-C1 | 图表 Tab | ✅ |
+| C2-C2 | 星图实体 3D Tab | ✅ |
+| C2-D | 小屏底部上滑 | ✅ |
+| 左栏左滑出 | `.from-left` 触发入口 | ✅ |
+| C3-A | 情绪温度热力柱 | ✅ |
+| C3-B | 板块涨幅分布直方图 | ✅ |
+| C3-C | 大盘 K 线图 | ✅ |
+| §5-2 | 个股 K 线 | ✅ |
+| C4 | 星图增强 | ✅ |
+
+### 六、剩余（需基建/架构评审）
+
+- **C1 rAF 链重构 ≤3**：AnimGate 共享调度器，架构变更需评审
+- **§5-4 实时流面积图/TAPE**：需 SSE 或 WebSocket 流式端点基建
+
+---
+
 ## Phase 39：C2-C1 图表 Tab + C2-C2 星图实体 3D Tab——设计系统 C2 五连收官
 
 ### 一、范围

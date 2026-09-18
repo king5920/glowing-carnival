@@ -886,6 +886,11 @@ global.fetch = function(url){
   }
   return Promise.reject(new Error('unexpected fetch: ' + url));
 };
+/* stockDetail 段（line 1296）临时覆盖 global.fetch 为「json() 时捕获」的语义，
+ * 与本文件原 fetch stub 的「fetch() 时捕获」不一致。该覆盖在 async 测试里
+ * 通过 await 恢复，但 test() 不 await，故恢复发生在微任务里——晚于后续同步测试。
+ * 这里保存原 stub 引用，供 C2-D3 段首恢复。 */
+const _ORIGINAL_FETCH_STUB = global.fetch;
 
 /* 注册 entity 类型（与 index.html IIFE 一致） */
 D.register('entity', {
@@ -1357,6 +1362,362 @@ test('stockDetail 走 Drawer.push 下钻路径（L1→L2 stockDetail）', () => 
   assert(bodyEl._html.includes('贵州茅台'), 'L2 body 应含股票名');
   assert.strictEqual(D.pop(), true);
   assert(bodyEl._html.includes('LEADER-'), 'pop 后应回到 L1 内容');
+});
+
+/* ════════════════ C2-D3 星图类别左抽屉 ════════════════
+ * 覆盖：
+ *   - 'category' 类型注册后可 open（side='left'）
+ *   - panel 有 .from-left 类、无 .from-right
+ *   - fetchCategory 返回正确数据形状（按 category 过滤实体与记忆，记忆上限 30）
+ *   - renderCategory 含类别名 + 实体列表 + 记忆列表
+ *   - 空数据安全（null / 无实体无记忆 / 无匹配类别）
+ *   - HTML 转义（& < > " 不产生注入）
+ *   - 记忆上限 30 条硬截断（slice(0, 30)）
+ */
+console.log('\n── C2-D3 星图类别左抽屉 ──');
+
+/* stockDetail 段（line 1296）临时覆盖 global.fetch 为「json() 时捕获」的语义，
+ * 与本文件原 fetch stub 的「fetch() 时捕获」不一致。该覆盖在 async 测试里
+ * 通过 await 恢复，但 test() 不 await，故恢复发生在微任务里——晚于本段同步测试。
+ * 这里在段首恢复原 stub，保证 fetchCategory 系列测试读到本段刚设置的 _mockStarmapData。 */
+global.fetch = _ORIGINAL_FETCH_STUB;
+
+const CAT_CN_TEST = { person: '人物', place: '地点', event: '事件', interest: '兴趣', project: '项目' };
+const DECAY_CN_TEST = { fresh: '新鲜', normal: '正常', fading: '正在变淡' };
+const MAX_MEMS_CAT = 30;
+
+function fetchCategory(category) {
+  return fetch('/api/starmap').then(r => r.json()).then(d => {
+    const ents = (d && d.entities) || [];
+    const mems = (d && d.memories) || [];
+    const catEnts = ents.filter(e => e.category === category);
+    const catMems = mems.filter(m => m.category === category);
+    return {
+      category: category,
+      name: CAT_CN_TEST[category] || category,
+      entityCount: catEnts.length,
+      memoryCount: catMems.length,
+      entities: catEnts,
+      memories: catMems.slice(0, MAX_MEMS_CAT),
+    };
+  });
+}
+
+function renderCategory(data) {
+  if (!data) return '<div class="drw-error">未找到数据</div>';
+  let h = '<div class="drw-sec">';
+  h += '<div class="drw-title">' + _escForTest(data.name) + '</div>';
+  h += '<div class="drw-sub">' + (data.entityCount || 0) + ' 个实体 · ' + (data.memoryCount || 0) + ' 条记忆</div>';
+  h += '</div>';
+
+  if (data.entities && data.entities.length) {
+    h += '<div class="drw-reasons">';
+    h += '<div class="drw-rtitle">实体（' + data.entities.length + '）</div>';
+    h += '<ul>';
+    data.entities.forEach(e => {
+      h += '<li>' + _escForTest(e.name) +
+           ' <span style="color:var(--faint);font-size:10px">' + (e.memCount || 0) + '条记忆 · ' + (e.mentions || 0) + '次提及</span></li>';
+    });
+    h += '</ul>';
+    h += '</div>';
+  }
+
+  if (data.memories && data.memories.length) {
+    h += '<div class="drw-reasons">';
+    h += '<div class="drw-rtitle">最近记忆（最多 ' + Math.min(data.memories.length, MAX_MEMS_CAT) + ' 条）</div>';
+    h += '<ul>';
+    data.memories.forEach(m => {
+      const decayLabel = DECAY_CN_TEST[m.decayState] || '未知';
+      h += '<li>' + _escForTest(m.content || '（无内容）') +
+           ' <span style="color:var(--faint);font-size:10px">[' + decayLabel + ' · ' + (m.ageDays != null ? m.ageDays : 0) + '天前]</span></li>';
+    });
+    h += '</ul>';
+    h += '</div>';
+  }
+
+  if (!(data.entities && data.entities.length) && !(data.memories && data.memories.length)) {
+    h += '<div class="drw-reasons"><div class="drw-rtitle">该类别下暂无实体或记忆</div></div>';
+  }
+
+  return h;
+}
+
+/* 注册 category 类型（与 index.html IIFE 一致） */
+D.register('category', {
+  fetcher: fetchCategory,
+  render: renderCategory,
+  title: '类别详情',
+});
+
+/* 构造含多个类别的 starmap 响应 mock */
+function makeMultiCategoryData(personMems, personExtra) {
+  personExtra = personExtra || {};
+  const entities = [
+    { id: 'e_p1', name: '张三', category: 'person', memCount: personMems.length, mentions: 5, ...personExtra },
+    { id: 'e_p2', name: '李四', category: 'person', memCount: 0, mentions: 1 },
+    { id: 'e_l1', name: '北京', category: 'place', memCount: 3, mentions: 3 },
+    { id: 'e_e1', name: '入职', category: 'event', memCount: 1, mentions: 1 },
+    { id: 'e_i1', name: '编程', category: 'interest', memCount: 2, mentions: 2 },
+    { id: 'e_pr1', name: 'Jarvis', category: 'project', memCount: 4, mentions: 4 },
+  ];
+  const memories = personMems.map((c, i) => ({
+    id: 'm_p_' + i,
+    entity: '张三',
+    category: 'person',
+    content: c,
+    ageDays: i,
+    decayState: i % 3 === 0 ? 'fading' : (i % 3 === 1 ? 'normal' : 'fresh'),
+  }));
+  // 加一条 place 记忆，用于验证 filter 精确性
+  memories.push({
+    id: 'm_l_0',
+    entity: '北京',
+    category: 'place',
+    content: '位于中国首都',
+    ageDays: 1,
+    decayState: 'fresh',
+  });
+  return {
+    counts: { messages: 0, memories: memories.length, entities: entities.length },
+    galaxies: ['person', 'place', 'event', 'interest', 'project'],
+    entities: entities,
+    memories: memories,
+  };
+}
+
+test('category 类型注册后可 open，isOpen=true', () => {
+  resetState();
+  D.open('category', 'person', { side: 'left', title: '人物' });
+  assert.strictEqual(D.isOpen(), true, '抽屉应打开');
+});
+
+test('category open side=left 时 panel 有 .from-left 且无 .from-right', () => {
+  resetState();
+  D.open('category', 'person', { side: 'left' });
+  assert(panel._classSet.has('from-left'), '应加 .from-left');
+  assert(!panel._classSet.has('from-right'), '不应有 .from-right');
+});
+
+test('category open 默认 title 为"类别详情"（未覆盖时）', () => {
+  resetState();
+  D.open('category', 'person', { side: 'left' });
+  assert.strictEqual(titleEl._text, '类别详情', '未传 opts.title 应使用 register 时的默认标题');
+});
+
+test('category open opts.title 覆盖默认（如"人物"）', () => {
+  resetState();
+  D.open('category', 'person', { side: 'left', title: '人物' });
+  assert.strictEqual(titleEl._text, '人物');
+});
+
+test('category open 写入 hash #drawer=category:person', () => {
+  resetState();
+  D.open('category', 'person', { side: 'left' });
+  assert.strictEqual(global.location.hash, '#drawer=category:person');
+});
+
+/* ── fetchCategory 数据形状 ── */
+
+test('fetchCategory 按 category 过滤实体与记忆，返回正确形状', () => {
+  resetState();
+  _mockStarmapData = makeMultiCategoryData(['张三很忙', '张三喜欢咖啡', '张三有猫'], {});
+  return fetchCategory('person').then(d => {
+    assert.strictEqual(d.category, 'person');
+    assert.strictEqual(d.name, '人物', 'CAT_CN 映射');
+    assert.strictEqual(d.entityCount, 2, '应含张三和李四两个 person 实体');
+    assert.strictEqual(d.memoryCount, 3, '应含 3 条 person 记忆（排除 1 条 place 记忆）');
+    assert.deepStrictEqual(
+      d.entities.map(e => e.name).sort(),
+      ['张三', '李四']
+    );
+    assert.strictEqual(d.memories.length, 3, '记忆数量');
+    assert(d.memories.every(m => m.category === 'person'), '所有记忆 category=person');
+  });
+});
+
+test('fetchCategory 记忆上限 30 条（slice 硬截断）', () => {
+  resetState();
+  const many = [];
+  for (let i = 0; i < 50; i++) many.push('记忆 ' + i);
+  _mockStarmapData = makeMultiCategoryData(many, {});
+  return fetchCategory('person').then(d => {
+    assert.strictEqual(d.memories.length, 30, '应截断到 30 条');
+    assert.strictEqual(d.memoryCount, 50, 'memoryCount 保留原始总数');
+  });
+});
+
+test('fetchCategory 无匹配类别时返回空数组（不抛错）', () => {
+  resetState();
+  _mockStarmapData = makeMultiCategoryData([], {});
+  // place 只有 1 条实体 0 条记忆
+  return fetchCategory('place').then(d => {
+    assert.strictEqual(d.category, 'place');
+    assert.strictEqual(d.entityCount, 1, 'place 有 1 个实体（北京）');
+    assert.strictEqual(d.memoryCount, 1, 'place 有 1 条记忆');
+  });
+});
+
+test('fetchCategory 未知 category 返回空实体空记忆', () => {
+  resetState();
+  _mockStarmapData = makeMultiCategoryData(['x'], {});
+  return fetchCategory('nonexistent').then(d => {
+    assert.strictEqual(d.name, 'nonexistent', '未知类别 name 回退到 category 本身');
+    assert.strictEqual(d.entityCount, 0);
+    assert.strictEqual(d.memoryCount, 0);
+    assert.deepStrictEqual(d.entities, []);
+    assert.deepStrictEqual(d.memories, []);
+  });
+});
+
+/* ── renderCategory ── */
+
+test('renderCategory 含类别名 + 实体列表 + 记忆列表', () => {
+  const data = {
+    category: 'person',
+    name: '人物',
+    entityCount: 2,
+    memoryCount: 3,
+    entities: [
+      { name: '张三', memCount: 3, mentions: 5 },
+      { name: '李四', memCount: 0, mentions: 1 },
+    ],
+    memories: [
+      { content: '张三很忙', ageDays: 0, decayState: 'fading' },
+      { content: '张三喜欢咖啡', ageDays: 1, decayState: 'normal' },
+      { content: '张三有猫', ageDays: 2, decayState: 'fresh' },
+    ],
+  };
+  const html = renderCategory(data);
+  assert(html.includes('drw-title') && html.includes('人物'), '应含类别名"人物"');
+  assert(html.includes('2 个实体 · 3 条记忆'), '应含实体/记忆计数');
+  assert(html.includes('实体（2）'), '应含实体小标题');
+  assert(html.includes('张三') && html.includes('李四'), '应含两个实体名');
+  assert(html.includes('3条记忆 · 5次提及'), '应含张三的 memCount/mentions');
+  assert(html.includes('最近记忆（最多 3 条）'), '应含记忆小标题');
+  assert(html.includes('张三很忙') && html.includes('张三喜欢咖啡'), '应含记忆内容');
+  assert(html.includes('新鲜') && html.includes('正常') && html.includes('正在变淡'), '应含 decay 中文标签');
+  assert(html.includes('1天前'), '应含 ageDays 显示');
+});
+
+test('renderCategory(null) 返回"未找到数据"错误提示', () => {
+  const html = renderCategory(null);
+  assert.strictEqual(html, '<div class="drw-error">未找到数据</div>');
+});
+
+test('renderCategory 空实体空记忆时显示占位文案（不崩溃）', () => {
+  const data = {
+    category: 'project',
+    name: '项目',
+    entityCount: 0,
+    memoryCount: 0,
+    entities: [],
+    memories: [],
+  };
+  const html = renderCategory(data);
+  assert(html.includes('项目'), '类别名仍显示');
+  assert(html.includes('0 个实体 · 0 条记忆'), '计数为 0');
+  assert(html.includes('该类别下暂无实体或记忆'), '应含占位提示');
+  assert(!html.includes('drw-error'), '空类别不属于错误状态，不显示 drw-error');
+});
+
+test('renderCategory 记忆含 HTML 特殊字符时被转义（防注入）', () => {
+  const data = {
+    category: 'person',
+    name: '人物',
+    entityCount: 1,
+    memoryCount: 1,
+    entities: [{ name: '<img src=x onerror=alert(1)>', memCount: 1, mentions: 1 }],
+    memories: [{ content: '& <script>alert("xss")</script>', ageDays: 0, decayState: 'fresh' }],
+  };
+  const html = renderCategory(data);
+  assert(!html.includes('<img src=x'), '实体名中的 <img 应被转义');
+  assert(html.includes('&lt;img'), '应出现 &lt;');
+  assert(!html.includes('<script>'), '记忆中的 <script 应被转义');
+  assert(html.includes('&amp;'), '裸 & 应转义为 &amp;');
+});
+
+test('renderCategory 无 ageDays 字段时显示 0（不崩溃）', () => {
+  const data = {
+    category: 'person',
+    name: '人物',
+    entityCount: 1,
+    memoryCount: 1,
+    entities: [{ name: '张三', memCount: 1, mentions: 1 }],
+    memories: [{ content: '无年龄记忆', decayState: 'fresh' }],
+  };
+  const html = renderCategory(data);
+  assert(html.includes('0天前'), 'ageDays 缺失时应回退为 0 天前');
+  assert(html.includes('未知') === false || html.includes('新鲜'), 'decayState=fresh 应显示"新鲜"');
+});
+
+test('renderCategory decayState 未知值时显示"未知"（不崩溃）', () => {
+  const data = {
+    category: 'person',
+    name: '人物',
+    entityCount: 0,
+    memoryCount: 1,
+    entities: [],
+    memories: [{ content: '异常状态', ageDays: 5, decayState: 'weird_state' }],
+  };
+  const html = renderCategory(data);
+  assert(html.includes('未知'), '未知 decayState 应回退为"未知"');
+});
+
+/* ── Drawer.open 走 fetcher 完整路径 ── */
+
+test('Drawer.open category 走 fetcher 路径（未传 data 时 body 先显示加载中）', () => {
+  resetState();
+  _mockStarmapData = makeMultiCategoryData(['记忆1', '记忆2'], {});
+  D.open('category', 'person', { side: 'left', title: '人物' });
+  assert.strictEqual(D.isOpen(), true, '抽屉应打开');
+  assert(panel._classSet.has('from-left'), '应为左抽屉');
+  // 与 entity 抽屉同一纪律：fetcher 未 resolve 前 body 显示"加载中…"
+  // （fetcher resolve 后走 render，已由 renderCategory 系列测试覆盖）
+  assert(bodyEl._html.includes('加载中'), 'fetcher 路径下 body 应立即显示加载中，实际: ' + bodyEl._html);
+  D.close();
+});
+
+test('Drawer.open category 传 data 时跳过 fetcher（body 直接渲染）', () => {
+  resetState();
+  // 覆盖"预加载数据"路径：调用方已知数据（如从 __starData 缓存取）
+  const data = {
+    category: 'project',
+    name: '项目',
+    entityCount: 1,
+    memoryCount: 2,
+    entities: [{ name: 'Jarvis', memCount: 4, mentions: 4 }],
+    memories: [
+      { content: 'Jarvis 是本地 AI 助手', ageDays: 0, decayState: 'fresh' },
+      { content: 'Jarvis 使用 whisper 转写', ageDays: 1, decayState: 'normal' },
+    ],
+  };
+  D.open('category', 'project', { side: 'left', title: '项目', data: data });
+  // 传 data 时同步渲染，body 立即包含渲染结果
+  assert(bodyEl._html.includes('项目'), 'body 应含类别名');
+  assert(bodyEl._html.includes('Jarvis'), 'body 应含实体名');
+  assert(!bodyEl._html.includes('加载中'), '传 data 时不应出现"加载中"');
+  D.close();
+});
+
+/* ── Esc 关闭左抽屉 ── */
+
+test('Esc 键关闭左抽屉（side=left 与 right 行为一致）', () => {
+  resetState();
+  D.open('category', 'person', { side: 'left' });
+  assert(panel._classSet.has('from-left'));
+  assert.strictEqual(D.isOpen(), true);
+  document.dispatchEvent({ type: 'keydown', key: 'Escape', _capture: true, preventDefault: () => {}, stopPropagation: () => {} });
+  assert.strictEqual(D.isOpen(), false, 'Esc 后应关闭');
+  assert(!panel._classSet.has('open'), '关闭后应无 .open');
+});
+
+test('close 后焦点还给 sourceEl（左抽屉触发点）', () => {
+  resetState();
+  const source = makeEl('div');
+  source._attrs.tabindex = '0';
+  D.open('category', 'person', { side: 'left', title: '人物', sourceEl: source });
+  D.close();
+  assert(document._activeElement === source, 'close 后焦点应还给 sourceEl');
 });
 
 /* ── 结果 ── */

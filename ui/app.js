@@ -235,7 +235,8 @@
       const keys = ['person', 'place', 'event', 'interest', 'project'];
       galEl.innerHTML = keys.map(k => {
         const v = byGal[k] || { ents: 0, mems: 0 };
-        return `<div class="gal"><span>${GAL_CN[k]}</span>
+        return `<div class="gal" tabindex="0" data-cat="${k}" role="button" aria-label="查看${GAL_CN[k]}详情">
+          <span>${GAL_CN[k]}</span>
           <span><b>${v.ents}</b> 星座 · <b>${v.mems}</b> 记忆</span></div>`;
       }).join('') + (d.counts
         ? `<div class="gal" style="margin-top:8px;border:none">
@@ -260,6 +261,29 @@
       if (!_warned.starmap) { _warned.starmap = true; notify('星图连接中断 — 请确认贾维斯已启动', 'warn'); }
     }
   }
+
+  /* 类别条目点击 → 左抽屉（L0→L1）。事件委托一次注册，
+     galEl.innerHTML 整体替换后无需重绑。Esc 关闭 / 焦点还焦由 drawer.js 统一处理。 */
+  function openCategoryGalaxy(ev) {
+    const gal = ev.target.closest && ev.target.closest('.gal[data-cat]');
+    if (!gal) return;
+    if (!window.Drawer || typeof window.Drawer.open !== 'function') return;
+    const cat = gal.dataset.cat;
+    Drawer.open('category', cat, {
+      side: 'left',
+      title: GAL_CN[cat] || cat,
+      sourceEl: gal,
+    });
+  }
+  galEl.addEventListener('click', openCategoryGalaxy);
+  /* 键盘可访问：Enter / Space 打开（role="button" 语义） */
+  galEl.addEventListener('keydown', ev => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    const gal = ev.target.closest && ev.target.closest('.gal[data-cat]');
+    if (!gal) return;
+    ev.preventDefault();
+    openCategoryGalaxy({ target: gal });
+  });
 
   async function loadStatus() {
     try {

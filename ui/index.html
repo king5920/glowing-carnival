@@ -391,6 +391,10 @@ body.drawer-open{overflow:hidden}
 .gal:last-child{border-bottom:none}
 .gal b{color:var(--txt);font-weight:600;font-variant-numeric:var(--tnum)}
 .gal .n{color:var(--dim)}
+/* 类别条目：可点击打开左抽屉（L0→L1）；合计行无 data-cat，不受影响 */
+.gal[data-cat]{cursor:pointer;transition:background .15s}
+.gal[data-cat]:hover{background:rgba(63,208,255,.06)}
+.gal[data-cat]:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 /* 记忆占比条 */
 .ratio{margin:6px 0}
 .ratio .rk{display:flex;justify-content:space-between;font-size:var(--fs-xs);
@@ -497,6 +501,20 @@ body.drawer-open{overflow:hidden}
 #klineTitle{display:flex;align-items:baseline;justify-content:space-between;font-size:9.5px;
   color:var(--faint);font-family:var(--num);margin-bottom:4px}
 #klineCanvas{display:block;width:100%;height:196px;cursor:crosshair}
+/* 标的/周期选择器（§5-2）：面板从"只看上证指数"扩到任意龙头个股。
+   底色用 color-mix 从 --bg 派生 alpha（不写死颜色值）、描边走 --hairline 系列、
+   焦点环走 --accent；option/optgroup 显式给底色，避免各平台原生下拉白底跳出主题。 */
+#klinebox .kline-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.kline-select{background:color-mix(in srgb,var(--bg) 78%,transparent);
+  border:1px solid var(--hairline);color:var(--txt);font-size:10.5px;line-height:1.5;
+  padding:3px 6px;border-radius:6px;font-family:var(--num);font-variant-numeric:var(--tnum);
+  cursor:pointer;outline:none;transition:border-color .15s,background-color .15s}
+.kline-select:hover{border-color:var(--hairline-strong);
+  background:color-mix(in srgb,var(--bg) 60%,transparent)}
+.kline-select:focus-visible{border-color:var(--accent);
+  outline:2px solid var(--accent-soft);outline-offset:1px}
+.kline-select option,.kline-select optgroup{background:var(--bg);color:var(--txt)}
+.kline-select[disabled]{opacity:.5;cursor:default}
 .kline-legend{display:flex;align-items:center;gap:9px;margin-top:4px;flex-wrap:wrap;
   font-size:8.5px;color:var(--faint);font-family:var(--num)}
 .kline-legend .kl-key{display:inline-flex;align-items:center;gap:3px;flex:0 0 auto}
@@ -1185,12 +1203,31 @@ body.no-webgl #gl-fallback{display:grid}
       </div>
       <!-- §5 大盘 K 线图（C3-C）：缠论阶段 + 情绪温度之上再给一段价格历史脉络。
            独立 div，不在 #mpbox IIFE 的 innerHTML 生命周期里。
-           数据由 /api/kline?code=000001&days=120 提供，数据到位一次性重画
-           （渲染在 setTimeout 轮询里，不入 AnimGate.gatedLoop、不新增 rAF 链）。 -->
+           数据由 /api/kline?code=<标的>&period=<周期>&limit=120 提供（默认上证指数），
+           数据到位一次性重画（渲染在 setTimeout 轮询里，不入 AnimGate.gatedLoop、
+           不新增 rAF 链）。标的/周期由 .kline-toolbar 两个下拉决定（§5-2）：
+           指数内置、龙头个股由收盘扫描 IIFE 回调 __populateKlineCodes 动态补入。 -->
       <div class="pb" id="klinebox">
         <div id="klineTitle">
           <span id="klineTitleTxt">大盘 K 线 · 上证指数 120 日</span>
           <span id="klineTime"></span>
+        </div>
+        <div class="kline-toolbar">
+          <select id="klineCode" class="kline-select" aria-label="K 线标的">
+            <optgroup label="指数" data-group="indices">
+              <option value="000001">上证指数 000001</option>
+              <option value="399001">深证成指 399001</option>
+              <option value="399006">创业板指 399006</option>
+            </optgroup>
+            <optgroup label="龙头个股 · 收盘扫描" data-group="leaders">
+              <option value="" disabled data-placeholder="1">（收盘扫描后自动填充）</option>
+            </optgroup>
+          </select>
+          <select id="klinePeriod" class="kline-select" aria-label="K 线周期">
+            <option value="day">日 K</option>
+            <option value="week">周 K</option>
+            <option value="month">月 K</option>
+          </select>
         </div>
         <canvas id="klineCanvas"></canvas>
         <div class="kline-legend">
@@ -1557,6 +1594,11 @@ body.no-webgl #gl-fallback{display:grid}
     }));
     /* 板块卡数据共享给龙头面板渲染 */
     if (window.__renderLeaders) window.__renderLeaders(d);
+    /* 同一份数据也交给 §5-2 K 线标的选择器（动态补入龙头代码）。
+     * 先挂 __closescanData 再调钩子：K 线 IIFE 启动时若尚未注册，
+     * 也能从缓存补齐，不因两个 IIFE 的先后顺序漏填。 */
+    window.__closescanData = d;
+    if (window.__populateKlineCodes) window.__populateKlineCodes(d);
   }
 
   function flowBar(cls, label, val, max, neg) {
@@ -2096,6 +2138,89 @@ body.no-webgl #gl-fallback{display:grid}
 })();
 </script>
 <script>
+/* ── C2-D3 星图类别抽屉（L0→L1 左滑入）──
+ * 左栏 #galaxies 每个类别条目（人物/地点/事件/兴趣/项目）点击时，
+ * 打开 side='left' 抽屉，展示该类别下的所有实体 + 最近 30 条记忆。
+ * 数据源：/api/starmap（与 loadStarmap 同源，前端过滤，零额外请求）。
+ *
+ * 纪律：
+ *   - 零外部依赖、零硬编码 hex、全走 CSS 变量
+ *   - 复用现有 .drw-sec / .drw-title / .drw-sub / .drw-reasons / .drw-rtitle 类
+ *   - 记忆最多显示 30 条，超出用省略行标注剩余条数
+ *   - HTML 转义走 esc()，记忆/实体 name 均来自后端文本 */
+(function () {
+  'use strict';
+  if (typeof window.Drawer !== 'object' || !window.Drawer.register) return;
+
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const CAT_CN = { person: '人物', place: '地点', event: '事件', interest: '兴趣', project: '项目' };
+  const DECAY_CN = { fresh: '新鲜', normal: '正常', fading: '正在变淡' };
+  const MAX_MEMS_SHOWN = 30;
+
+  function fetchCategory(category) {
+    return fetch('/api/starmap').then(r => r.json()).then(d => {
+      const ents = (d && d.entities) || [];
+      const mems = (d && d.memories) || [];
+      const catEnts = ents.filter(e => e.category === category);
+      const catMems = mems.filter(m => m.category === category);
+      return {
+        category: category,
+        name: CAT_CN[category] || category,
+        entityCount: catEnts.length,
+        memoryCount: catMems.length,
+        entities: catEnts,
+        memories: catMems.slice(0, MAX_MEMS_SHOWN),
+      };
+    });
+  }
+
+  function renderCategory(data) {
+    if (!data) return '<div class="drw-error">未找到数据</div>';
+    let h = '<div class="drw-sec">';
+    h += '<div class="drw-title">' + esc(data.name) + '</div>';
+    h += '<div class="drw-sub">' + (data.entityCount || 0) + ' 个实体 · ' + (data.memoryCount || 0) + ' 条记忆</div>';
+    h += '</div>';
+
+    if (data.entities && data.entities.length) {
+      h += '<div class="drw-reasons">';
+      h += '<div class="drw-rtitle">实体（' + data.entities.length + '）</div>';
+      h += '<ul>';
+      data.entities.forEach(e => {
+        h += '<li>' + esc(e.name) +
+             ' <span style="color:var(--faint);font-size:10px">' + (e.memCount || 0) + '条记忆 · ' + (e.mentions || 0) + '次提及</span></li>';
+      });
+      h += '</ul>';
+      h += '</div>';
+    }
+
+    if (data.memories && data.memories.length) {
+      h += '<div class="drw-reasons">';
+      h += '<div class="drw-rtitle">最近记忆（最多 ' + Math.min(data.memories.length, MAX_MEMS_SHOWN) + ' 条）</div>';
+      h += '<ul>';
+      data.memories.forEach(m => {
+        const decayLabel = DECAY_CN[m.decayState] || '未知';
+        h += '<li>' + esc(m.content || '（无内容）') +
+             ' <span style="color:var(--faint);font-size:10px">[' + decayLabel + ' · ' + (m.ageDays != null ? m.ageDays : 0) + '天前]</span></li>';
+      });
+      h += '</ul>';
+      h += '</div>';
+    }
+
+    if (!(data.entities && data.entities.length) && !(data.memories && data.memories.length)) {
+      h += '<div class="drw-reasons"><div class="drw-rtitle">该类别下暂无实体或记忆</div></div>';
+    }
+
+    return h;
+  }
+
+  window.Drawer.register('category', {
+    fetcher: fetchCategory,
+    render: renderCategory,
+    title: '类别详情',
+  });
+})();
+</script>
+<script>
 /* ── §5 情绪温度 60 日热力柱（DESIGN.md §5 第 1 项） ──
  * 数据来自 /api/sentiment/heatmap（60 天 alert_samples 每条）。
  * 画布独立于 #mpbox IIFE 生命周期——IIFE 用 innerHTML 全替换 #mpbox，
@@ -2198,13 +2323,17 @@ body.no-webgl #gl-fallback{display:grid}
 })();
 </script>
 <script>
-/* ── §5 大盘 K 线图（C3-C）──
- * 数据来自 /api/kline?code=000001&days=120（上证指数，120 个交易日）。
+/* ── §5 大盘/个股 K 线图（C3-C + §5-2）──
+ * 数据来自 /api/kline?code=<标的>&period=<周期>&limit=120（默认上证指数）。
  * 与情绪温度/板块分布同一纪律：独立 div、canvas 兄弟躲开 #mpbox 的
  * innerHTML 替换生命周期；数据到位一次性重画，不入 AnimGate.gatedLoop，
  * 不新增 rAF 链，不用 setInterval——刷新调度是一条 setTimeout 链。
  * 涨跌纪律（§1.1）：K 线是涨跌语义，走色相通道 --rd(涨)/--gn(跌) 加形状
  * 通道（实心/空心）加位置通道（影线 high/low），A 股红涨绿跌。
+ *
+ * §5-2：标的/周期由 .kline-toolbar 两个下拉决定（指数内置 + 龙头个股动态补入），
+ * 切换时递增 round 作废在途请求、abort 旧 fetch、拆掉旧的 setTimeout 再重排——
+ * 慢的旧请求回来时不会覆盖新图，也不残留重复定时器。
  *
  * 外部源节流：/api/kline 走腾讯→新浪，最坏 2×8s + 300ms + 8s ≈ 25s，
  * 所以 fetch 带 25s AbortSignal——超时不算失败，只是让 setTimeout 链继续走
@@ -2216,39 +2345,122 @@ body.no-webgl #gl-fallback{display:grid}
   const box = document.getElementById('klinebox');
   const titleEl = document.getElementById('klineTitleTxt');
   const timeEl = document.getElementById('klineTime');
+  const codeEl = document.getElementById('klineCode');
+  const periodEl = document.getElementById('klinePeriod');
   if (!canvas || !box) return;
 
   const C = window.Charts;
-  const CODE = '000001', DAYS = 120;
-  let hover = null;   // bindHover 返回句柄，重绘前 unbind
-  let timer = null;
+  const LIMIT = 120;                       /* 日/周/月统一 120 根（服务端上限 300） */
+  const DEFAULT_CODE = '000001';
+  const PERIODS = { day: '日', week: '周', month: '月' };
+  /* 指数白名单：标题据此在"大盘 K 线 / 个股 K 线"之间切换，不靠名字猜。
+   * 与 tools/stock_kline.js 的 INDEX_MARKET/INDEX_NAMES 同一口径。 */
+  const INDICES = { '000001': '上证指数', '399001': '深证成指', '399006': '创业板指' };
+  const CFG_KEY = 'jarvis.kline.cfg';
 
+  let hover = null;   // bindHover 返回句柄，重绘前 unbind
+  let timer = null;   // 下一次刷新的 setTimeout
+  let round = 0;      // 切换计数器：在途请求回来后与它比对，不一致即作废
+  let ctrl = null;    // 在途 fetch 的 AbortController，切换时手动 abort
+  let desired = null; // 上次记忆里的标的；等龙头代码补进来后再套用
+  const added = new Set();   // 已补入下拉的龙头代码（去重）
+
+  const bareCode = s => String(s == null ? '' : s)
+      .replace(/^[A-Za-z]{0,2}/, '').replace(/\.[A-Za-z]{2}$/, '');
+  const curCode = () => ((codeEl && codeEl.value) || DEFAULT_CODE);
+  const curPeriod = () => ((periodEl && periodEl.value) || 'day');
+
+  /* 记忆：上次看的标的/周期。localStorage 不可用（禁 cookie/私密模式）时静默跳过。 */
+  function readCfg(){
+    try {
+      if (typeof localStorage === 'undefined') return null;
+      const raw = localStorage.getItem(CFG_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+  function persist(){
+    try {
+      if (typeof localStorage === 'undefined') return;
+      localStorage.setItem(CFG_KEY,
+        JSON.stringify({ code: curCode(), period: curPeriod() }));
+    } catch (e) {}
+  }
   function setTitle(txt){ if (titleEl) titleEl.textContent = txt; }
+
+  /* 套用记忆的标的；返回是否真的改了选中值（改了才需要重取数据） */
+  function applyDesired(){
+    if (!desired || !codeEl) return false;
+    const opts = codeEl.options;
+    let have = false;
+    for (let i = 0; i < opts.length; i++) {
+      if (opts[i].value === desired) { have = true; break; }
+    }
+    if (!have) return false;   // 还没补进来，留给下次 populate
+    const before = codeEl.value;
+    codeEl.value = desired;
+    desired = null;
+    return codeEl.value !== before;
+  }
+
+  /* 从收盘扫描数据补入龙头代码（由 closescan IIFE 的 render 回调） */
+  function populate(scan){
+    if (!codeEl || !scan || !Array.isArray(scan.sectors)) return;
+    const grp = codeEl.querySelector('optgroup[data-group="leaders"]');
+    if (!grp) return;
+    let addedCount = 0;
+    scan.sectors.forEach(function (s) {
+      const code = bareCode(s && s.leaderCode);
+      if (!/^\d{6}$/.test(code) || added.has(code)) return;
+      const ph = grp.querySelector('option[data-placeholder]');
+      if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
+      const opt = document.createElement('option');
+      opt.value = code;
+      opt.textContent = (s.leader || code) + ' ' + code;
+      grp.appendChild(opt);
+      added.add(code);
+      addedCount++;
+    });
+    if (addedCount && applyDesired()) switchAll();
+  }
+  /* 挂到 window：closescan IIFE 的 render 每次刷新都会调它。
+   * 它先于本 IIFE 跑完也没关系——启动时会回读 window.__closescanData 缓存。 */
+  window.__populateKlineCodes = populate;
 
   function render(data){
     if (!data || data.ok === false || !(data.bars && data.bars.length)){
-      setTitle('大盘 K 线 · 数据不可用');
+      setTitle('K 线 · 数据不可用');
       /* 仍画一遍空数据，让 canvas 显示"暂无K线数据"而不是上一轮残留 */
       if (hover){ hover.unbind(); hover = null; }
       hover = C.bindHover(canvas, C.drawKline(canvas, []));
       return;
     }
-    const name = data.name || CODE;
-    setTitle('大盘 K 线 · ' + name + ' ' + data.bars.length + ' 日');
+    const key = bareCode(data.code) || bareCode(data) || curCode();
+    const name = data.name || key;
+    /* 指数 → 大盘 K 线；个股 → 个股 K 线（§5-2） */
+    setTitle((INDICES[key] ? '大盘 K 线' : '个股 K 线')
+      + ' · ' + name + ' ' + data.bars.length + ' ' + (PERIODS[curPeriod()] || '日'));
     if (hover){ hover.unbind(); hover = null; }
     hover = C.bindHover(canvas, C.drawKline(canvas, data.bars));
   }
 
   async function refresh(){
-    let ctrl = null, abortT = null;
+    const myRound = ++round;
+    const code = curCode(), period = curPeriod();
+    let abortT = null;
     try {
       if (typeof AbortController !== 'undefined'){
-        ctrl = new AbortController();
-        abortT = setTimeout(function(){ ctrl.abort(); }, 25e3);
+        /* 控制器同时挂在闭包局部和外部 ctrl 上：abort 定时器只捕自己那份，
+         * 否则上一轮挂到 25s 才触发的定时器会误掐掉新标的的请求。 */
+        const ac = new AbortController();
+        ctrl = ac;
+        abortT = setTimeout(function(){ ac.abort(); }, 25e3);
       }
-      const r = await fetch('/api/kline?code=' + CODE + '&days=' + DAYS,
+      const r = await fetch('/api/kline?code=' + encodeURIComponent(code)
+        + '&period=' + encodeURIComponent(period) + '&limit=' + LIMIT,
         { signal: ctrl && ctrl.signal });
-      render(await r.json());
+      const d = await r.json();
+      if (myRound !== round) return;   /* 期间用户已切换，这一轮作废 */
+      render(d);
       if (timeEl) timeEl.textContent = new Date().toLocaleTimeString('zh-CN',
         { hour: '2-digit', minute: '2-digit' });
       const now = new Date();
@@ -2257,13 +2469,37 @@ body.no-webgl #gl-fallback{display:grid}
       /* 日 K 是慢变量：交易时段 5min、收盘后 30min（比 C3-A/C3-B 略缓） */
       timer = setTimeout(refresh, trading ? 5 * 60e3 : 30 * 60e3);
     } catch (e) {
-      setTitle('大盘 K 线 · 连接失败');
+      if (myRound !== round) return;   /* 主动 abort 走这里，静默退出不改标题 */
+      setTitle('K 线 · 连接失败');
       timer = setTimeout(refresh, 60e3);
     } finally {
       /* 拉取已结束后，25s 的 abort 定时器就不再需要了（留着它会空转一次） */
       if (abortT) clearTimeout(abortT);
     }
   }
+
+  /* 切换标的/周期：作废在途请求 → 拆掉旧的 setTimeout 链 → 记忆 → 立刻重取 */
+  function switchAll(){
+    round++;
+    if (ctrl) { try { ctrl.abort(); } catch (e) {} }
+    ctrl = null;
+    if (timer) { clearTimeout(timer); timer = null; }
+    persist();
+    refresh();
+  }
+  if (codeEl) codeEl.addEventListener('change', switchAll);
+  if (periodEl) periodEl.addEventListener('change', switchAll);
+
+  /* 启动：先补龙头代码（若收盘扫描已回过数据），再套记忆，最后开刷。
+   * 顺序很重要：补代码在前，记忆的龙头才可能命中下拉。 */
+  if (window.__closescanData) populate(window.__closescanData);
+  const cfg = readCfg();
+  if (cfg) {
+    if (periodEl && PERIODS[cfg.period]) periodEl.value = cfg.period;
+    const code = bareCode(cfg.code);
+    if (/^\d{6}$/.test(code)) desired = code;
+  }
+  applyDesired();
   refresh();
 })();
 </script>

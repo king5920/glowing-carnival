@@ -905,6 +905,675 @@ test('resizeCanvas dpr 上限 2.5、下限 1', () => {
   window.devicePixelRatio = saved;
 });
 
-console.log('\n── 汇总 ──');
-console.log('  通过: ' + pass + ' | 失败: ' + fail);
-process.exit(fail > 0 ? 1 : 0);
+/* ═══════════════════════════════════════════════════════════════════════
+   §5-2 个股 K 线面板（ui/index.html 内联 IIFE 的**真实源码**）
+   ─────────────────────────────────────────────────────────────────────
+   策略：从 index.html 抽出 §5 K 线 IIFE 原文，放进受控 vm 沙箱执行。
+   fetch / setTimeout / localStorage 全是假实现，记录真实的 URL、定时器、
+   存储写入——这样测的是**上线那段代码**本身，不是它的复制品。
+   （jarvis-drawer.test.js 只能内联复制，因为 render 函数无法导出；
+     这里的 K 线 IIFE 整块自包含，可以整块抽出来跑。）
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const HTML = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
+const MARK = '§5 大盘/个股 K 线图';
+const _mi = HTML.indexOf(MARK);
+const _sStart = HTML.lastIndexOf('<script>', _mi);
+const _sEnd = HTML.indexOf('</script>', _mi);
+const KLINE_SRC = _sStart >= 0 && _sEnd > _sStart
+  ? HTML.slice(_sStart, _sEnd).replace(/^<script>/, '').trim() : '';
+
+/* ── 构造一段 K 线数据（个股口径：高价股 + 量纲与指数差 3 个数量级）── */
+function mkBars(n, base, vol){
+  const bars = [];
+  for (let i = 0; i < n; i++) {
+    const c = base + Math.sin(i / 5) * base * 0.05;
+    const o = c + (i % 2 ? 0.003 : -0.003) * base;
+    bars.push({
+      date: '2026-' + String(1 + Math.floor(i / 30)).padStart(2, '0')
+            + '-' + String(1 + (i % 30)).padStart(2, '0'),
+      open: +o.toFixed(2),
+      high: +(Math.max(o, c) + base * 0.005).toFixed(2),
+      low: +(Math.min(o, c) - base * 0.005).toFixed(2),
+      close: +c.toFixed(2),
+      volume: (vol || 1e6) + i * 1234,
+    });
+  }
+  return bars;
+}
+
+console.log('\n── drawKline 个股形态数据（§5-2）──');
+
+test('drawKline 接受任意个股的 bars（高价股 1680 元 + 小成交量），返回五件套', () => {
+  const { cv } = makeCanvas(440, 200);
+  const bars = mkBars(120, 1680, 520000);
+  const r = C.drawKline(cv, bars, {});
+  assert(r, '应返回结果对象');
+  ['hit', 'tooltip', 'bars', 'mas', 'layout'].forEach(k =>
+    assert(r[k] != null, '缺 ' + k + ' 字段'));
+  assert.strictEqual(r.bars.length, 120, 'bars 应全量保留');
+  assert.strictEqual(r.mas.length, 3, 'MA5/10/20 三条');
+});
+
+test('drawKline 对个股 bars 的 tooltip 是整句中文（含日期/开高低收/量）', () => {
+  const { cv } = makeCanvas(440, 200);
+  const bars = mkBars(60, 1680, 520000);
+  const r = C.drawKline(cv, bars, {});
+  const hit = r.hit(60, 60);
+  assert(hit, '图内应有命中点');
+  const tip = r.tooltip(hit);
+  assert(typeof tip === 'string' && /[一-鿿]/.test(tip),
+    'tooltip 应为中文整句，实得 "' + tip + '"');
+  assert(/\d{4}-\d{2}-\d{2}/.test(tip), 'tooltip 应含日期："' + tip + '"');
+  assert(/开|高|低|收/.test(tip), 'tooltip 应含 OHLC："' + tip + '"');
+});
+
+test('drawKline 个股 bars 的成交量按该股自身量纲归一（量柱落在量区、底部齐平）', () => {
+  const { cv } = makeCanvas(440, 200);
+  const bars = mkBars(40, 25.6, 120000000);   /* 低价股 + 亿股级成交量 */
+  const r = C.drawKline(cv, bars, {});
+  const L = r.layout;
+  assert.strictEqual(r.bars.length, 40, '40 根 bars 全量绘制');
+  const vols = r.bars.map(b => b.vol).filter(Boolean);
+  assert.strictEqual(vols.length, 40, '每根 bar 都应有量柱，实得 ' + vols.length);
+  /* 量柱必须完整落在 [volTop, volTop+volH] 内，且底部齐平 */
+  const bottom = L.volTop + L.volH;
+  vols.forEach(v => {
+    assert(v.y >= L.volTop - 0.01 && v.y + v.h <= bottom + 0.01,
+      '量柱越界 y=' + v.y.toFixed(2) + ' h=' + v.h.toFixed(2)
+        + '，量区是 ' + L.volTop + '~' + bottom);
+    assert(Math.abs(v.y + v.h - bottom) < 0.01,
+      '量柱底部应齐平，实得 ' + (v.y + v.h).toFixed(2) + ' / ' + bottom);
+  });
+  /* 归一基准就是该股自己的最大成交量：最高的量柱正好填满量区 */
+  assert.strictEqual(L.maxVol, Math.max.apply(null, bars.map(b => b.volume)),
+    'maxVol 应取该股自身最大成交量，实得 ' + L.maxVol);
+  const tallest = Math.max.apply(null, vols.map(v => v.h));
+  assert(Math.abs(tallest - L.volH) < 0.01,
+    '最高的量柱应填满量区，实得 ' + tallest.toFixed(2) + ' / ' + L.volH.toFixed(2));
+  /* 量纲再小也各自归一：量区位置不变、maxVol 换成新股的量级 */
+  const r2 = C.drawKline(cv, mkBars(40, 1680, 520000), {});
+  assert.strictEqual(r2.layout.volTop, L.volTop, '换标的后量区位置不变');
+  assert(r2.layout.maxVol < L.maxVol, '不同标的应各自按自身量纲归一');
+});
+
+/* ── IIFE 沙箱：假 fetch / 假时钟 / 假存储 ── */
+function mkSandbox(opts){
+  opts = opts || {};
+  const { cv, host } = makeCanvas(440, 200);
+
+  /* select/options：忠实模拟浏览器语义。两点最容易测假：
+   *  1) 给 value 赋一个 options 里不存在的值 → 选中项静默不变；
+   *  2) removeChild 之后该 option 从 options 里消失（options 反映 DOM 现状）。
+   * 第 2 点之前漏了，导致"占位项被移除"的断言一直是自欺欺人。 */
+  const mkOpt = (value, text, extra) => Object.assign(
+    { value: value, textContent: text, parentNode: null, _ph: false }, extra || {});
+  const idxOpts = [
+    mkOpt('000001', '上证指数 000001'),
+    mkOpt('399001', '深证成指 399001'),
+    mkOpt('399006', '创业板指 399006'),
+  ];
+  const leadGroup = {
+    label: '龙头个股 · 收盘扫描',
+    children: [],
+    appendChild(el){ this.children.push(el); el.parentNode = this; return el; },
+    removeChild(el){
+      const i = this.children.indexOf(el);
+      if (i >= 0) this.children.splice(i, 1);
+      el.parentNode = null;
+      return el;
+    },
+    /* 真 DOM 只返回带该属性的节点——不是"第一个孩子"。
+     * 之前写成 children[0]，导致第二个龙头补入时把第一个龙头当成占位项删掉。 */
+    querySelector(sel){
+      if (!/data-placeholder/.test(sel)) return null;
+      for (let i = 0; i < this.children.length; i++) {
+        if (this.children[i]._ph) return this.children[i];
+      }
+      return null;
+    },
+  };
+  leadGroup.appendChild(mkOpt('', '（收盘扫描后自动填充）', { disabled: true, _ph: true }));
+  const codeEl = {
+    _sel: '000001', _changes: [],
+    get value(){ return this._sel; },
+    set value(v){
+      const opts = this.options;
+      for (let i = 0; i < opts.length; i++) {
+        if (opts[i].value === String(v)) { this._sel = opts[i].value; return; }
+      }
+      /* 浏览器行为：options 里没有这个值 → 选中项不变 */
+    },
+    get options(){ return idxOpts.concat(leadGroup.children); },
+    querySelector(sel){ return /optgroup\[data-group="leaders"\]/.test(sel)
+      ? leadGroup : null; },
+    addEventListener(t, fn){ if (t === 'change') this._changes.push(fn); },
+    change(){ this._changes.forEach(f => f()); },
+  };
+  const periodEl = {
+    _val: 'day', _changes: [],
+    get value(){ return this._val; },
+    set value(v){
+      /* 忠实：day/week/month 之外的赋值被静默忽略（真页面就这三个 option） */
+      if (['day', 'week', 'month'].indexOf(String(v)) >= 0) this._val = String(v);
+    },
+    addEventListener(t, fn){ if (t === 'change') this._changes.push(fn); },
+    change(){ this._changes.forEach(f => f()); },
+  };
+
+  const els = {
+    klineCanvas: cv, klinebox: {}, klineTitleTxt: { textContent: '' },
+    klineTime: { textContent: '' }, klineCode: codeEl, klinePeriod: periodEl,
+  };
+
+  /* 假 fetch：plans 按顺序取，manual:true 的调用留给测试手动 settle */
+  const calls = [];
+  const plans = opts.plans || [];
+  function nextPlan(){
+    if (!plans.length) return { resp: { ok: true } };
+    return plans.shift();
+  }
+  function fetchImpl(url, init){
+    const rec = nextPlan();
+    const call = { url: url, id: calls.length, settled: false,
+                   signal: init && init.signal };
+    calls.push(call);
+    const p = new Promise((resolve, reject) => {
+      call.resolve = (payload) => {
+        if (call.settled) return;
+        call.settled = true;
+        resolve({ json: () => Promise.resolve(payload) });
+      };
+      if (rec.manual !== true){
+        /* 用 setImmediate 而不是 setTimeout：Node 的 0ms 定时器有 1ms 下限，
+         * 而 settle() 只排空 immediate 队列（几十微秒），真定时器根本来不及触发。
+         * 假 fetch 的"稍后回包"不需要真实耗时语义。 */
+        setImmediate(() => call.resolve(rec.resp != null ? rec.resp : { ok: true }));
+      }
+      const sig = init && init.signal;
+      if (sig && typeof sig.addEventListener === 'function'){
+        sig.addEventListener('abort', () => {
+          if (!call.settled) { call.settled = true; reject(new Error('AbortError')); }
+        });
+      }
+    });
+    return p;
+  }
+
+  /* 假时钟：只记录、不触发（5/30 分钟的刷新链不能真的跑起来挂住进程） */
+  const scheduled = [];
+  let tid = 0;
+  function setTimeoutImpl(fn, ms){
+    const id = ++tid;
+    scheduled.push({ id: id, fn: fn, ms: ms, cleared: false });
+    return id;
+  }
+  function clearTimeoutImpl(id){
+    const s = scheduled.find(x => x.id === id);
+    if (s) s.cleared = true;
+  }
+  /* 刷新定时器（5min/30min/60s）与 25s 的 abort 定时器区分开 */
+  function refreshTimers(){
+    return scheduled.filter(s => s.ms >= 60000 && !s.cleared);
+  }
+
+  const store = {};
+  /* 预置"上次关页面"的记忆：IIFE 执行前先写进 store */
+  if (opts.cfgRaw != null) store['jarvis.kline.cfg'] = String(opts.cfgRaw);
+  else if (opts.cfg) store['jarvis.kline.cfg'] = JSON.stringify(opts.cfg);
+  const localStorageImpl = {
+    getItem(k){ return Object.prototype.hasOwnProperty.call(store, k)
+      ? store[k] : null; },
+    setItem(k, v){ store[k] = String(v); },
+  };
+
+  const win = { Charts: C, devicePixelRatio: 2, __closescanData: opts.closescan || null };
+  const sandbox = {
+    window: win,
+    document: { getElementById: (id) => els[id] || null,
+                createElement: (tag) => ({ tag: tag, value: '', textContent: '',
+                                           parentNode: null }) },
+    fetch: fetchImpl,
+    localStorage: opts.noLocalStorage ? undefined : localStorageImpl,
+    AbortController: AbortController,
+    setTimeout: setTimeoutImpl,
+    clearTimeout: clearTimeoutImpl,
+    console: console,
+  };
+  vm.runInNewContext(KLINE_SRC, sandbox, { filename: 'ui/index.html#kline' });
+  return { sandbox: sandbox, win: win, calls: calls, scheduled: scheduled,
+           refreshTimers: refreshTimers, store: store, els: els,
+           codeEl: codeEl, periodEl: periodEl, title: els.klineTitleTxt };
+}
+
+/* 排空微任务队列（跨 realm 的 Promise 同样跑在这条线程上） */
+const settle = (n) => new Promise(r => {
+  let i = 0;
+  (function step(){ if (i++ >= (n || 8)) return r(); setImmediate(step); })();
+});
+
+/* 异步测试：test() 是同步 try/catch，抓不到 rejection，故单独排队后统一汇总 */
+const _asyncQueue = [];
+function atest(name, fn){ _asyncQueue.push({ name: name, fn: fn }); }
+function withTimeout(p, ms, label){
+  return Promise.race([p, new Promise((_, rej) =>
+    setTimeout(() => rej(new Error(label + '：' + ms + 'ms 未结束')), ms))]);
+}
+
+const STOCK_OK = { ok: true, code: '600519', name: '贵州茅台', period: 'day',
+                   adjust: 'forward', source: 'tencent',
+                   days: 120, indicators: {}, bars: mkBars(120, 1680, 520000) };
+const IDX_OK = { ok: true, code: '000001', name: '上证指数', period: 'day',
+                 adjust: 'forward', source: 'tencent',
+                 days: 120, indicators: {}, bars: mkBars(120, 3450, 6e9) };
+
+/* 模拟"收盘扫描回来了"：把龙头塞进下拉。
+ * 不先补码就直接 codeEl.value='600519' 会被 select 语义忽略（值不在 options 里），
+ * 那测的就不是切换逻辑了。 */
+function addLeaders(env, sectors){
+  env.win.__populateKlineCodes({ sectors: sectors });
+}
+
+console.log('\n── §5-2 K 线面板：标的/周期切换（index.html 真源码）──');
+
+atest('源码可抽取并执行（结构自检：两个下拉 + 切换钩子 + 补码钩子都在）', async () => {
+  assert(KLINE_SRC.length > 2000, 'IIFE 未抽到（marker "' + MARK + '" 失效？）');
+  assert(/getElementById\('klineCode'\)/.test(KLINE_SRC), '缺 #klineCode 读取');
+  assert(/getElementById\('klinePeriod'\)/.test(KLINE_SRC), '缺 #klinePeriod 读取');
+  const env = mkSandbox({ plans: [{ manual: true }] });
+  await settle();
+  assert.strictEqual(typeof env.win.__populateKlineCodes, 'function',
+    'window.__populateKlineCodes 钩子未挂出');
+  assert(env.calls.length === 1, '启动应触发一次 /api/kline');
+});
+
+atest('启动默认请求上证指数：/api/kline?code=000001&period=day&limit=120', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }] });
+  await settle();
+  assert.strictEqual(env.calls.length, 1);
+  assert.strictEqual(env.calls[0].url, '/api/kline?code=000001&period=day&limit=120',
+    '实得 ' + env.calls[0].url);
+  assert.strictEqual(env.title.textContent, '大盘 K 线 · 上证指数 120 日',
+    '标题应为"' + env.title.textContent + '"');
+});
+
+atest('切换标的 → 请求带新 code，标题改为"个股 K 线"', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }, { resp: STOCK_OK }] });
+  await settle();
+  addLeaders(env, [{ name: '白酒', leader: '贵州茅台', leaderCode: '600519' }]);
+  await settle();
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  await settle();
+  assert.strictEqual(env.calls.length, 2);
+  assert(env.calls[1].url.indexOf('code=600519') >= 0, '实得 ' + env.calls[1].url);
+  assert.strictEqual(env.title.textContent, '个股 K 线 · 贵州茅台 120 日',
+    '实得"' + env.title.textContent + '"');
+});
+
+atest('切换周期 → 请求带 period=week，标题单位变"周"', async () => {
+  const WEEK = Object.assign({}, IDX_OK,
+    { period: 'week', bars: mkBars(120, 3450, 6e9) });
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }, { resp: WEEK }] });
+  await settle();
+  env.periodEl.value = 'week';
+  env.periodEl.change();
+  await settle();
+  assert(env.calls[1].url.indexOf('period=week') >= 0, '实得 ' + env.calls[1].url);
+  assert(/周$/.test(env.title.textContent), '标题应以"周"结尾，实得"'
+    + env.title.textContent + '"');
+});
+
+atest('月 K：limit 仍是 120，URL 三个参数齐全', async () => {
+  const M = Object.assign({}, STOCK_OK, { period: 'month' });
+  const env = mkSandbox({ plans: [
+    { resp: IDX_OK },          /* 启动：上证指数 日 K */
+    { resp: STOCK_OK },        /* 切标的：600519 日 K */
+    { resp: M },               /* 切周期：600519 月 K */
+  ]});
+  await settle();
+  addLeaders(env, [{ name: '白酒', leader: '贵州茅台', leaderCode: '600519' }]);
+  await settle();
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  await settle();
+  env.periodEl.value = 'month';
+  env.periodEl.change();
+  await settle();
+  assert.strictEqual(env.calls.length, 3, '两次切换应各发一次请求');
+  const last = env.calls[env.calls.length - 1];
+  assert.strictEqual(last.url, '/api/kline?code=600519&period=month&limit=120',
+    '实得 ' + last.url);
+  assert(/月$/.test(env.title.textContent), '标题应以"月"结尾，实得"'
+    + env.title.textContent + '"');
+});
+
+atest('龙头代码动态补入 leaders 分组，占位项被移除', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }] });
+  await settle();
+  const before = env.codeEl.options.length;
+  assert.strictEqual(before, 4, '启动时 3 个指数 + 1 个占位项，实得 ' + before);
+  env.win.__populateKlineCodes({ sectors: [
+    { name: '半导体', leader: '中芯国际', leaderCode: '688981' },
+    { name: '白酒', leader: '贵州茅台', leaderCode: '600519' },
+  ]});
+  const opts = env.codeEl.options;
+  const vals = opts.map(o => o.value);
+  assert(vals.indexOf('688981') >= 0 && vals.indexOf('600519') >= 0,
+    '应补入 688981 与 600519，实得 ' + vals.join(','));
+  assert.strictEqual(opts.length, before - 1 + 2,
+    '占位项被删掉、补入 2 项，实得 ' + opts.length);
+  assert(opts.every(o => !o.disabled), '占位项应已移除');
+  const names = opts.map(o => o.textContent);
+  assert(names.indexOf('中芯国际 688981') >= 0
+    && names.indexOf('贵州茅台 600519') >= 0,
+    'option 文案应是"名称 代码"，实得 ' + names.join(' | '));
+});
+
+atest('重复补入去重（同一 leaderCode 只出现一次）', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }] });
+  await settle();
+  const scan = { sectors: [
+    { leader: '贵州茅台', leaderCode: '600519' },
+    { leader: '万科A', leaderCode: '000002' },
+  ]};
+  env.win.__populateKlineCodes(scan);
+  env.win.__populateKlineCodes(scan);
+  const vals = env.codeEl.options.map(o => o.value);
+  assert.strictEqual(vals.filter(v => v === '600519').length, 1,
+    '600519 出现 ' + vals.filter(v => v === '600519').length + ' 次');
+  assert.strictEqual(env.codeEl.options.length, 5,
+    '3 指数 + 2 龙头，实得 ' + env.codeEl.options.length);
+});
+
+atest('脏 leaderCode 全部跳过不炸（空/非数字/位数不对/带前缀后缀）', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }] });
+  await settle();
+  const before = env.codeEl.options.length;
+  env.win.__populateKlineCodes({ sectors: [
+    { leader: '空', leaderCode: null },
+    { leader: '无', leaderCode: undefined },
+    { leader: 'abc', leaderCode: 'abc' },
+    { leader: '短', leaderCode: '60051' },
+    { leader: '长', leaderCode: '6005199' },
+  ]});
+  assert.strictEqual(env.codeEl.options.length, before, '脏数据不应产生任何 option');
+  env.win.__populateKlineCodes(null);
+  env.win.__populateKlineCodes({});
+  env.win.__populateKlineCodes({ sectors: 'not-array' });
+  assert.strictEqual(env.codeEl.options.length, before, '空/错形输入也不应产生 option');
+});
+
+atest('带 sh/sz 前缀与 .SH 后缀的 leaderCode 归一化后再补入', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }] });
+  await settle();
+  env.win.__populateKlineCodes({ sectors: [
+    { leader: '贵州茅台', leaderCode: 'sh600519' },
+    { leader: '五粮液', leaderCode: '000858.SZ' },
+  ]});
+  const vals = env.codeEl.options.map(o => o.value);
+  assert(vals.indexOf('600519') >= 0, 'sh600519 应归一化为 600519');
+  assert(vals.indexOf('000858') >= 0, '000858.SZ 应归一化为 000858');
+});
+
+atest('启动时回读 __closescanData 缓存（收盘扫描先于 K 线 IIFE 完成的时序）', async () => {
+  const env = mkSandbox({
+    plans: [{ resp: STOCK_OK }],
+    closescan: { sectors: [{ leader: '贵州茅台', leaderCode: '600519' }] },
+  });
+  await settle();
+  const vals = env.codeEl.options.map(o => o.value);
+  assert(vals.indexOf('600519') >= 0, '启动即应含 600519，实得 ' + vals.join(','));
+});
+
+atest('切换作废在途请求：旧的上证指数响应回来不覆盖新图', async () => {
+  const env = mkSandbox({ plans: [{ manual: true }, { manual: true }] });
+  await settle();
+  addLeaders(env, [{ leader: '贵州茅台', leaderCode: '600519' }]);
+  /* 第一次请求（000001）还在途，用户切到 600519 */
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  await settle();
+  assert.strictEqual(env.calls.length, 2, '应已发出第二个请求');
+  assert(env.calls[1].url.indexOf('code=600519') >= 0,
+    '第二个请求应带新标的，实得 ' + env.calls[1].url);
+  env.calls[1].resolve(STOCK_OK);
+  await settle();
+  assert.strictEqual(env.title.textContent, '个股 K 线 · 贵州茅台 120 日',
+    '新响应应生效');
+  /* 旧的第一个响应姗姗来迟 */
+  env.calls[0].resolve(IDX_OK);
+  await settle();
+  assert.strictEqual(env.title.textContent, '个股 K 线 · 贵州茅台 120 日',
+    '旧响应不应覆盖新图，实得"' + env.title.textContent + '"');
+});
+
+atest('切换不残留重复定时器（旧的 setTimeout 被清掉）', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }, { resp: STOCK_OK }] });
+  await settle();
+  assert.strictEqual(env.refreshTimers().length, 1, '首刷后应有 1 个刷新定时器');
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  await settle();
+  assert.strictEqual(env.refreshTimers().length, 1,
+    '切换后仍应只有 1 个，实得 ' + env.refreshTimers().length);
+  assert(env.scheduled.some(s => s.ms >= 60000 && s.cleared),
+    '旧的刷新定时器应被 clearTimeout');
+});
+
+atest('连续快速切换两次：只留 1 个定时器、最终图是最后一次选择', async () => {
+  const W2 = Object.assign({}, STOCK_OK, { code: '000002', name: '万科A' });
+  const env = mkSandbox({ plans: [{ manual: true }, { manual: true }, { manual: true }] });
+  await settle();
+  addLeaders(env, [
+    { leader: '贵州茅台', leaderCode: '600519' },
+    { leader: '万科A', leaderCode: '000002' },
+  ]);
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  env.codeEl.value = '000002';
+  env.codeEl.change();
+  await settle();
+  assert.strictEqual(env.calls.length, 3);
+  assert(env.calls[1].url.indexOf('code=600519') >= 0, '第二次请求应为 600519');
+  assert(env.calls[2].url.indexOf('code=000002') >= 0, '第三次请求应为 000002');
+  env.calls[2].resolve(W2);
+  await settle();
+  env.calls[1].resolve(STOCK_OK);   /* 中间那次也来迟 */
+  await settle();
+  assert.strictEqual(env.title.textContent, '个股 K 线 · 万科A 120 日',
+    '应显示最后一次选择，实得"' + env.title.textContent + '"');
+  assert.strictEqual(env.refreshTimers().length, 1,
+    '实得 ' + env.refreshTimers().length);
+});
+
+atest('切换会 abort 掉上一轮在途请求，且不把 abort 显示成"连接失败"', async () => {
+  const env = mkSandbox({ plans: [{ manual: true }, { resp: STOCK_OK }] });
+  await settle();
+  addLeaders(env, [{ leader: '贵州茅台', leaderCode: '600519' }]);
+  assert.strictEqual(env.calls[0].signal.aborted, false, '在途请求尚未被中止');
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  await settle();
+  assert.strictEqual(env.calls[0].signal.aborted, true,
+    '切换标的应 abort 掉上一轮在途请求');
+  assert.strictEqual(env.calls[1].signal.aborted, false,
+    '新请求应带一个未中止的 AbortSignal');
+  env.calls[1].resolve(STOCK_OK);
+  await settle();
+  assert.strictEqual(env.title.textContent, '个股 K 线 · 贵州茅台 120 日');
+  assert(!/连接失败|数据不可用/.test(env.title.textContent),
+    'abort 出来的旧请求不应改写标题，实得"' + env.title.textContent + '"');
+});
+
+atest('记忆恢复：localStorage 里的标的+周期在启动时生效', async () => {
+  const env = mkSandbox({
+    cfg: { code: '399006', period: 'week' },
+    plans: [{ resp: Object.assign({}, IDX_OK,
+      { code: '399006', name: '创业板指', period: 'week' }) }],
+  });
+  await settle();
+  assert.strictEqual(env.codeEl.value, '399006', '应恢复上次标的');
+  assert.strictEqual(env.periodEl.value, 'week', '应恢复上次周期');
+  assert.strictEqual(env.calls[0].url, '/api/kline?code=399006&period=week&limit=120',
+    '实得 ' + env.calls[0].url);
+  assert.strictEqual(env.title.textContent, '大盘 K 线 · 创业板指 120 周',
+    '指数走"大盘"前缀，实得"' + env.title.textContent + '"');
+});
+
+atest('无记忆时回到默认（上证指数 + 日 K）', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }] });
+  await settle();
+  assert.strictEqual(env.codeEl.value, '000001');
+  assert.strictEqual(env.periodEl.value, 'day');
+  assert.strictEqual(env.calls[0].url, '/api/kline?code=000001&period=day&limit=120');
+});
+
+atest('记忆写回：切换标的/周期后 localStorage 记录最新选择', async () => {
+  const env = mkSandbox({ plans: [
+    { resp: IDX_OK }, { resp: STOCK_OK }, { resp: STOCK_OK },
+  ]});
+  await settle();
+  addLeaders(env, [{ leader: '贵州茅台', leaderCode: '600519' }]);
+  await settle();
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  await settle();
+  env.periodEl.value = 'week';
+  env.periodEl.change();
+  await settle();
+  const raw = env.store['jarvis.kline.cfg'];
+  assert(raw, '应有 jarvis.kline.cfg 写入');
+  const cfg = JSON.parse(raw);
+  assert.strictEqual(cfg.code, '600519', '实得 ' + raw);
+  assert.strictEqual(cfg.period, 'week', '实得 ' + raw);
+});
+
+atest('localStorage 不可用时启动不炸（私密模式/禁 cookie）', async () => {
+  const env = mkSandbox({ plans: [{ resp: IDX_OK }, { resp: STOCK_OK }],
+                          noLocalStorage: true });
+  await settle();
+  assert.strictEqual(env.title.textContent, '大盘 K 线 · 上证指数 120 日');
+  addLeaders(env, [{ leader: '贵州茅台', leaderCode: '600519' }]);
+  env.codeEl.value = '600519';
+  env.codeEl.change();
+  await settle();
+  assert.strictEqual(env.calls.length, 2, '切换仍应触发新请求');
+  assert.strictEqual(env.codeEl.value, '600519', '无存储也不应阻塞选择');
+});
+
+atest('接口失败时如实显示"连接失败"，不显示旧数据', async () => {
+  const env = mkSandbox({ plans: [{ resp: { ok: false, error: '上游超时' } }] });
+  await settle();
+  assert.strictEqual(env.title.textContent, 'K 线 · 数据不可用',
+    '实得"' + env.title.textContent + '"');
+});
+
+console.log('\n── §5-2 前端记忆与补码时序 ──');
+
+atest('记忆的龙头要等收盘扫描补码后才套用（不在启动时静默退回上证指数）', async () => {
+  /* 记忆 = 龙头 600519，但启动时下拉里还没有它 —— 必须先等补码。
+   * plans 用会 settle 的 resp（不是 manual）：刷新成功后才会排定时器，
+   * 这样"不残留旧定时器"的断言才有东西可查。 */
+  const env = mkSandbox({
+    cfg: { code: '600519', period: 'day' },
+    plans: [{ resp: IDX_OK }, { resp: STOCK_OK }, { resp: STOCK_OK }],
+  });
+  await settle();
+  assert.strictEqual(env.codeEl.value, '000001',
+    '龙头还没补进来时不应改选中项，实得 ' + env.codeEl.value);
+  assert.strictEqual(env.calls[0].url, '/api/kline?code=000001&period=day&limit=120',
+    '启动只能取上证指数，实得 ' + env.calls[0].url);
+  /* 收盘扫描回来了 */
+  env.win.__populateKlineCodes({ sectors: [
+    { leader: '贵州茅台', leaderCode: '600519' }] });
+  await settle();
+  assert.strictEqual(env.codeEl.value, '600519',
+    '补码后应套用记忆的龙头，实得 ' + env.codeEl.value);
+  const last = env.calls[env.calls.length - 1];
+  assert(last.url.indexOf('code=600519') >= 0, '并重新请求该标的，实得 ' + last.url);
+  assert.strictEqual(env.refreshTimers().length, 1,
+    '补码触发的重取不应残留旧定时器');
+});
+
+atest('记忆的 code 是垃圾数据时安全退回默认，不改周期', async () => {
+  const env = mkSandbox({
+    cfg: { code: 'not-a-code', period: 'weekly' },
+    plans: [{ manual: true }],
+  });
+  await settle();
+  assert.strictEqual(env.codeEl.value, '000001', '应退回默认标的');
+  assert.strictEqual(env.periodEl.value, 'day', '非法周期不应生效');
+  assert.strictEqual(env.calls[0].url, '/api/kline?code=000001&period=day&limit=120');
+});
+
+atest('记忆的 code/period 是非字符串类型时不炸', async () => {
+  const env = mkSandbox({
+    cfg: { code: { a: 1 }, period: 5 },
+    plans: [{ manual: true }],
+  });
+  await settle();
+  assert.strictEqual(env.codeEl.value, '000001');
+  assert.strictEqual(env.calls[0].url, '/api/kline?code=000001&period=day&limit=120');
+});
+
+atest('记忆是坏 JSON 时静默退回默认（不炸、不阻塞首刷）', async () => {
+  const env = mkSandbox({
+    cfgRaw: '{{{not json',
+    plans: [{ manual: true }],
+  });
+  await settle();
+  assert.strictEqual(env.codeEl.value, '000001');
+  assert.strictEqual(env.calls[0].url, '/api/kline?code=000001&period=day&limit=120');
+});
+
+console.log('\n── §5-2 fetcher 侧：任意 code 接受度（stock_kline 纯函数，离线）──');
+
+test('emSecid 对任意个股代码给出正确市场前缀（6/9 开头→沪 1.，其余→深 0.）', () => {
+  const kl = require('./tools/stock_kline');
+  [['600519', '1.600519'], ['000002', '0.000002'], ['300750', '0.300750'],
+   ['688981', '1.688981'], ['002594', '0.002594'], ['900001', '1.900001']]
+    .forEach(pair => {
+      assert.strictEqual(kl.emSecid(pair[0], null, false), pair[1], 'code ' + pair[0]);
+    });
+});
+
+test('isIndexCode 区分指数与个股：000001 是上证指数而不是平安银行', () => {
+  const kl = require('./tools/stock_kline');
+  ['000001', '399001', '399006'].forEach(c =>
+    assert(kl.isIndexCode(c), c + ' 应识别为指数'));
+  ['600519', '000002'].forEach(c =>
+    assert(!kl.isIndexCode(c), c + ' 不应识别为指数'));
+});
+
+test('drawKline 对周/月周期的 bars 同样正常绘制（周期只影响数据粒度，不影响画法）', () => {
+  const { cv } = makeCanvas(440, 200);
+  ['week', 'month'].forEach(() => {
+    const r = C.drawKline(cv, mkBars(120, 3450, 6e9), {});
+    assert(r && r.bars.length === 120, 'bars 应全量绘制');
+    assert(r.layout, 'layout 应存在');
+  });
+});
+
+/* ── 汇总：先排空异步队列，再打印总数（run-tests.js 靠这行自报数）──
+ * 注意 process.exit 必须在异步跑完之后：同步调用会抢在首刷 Promise 前退出。 */
+(async function flushAsync(){
+  for (const t of _asyncQueue) {
+    try {
+      await withTimeout(Promise.resolve().then(t.fn), 15000, t.name);
+      console.log('  PASS ' + t.name);
+      pass++;
+    } catch (e) {
+      console.log('  FAIL ' + t.name + '\n       ' + (e && e.stack || e));
+      fail++;
+    }
+  }
+  console.log('\n── 汇总 ──');
+  console.log('  通过: ' + pass + ' | 失败: ' + fail);
+  process.exit(fail > 0 ? 1 : 0);
+})();
+
