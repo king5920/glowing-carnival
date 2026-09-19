@@ -14,9 +14,10 @@
  *   7. window.__tapeRefresh 暴露（CDP 侧可主动触发一轮）
  *
  * 注意：C3-C 的 /api/kline 走腾讯→新浪外部源（最坏 ≈25s），C3-D 的 /api/closescan
- *       走东财 clist 分页且无服务端缓存（最坏几十秒），比本地库的 heatmap/distribution
- *       慢一个数量级，所以各自单独轮询画布像素直到 painted>=3%（上限 45s），
- *       不靠固定 sleep 判"全透明"。
+ *       走东财 clist 分页（冷扫描实测 37~46s），比本地库的 heatmap/distribution
+ *       慢一个数量级。脚本启动时先主动焐热一次 closescan（warmCloseScan），TAPE 等待再按
+ *       标题状态机判别（"板块"=终态 / "连接失败"=即失败 / "加载中"=继续），上限 100s，
+ *       不靠固定 sleep 判"全透明"，也不再把骨架态误判成失败。
  *
  * CDP 端口 9338（9335=contrast, 9336=tbmenu, 9337=starmap-plus, 9338=charts）
  */
@@ -228,12 +229,16 @@ const KLINE_PROBE = `(() => {
 const TAPE_PAINTED = `(() => {
   try {
     const cv = document.getElementById('tapeCanvas');
-    if(!cv || cv.width === 0 || cv.height === 0) return JSON.stringify({ pct: -1 });
+    const ti = document.getElementById('tapeTime');
+    if(!cv || cv.width === 0 || cv.height === 0) return JSON.stringify({ pct: -1, title: '' });
     const full = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
     let n = 0;
     for(let i = 3; i < full.data.length; i += 4) if(full.data[i] > 0) n++;
-    return JSON.stringify({ pct: n / (full.width * full.height) * 100 });
-  } catch(e){ return JSON.stringify({ err: e.message }); }
+    /* title 让等待循环能区分三态，不再只赌像素 + 固定超时：
+       "12板块 · …"=真数据终态；"加载中…"=骨架（继续等）；"连接失败"=失败终态。 */
+    return JSON.stringify({ pct: n / (full.width * full.height) * 100,
+                            title: ti ? ti.textContent : '' });
+  } catch(e){ return JSON.stringify({ err: e.message, title: '' }); }
 })()`;
 
 /* §5-4 TAPE probe：与 probeOne 同构，但图例是 #tapeLegend（--rd/--gd/--cy 三色块），
@@ -354,8 +359,36 @@ const getJSON = (path) => new Promise((resolve, reject) => {
 });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+/* 焐热服务端 /api/closescan 缓存，再启动浏览器。
+ * 为什么必须在 spawn 之前：Edge 以 URL 直接启动即导航，页面里的 TAPE IIFE 立刻发请求；
+ * 不提前焐热，全新场景下首个请求要硬吃东财 clist 冷扫描（实测 37~46s），撞上旧脚本
+ * 的 45s 上限就会假红（抓到的是"加载中…"骨架）。提前打一次，导航瞬间缓存已热，
+ * TAPE 实测 ~275ms 翻转。预热失败不致命——下方等待循环仍有 100s 冷扫描兜底。 */
+function warmCloseScan() {
+  return new Promise(resolve => {
+    const t0 = Date.now();
+    const req = require('http').get(
+      URL.replace(/\/$/, '') + '/api/closescan?topN=12',
+      res => {
+        let b = '';
+        res.on('data', c => { b += c; });
+        res.on('end', () => {
+          let n = null, fromCache = null;
+          try { const j = JSON.parse(b); n = (j.sectors || []).length; fromCache = !!j.fromCache; } catch (_) {}
+          console.log('预热 closescan：HTTP ' + res.statusCode + '  ' + n + ' 板块' +
+            (fromCache ? '（命中服务端缓存）' : '（冷扫描）') +
+            '  用时 ' + ((Date.now() - t0) / 1000).toFixed(1) + 's');
+          resolve();
+        });
+      });
+    req.on('error', () => { console.log('预热 closescan 失败（继续，等待循环兜底）'); resolve(); });
+    req.setTimeout(120000, () => { try { req.destroy(); } catch (_) {} resolve(); });
+  });
+}
+
 async function main() {
   require('fs').mkdirSync(require('path').dirname(OUT), { recursive: true });
+  await warmCloseScan();   // 必须在 spawn(URL) 之前，让页面导航瞬间缓存已热
   console.log('启动 msedge headless（CDP 端口 ' + CDP_PORT + '，视口 ' + VP.w + 'x' + VP.h + '）…');
   child = spawn(EDGE, [
     '--headless=new', '--disable-extensions', '--no-first-run', '--no-default-browser-check',
@@ -421,8 +454,13 @@ async function main() {
   if (typeof raw3 === 'string' && raw3.startsWith('ERR:')) die(2, 'KLINE_PROBE 抛错：' + raw3);
   const kline = JSON.parse(raw3);
 
-  /* ── §5-4 TAPE 单独等首绘：/api/closescan 无缓存，走东财 clist 分页，最坏几十秒 ── */
-  let tapePct = -1, tapeErr = null;
+  /* ── §5-4 TAPE 等首绘：状态机判别，不再只赌像素 + 45s 固定超时 ──
+   * 冷启动 IIFE 先画"加载中…"骨架（painted 极低），fetch 回来再翻真数据。
+   *   title 含"板块"  → 真数据终态，跳出做断言
+   *   title === "连接失败" → 后端真失败，立即判失败（不白等）
+   *   其余（加载中/暂无数据/空）→ 继续等
+   * 上限 100s：东财 clist 冷扫描实测 37~46s，给 2 倍余量；正常已被 warmCloseScan 焐热，~1s 内翻转。 */
+  let tapePct = -1, tapeErr = null, tapeTitle = '', tapeFailed = false;
   const tp0 = Date.now();
   for (;;) {
     const tp = await cdp.send('Runtime.evaluate', { expression: TAPE_PAINTED, returnByValue: true });
@@ -430,14 +468,27 @@ async function main() {
     try { tv = JSON.parse(tp.result && tp.result.value); } catch (_) {}
     if (tv && typeof tv.pct === 'number') tapePct = tv.pct;
     if (tv && tv.err) tapeErr = tv.err;
-    if (tapePct >= 3) break;
-    if (Date.now() - tp0 > 45000) break;
+    if (tv && typeof tv.title === 'string') tapeTitle = tv.title;
+    if (/板块/.test(tapeTitle) && tapePct >= 3) break;        // 真数据
+    if (tapeTitle === '连接失败') { tapeFailed = true; break; } // 明确失败
+    if (Date.now() - tp0 > 100000) break;                      // 冷扫描兜底上限
     await sleep(1000);
   }
   console.log('TAPE 首绘（板块扫描）painted=' +
     (tapePct < 0 ? '采样失败' : tapePct.toFixed(2) + '%') +
+    ' 标题="' + tapeTitle + '"' +
     ' 用时 ' + ((Date.now() - tp0) / 1000).toFixed(1) + 's' +
+    (tapeFailed ? '  [后端返回连接失败]' : '') +
     (tapeErr ? '  [采样报错 ' + tapeErr + ']' : ''));
+  if (tapeFailed) die(4, 'TAPE 后端连接失败（/api/closescan 返回错误态）');
+  if (!/板块/.test(tapeTitle)) {
+    /* 到这里说明 100s 内没翻成真数据。区分两种本质不同的情况：
+       "加载中…"=请求一直没回来（真超时/源故障）→ 判失败；
+       "暂无数据"=链路通、东财返回了空 sectors → 不是渲染缺陷，放行但醒目标注。 */
+    if (/加载中/.test(tapeTitle))
+      die(5, 'TAPE 100s 内未取到板块数据（标题仍为"' + tapeTitle + '"）——东财冷扫描超时或源故障');
+    console.log('  ⚠ TAPE 链路通但源返回空（标题="' + tapeTitle + '"），跳过数据相关像素/tooltip 断言');
+  }
 
   const r4 = await cdp.send('Runtime.evaluate', { expression: TAPE_PROBE, returnByValue: true });
   const raw4 = r4.result && r4.result.value;
@@ -633,37 +684,42 @@ async function main() {
   if (kline.titleText && !/\d+\s*日/.test(kline.titleText))
     fail.push('大盘K线: 标题缺"N 日"："' + kline.titleText + '"');
 
-  /* ═══ C3-D §5-4 实时 TAPE 断言 ═══ */
-  assertChart('实时TAPE', tape, {
-    minPct: 3,
-    mustHaveText: [/龙头涨幅/, /10日资金/, /板块涨幅/],
-  });
-  /* 三个色块必须真的上色（--rd 龙头 / --gd 资金 / --cy 板块） */
-  (tape.legendSwatches || []).forEach(function(s){
-    if (!s.exists) { fail.push('实时TAPE: 图例色块缺失 .tape-sw[' + s.name + ']'); return; }
-    if (s.transparent)
-      fail.push('实时TAPE: 图例色块"' + s.name + '"背景全透明（色没渲染出来）');
-  });
-  /* hover 整句必须逐个含 龙头 / 10日资金 / 板块（用户明确要求的三个字段），
-   * 且同时带 % 与 亿 两种单位 */
-  if (tape.hoverTest && tape.hoverTest.tipFound) {
-    const missing = ['龙头', '10日资金', '板块'].filter(function(k){
-      return tape.hoverTest.tipHits.indexOf(k) < 0;
+  /* ═══ C3-D §5-4 实时 TAPE 断言 ═══
+   * tapeHasData=false 表示链路通但东财返回空（标题"暂无数据"）——此时只验结构
+   * （图例文字 / 刷新钩子），跳过像素、色块、hover 等依赖真实柱体的断言。 */
+  const tapeHasData = /板块/.test(tapeTitle);
+  if (tapeHasData) {
+    assertChart('实时TAPE', tape, {
+      minPct: 3,
+      mustHaveText: [/龙头涨幅/, /10日资金/, /板块涨幅/],
     });
-    if (missing.length)
-      fail.push('实时TAPE: tooltip 缺字段 ' + missing.join('/') +
-                '："' + (tape.hoverTest.tipText || '') + '"');
-    if (!tape.hoverTest.tipTextHasPct)
-      fail.push('实时TAPE: tooltip 缺 % 涨幅单位："' +
-                (tape.hoverTest.tipText || '') + '"');
-    if (!tape.hoverTest.tipTextHasYi)
-      fail.push('实时TAPE: tooltip 缺 亿 资金单位："' +
-                (tape.hoverTest.tipText || '') + '"');
+    /* 三个色块必须真的上色（--rd 龙头 / --gd 资金 / --cy 板块） */
+    (tape.legendSwatches || []).forEach(function(s){
+      if (!s.exists) { fail.push('实时TAPE: 图例色块缺失 .tape-sw[' + s.name + ']'); return; }
+      if (s.transparent)
+        fail.push('实时TAPE: 图例色块"' + s.name + '"背景全透明（色没渲染出来）');
+    });
+    /* hover 整句必须逐个含 龙头 / 10日资金 / 板块（用户明确要求的三个字段），
+     * 且同时带 % 与 亿 两种单位 */
+    if (tape.hoverTest && tape.hoverTest.tipFound) {
+      const missing = ['龙头', '10日资金', '板块'].filter(function(k){
+        return tape.hoverTest.tipHits.indexOf(k) < 0;
+      });
+      if (missing.length)
+        fail.push('实时TAPE: tooltip 缺字段 ' + missing.join('/') +
+                  '："' + (tape.hoverTest.tipText || '') + '"');
+      if (!tape.hoverTest.tipTextHasPct)
+        fail.push('实时TAPE: tooltip 缺 % 涨幅单位："' +
+                  (tape.hoverTest.tipText || '') + '"');
+      if (!tape.hoverTest.tipTextHasYi)
+        fail.push('实时TAPE: tooltip 缺 亿 资金单位："' +
+                  (tape.hoverTest.tipText || '') + '"');
+    }
   }
-  /* 轮询钩子必须暴露（CDP 侧可主动触发一轮） */
+  /* 轮询钩子必须暴露（CDP 侧可主动触发一轮）——空数据也必须有 */
   if (tape.refreshHook !== 'function')
     fail.push('实时TAPE: window.__tapeRefresh 未暴露（typeof=' + tape.refreshHook + '）');
-  /* 标题应含板块计数 */
+  /* 标题应含板块计数（"暂无数据"是合法空态，放行） */
   if (tape.titleText && !/板块/.test(tape.titleText) && !/暂无数据/.test(tape.titleText))
     fail.push('实时TAPE: 标题缺板块计数："' + tape.titleText + '"');
 
