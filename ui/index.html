@@ -2554,21 +2554,50 @@ body.no-webgl #gl-fallback{display:grid}
 
   const C = window.Charts;
   const TOPN = 12;
+  const LS_KEY = 'jarvis.tape.last';
 
   let hover = null;   // bindHover 句柄，重绘前必须 unbind（否则 mousemove 监听会累积）
   let timer = null;   // 下一次刷新的 setTimeout（自调度链，非 setInterval）
   let round = 0;      // 刷新计数器：在途请求回来后与它比对，不一致即作废
   let ctrl = null;    // 在途 fetch 的 AbortController，外部主动刷新时 abort
 
-  function render(data){
+  function render(data, opts){
     const secs = (data && data.ok !== false && data.sectors) ? data.sectors : [];
     /* 空数据也画一遍，让 canvas 显示"暂无数据"而不是上一轮残留 */
     if (hover){ hover.unbind(); hover = null; }
     hover = C.bindHover(canvas, C.drawTape(canvas, secs));
-    if (timeEl) timeEl.textContent = secs.length
-      ? (data.dataTime || new Date().toLocaleTimeString('zh-CN',
-          { hour: '2-digit', minute: '2-digit' })) + ' · ' + secs.length + '板块'
-      : '暂无数据';
+    if (timeEl){
+      const n = secs.length;
+      if (!n){ timeEl.textContent = '暂无数据'; return; }
+      const stamp = (opts && opts.stamp) || data.dataTime || '';
+      timeEl.textContent = n + '板块'
+        + (stamp ? ' · ' + stamp : '');
+    }
+  }
+
+  /* ── 冷启动：先画 localStorage 缓存的旧数据，避免"白等37s" ──
+   * 东财 clist 分页最坏 ~37s；缓存只救并发、救不了首次。
+   * 做法：有旧数据就先画，角标标注数据时间；无旧数据画骨架占位。
+   * 骨架用 CSS 伪元素 + 文字，不额外占 DOM 节点。 */
+  function drawSkeleton(){
+    if (hover){ hover.unbind(); hover = null; }
+    hover = C.bindHover(canvas, C.drawTape(canvas, []));
+    if (timeEl) timeEl.textContent = '加载中…';
+  }
+  function tryLoadCache(){
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return false;
+      const d = JSON.parse(raw);
+      if (!d || !d.sectors || !d.sectors.length) return false;
+      render(d, { stamp: '缓存 ' + (d.dataTime || d.savedAt || '未知时间') });
+      /* 缓存成功写入 localStorage 时也记一份时间戳 */
+      try {
+        const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+        if (saved.savedAt) d.savedAt = saved.savedAt;
+      } catch(e){}
+      return true;
+    } catch(e){ return false; }
   }
 
   async function refresh(){
@@ -2594,6 +2623,13 @@ body.no-webgl #gl-fallback{display:grid}
       const d = await r.json();
       if (myRound !== round) return;   /* 期间已刷新过，这一轮作废 */
       render(d);
+      /* 刷新成功 → 写 localStorage（下次冷启动有缓存可用） */
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify(Object.assign({}, d, {
+          savedAt: new Date().toLocaleTimeString('zh-CN',
+            { hour: '2-digit', minute: '2-digit' })
+        })));
+      } catch(e){}
       const now = new Date();
       const trading = now.getDay() >= 1 && now.getDay() <= 5
                       && now.getHours() >= 9 && now.getHours() < 15;
@@ -2601,7 +2637,8 @@ body.no-webgl #gl-fallback{display:grid}
       timer = setTimeout(refresh, trading ? 5 * 60e3 : 30 * 60e3);
     } catch (e) {
       if (myRound !== round) return;   /* 主动 abort 走这里，静默退出不改标题 */
-      if (timeEl) timeEl.textContent = '连接失败';
+      /* 失败不覆盖已有画面——如果有缓存就保留，没有才显示错误 */
+      if (timeEl && timeEl.textContent === '加载中…') timeEl.textContent = '连接失败';
       timer = setTimeout(refresh, 60e3);
     } finally {
       /* 拉取已结束后，abort 定时器就不再需要了（留着它会空转一次） */
@@ -2609,6 +2646,8 @@ body.no-webgl #gl-fallback{display:grid}
     }
   }
 
+  /* 冷启动：先试缓存，没有则画骨架；然后正常发第一轮请求 */
+  if (!tryLoadCache()) drawSkeleton();
   refresh();
   window.__tapeRefresh = refresh;   /* 暴露给外部：手动刷新 / CDP 验证用 */
 })();

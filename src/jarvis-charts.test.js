@@ -1873,6 +1873,7 @@ function mkTapeSandbox(opts){
   FakeDate.now = () => NOW.getTime();
 
   const win = { Charts: C, devicePixelRatio: 2 };
+  const _ls = {};
   const sandbox = {
     window: win,
     document: {
@@ -1892,6 +1893,12 @@ function mkTapeSandbox(opts){
     clearTimeout: clearTimeoutImpl,
     setInterval: () => { throw new Error('TAPE 不应使用 setInterval（并发重叠）'); },
     Date: FakeDate,
+    localStorage: {
+      getItem: (k) => _ls[k] || null,
+      setItem: (k, v) => { _ls[k] = v; },
+      removeItem: (k) => { delete _ls[k]; },
+      clear: () => { for (const k in _ls) delete _ls[k]; },
+    },
     console: console,
   };
   vm.runInNewContext(TAPE_SRC, sandbox, { filename: 'ui/index.html#tape' });
@@ -1911,13 +1918,13 @@ atest('源码可抽取并执行：#tapeCanvas/#tapeTime 都在，__tapeRefresh �
   assert.strictEqual(env.calls.length, 1, '启动应触发一次 /api/closescan');
 });
 
-atest('启动请求 /api/closescan?topN=12，成功后标题 = "数据时间 · N板块"', async () => {
+atest('启动请求 /api/closescan?topN=12，成功后标题 = "N板块 · 数据时间"', async () => {
   const env = mkTapeSandbox({ plans: [{ resp: TAPE_OK }] });
   await settle();
   assert.strictEqual(env.calls.length, 1);
   assert.strictEqual(env.calls[0].url, '/api/closescan?topN=12',
     '实得 ' + env.calls[0].url);
-  assert.strictEqual(env.time.textContent, '15:05 · 12板块',
+  assert.strictEqual(env.time.textContent, '12板块 · 15:05',
     '实得 "' + env.time.textContent + '"');
   assert(env.calls[0].signal, 'fetch 应带 AbortController signal');
 });
@@ -1968,7 +1975,7 @@ atest('__tapeRefresh：abort 在途请求 + 慢的旧请求回来不覆盖新图
   assert.strictEqual(env.calls[0].signal.aborted, true, '第 1 轮 signal 应处于 aborted');
   assert.strictEqual(env.calls[1].signal.aborted, true, '第 2 轮 signal 应处于 aborted');
   assert.strictEqual(env.calls[2].signal.aborted, false, '第 3 轮不应被 abort');
-  assert.strictEqual(env.time.textContent, '15:05 · 12板块',
+  assert.strictEqual(env.time.textContent, '12板块 · 15:05',
     '慢的旧请求不应覆盖新图，实得 "' + env.time.textContent + '"');
 });
 
