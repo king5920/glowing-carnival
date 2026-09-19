@@ -180,9 +180,14 @@ void main(){float l=.6+.4*max(dot(normalize(vN),normalize(vec3(.3,.5,.8))),0.);
     start() {
       if (this._running || !this._gl) return;
       this._running = true; this._t0 = performance.now();
-      // 只负责画一帧；排帧交给 AnimGate（失焦/切后台即停，恢复自动续）。
-      // _running 一旦为 false 本循环永久终止，优先级高于页面复活。
-      AnimGate.gatedLoop((now) => { this._frame((now - this._t0) / 1000); }, () => !this._running);
+      // C1 共享调度器：只负责画一帧；排帧交给共享调度器。
+      // _running 一旦为 false 本 draw 自动注销，优先级高于页面复活。
+      if (!window.AnimGate.sharedLoop.isRunning()) window.AnimGate.sharedLoop.start();
+      window.AnimGate.register(function (now) {
+        if (!this._running) return false;   // 自动注销
+        this._frame((now - this._t0) / 1000);
+        return true;
+      }.bind(this));
     },
 
     _resize() {

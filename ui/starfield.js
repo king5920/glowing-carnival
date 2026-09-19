@@ -1078,14 +1078,20 @@
    *     刚 build/activate、reduced-motion 下的一次性绘制 → 持续画
    *   - 一切收敛到 idle 且高亮衰减到底后，停止调度，GPU 占用归零
    *   - 任何外部变化走 wake() 重新拉起；停之前会再补一帧，保证最后状态正确。
-   * 拾取只依赖 lastVP 矩阵，停转后点击照样有效（矩阵停在最后一帧）。 */
-  let rafOn = false;         // 当前是否已排了 rAF
+   * 拾取只依赖 lastVP 矩阵，停转后点击照样有效（矩阵停在最后一帧）。
+   * C1 重构：frame() 不再自排 rAF，改为注册到 AnimGate 共享调度器。
+   *   sfRegistered 标记是否已注册；draw 返回 false 时调度器自动注销。 */
+  let sfRegistered = false;  // 当前是否已注册到共享调度器
   let forceFrames = 0;       // 唤醒后至少再画的帧数（确保状态变化被呈现）
   let lastStateKey = '';
 
   function wake(reason) {
     forceFrames = Math.max(forceFrames, 6);
-    if (!rafOn) { rafOn = true; requestAnimationFrame(frame); }
+    if (!sfRegistered) {
+      if (!window.AnimGate.sharedLoop.isRunning()) window.AnimGate.sharedLoop.start();
+      window.AnimGate.register(starfieldDraw);
+      sfRegistered = true;
+    }
   }
 
   /* 是否仍有"非画不可"的动态：判定逻辑抽到 ui/animgate.js（纯函数、可单测）。*/
@@ -1115,15 +1121,14 @@
            tgt === S.idle && cur.glow - tgt.glow < 0.004 && cur.glow - tgt.glow > -0.004;
   }
 
-  function frame(ts) {
-    rafOn = true;
+  function starfieldDraw(ts) {
     // 失焦 100ms 节流；聚焦但纯待机慢转时用 90ms 低帧，其余满帧
     const minGap = !focused ? 100 : (idleDrifting() && forceFrames <= 0 ? IDLE_SPIN_MS : 0);
     if (ts - lastDraw < minGap) {
       // 节流跳过的这一帧也要判断该不该停，否则失焦静止时会永远空转
-      if (forceFrames > 0 || stillAnimating() || idleDrifting()) requestAnimationFrame(frame);
-      else rafOn = false;
-      return;
+      const stillWants = forceFrames > 0 || stillAnimating() || idleDrifting();
+      if (!stillWants) sfRegistered = false;
+      return stillWants;
     }
     lastDraw = ts;
 
@@ -1269,8 +1274,8 @@
           act, baseGlow: baseAct,
         })
       : (forceFrames > 0 || stillAnimating()));
-    if (keepGoing) requestAnimationFrame(frame);
-    else rafOn = false;
+    if (!keepGoing) sfRegistered = false;
+    return keepGoing;
   }
 
   build({});

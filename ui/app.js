@@ -123,8 +123,9 @@
     vcMicLevel = Math.max(0, Math.min(1, +v || 0));
     vcMicSeenAt = Date.now();
   }
-  // 核心能量驱动（不自己排帧）；挂闸门前必须确认 VOICECORE 已挂上
-  AnimGate.gatedLoop(() => {
+  // 核心能量驱动（不自己排帧）；C1 共享调度器：先确保调度器存活再注册
+  if (!AnimGate.sharedLoop.isRunning()) AnimGate.sharedLoop.start();
+  AnimGate.register(() => {
     if (!window.VOICECORE || !vcEl) return;
     if (!vcEl.dataset.mounted) {
       vcEl.dataset.mounted = window.VOICECORE.mount('voicecore-canvas') ? '1' : '0';
@@ -149,7 +150,8 @@
   });
 
   // 待机呼吸波（L2 系统呼吸）：失焦/切后台即停，恢复自动续
-  AnimGate.gatedLoop(() => {
+  if (!AnimGate.sharedLoop.isRunning()) AnimGate.sharedLoop.start();
+  AnimGate.register(() => {
     if (reduceMotion) {
       // §4：L2 全关——只画一帧静息态，不推进时间
       if (wtDrawn) return;
@@ -179,7 +181,8 @@
   let vlx = null, vlAmp = 0.12, vlT = 0, vlLastAmp = -1;
   if (vlc) {
     vlx = vlc.getContext('2d');
-    AnimGate.gatedLoop(() => {
+    if (!AnimGate.sharedLoop.isRunning()) AnimGate.sharedLoop.start();
+    AnimGate.register(() => {
       if (reduceMotion) {
         // §4 L1 直跳终值：不做时间动画，仅在真实 amp 变化时重画一帧
         if (vlLastAmp === amp) return;
@@ -1787,9 +1790,12 @@
         if (rx) drawRadar(ts, energy);
         if (sx) drawSpark(energy);
       }
-      // §4：prefers-reduced-motion 时画一帧静态终态即止；否则挂闸门，失焦/切后台全部停
+      // §4：prefers-reduced-motion 时画一帧静态终态即止；否则注册到共享调度器
       if (reduceMotion) renderFx(performance.now());
-      else AnimGate.gatedLoop(renderFx);
+      else {
+        if (!AnimGate.sharedLoop.isRunning()) AnimGate.sharedLoop.start();
+        AnimGate.register(renderFx);
+      }
     }
   })();
 
