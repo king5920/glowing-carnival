@@ -535,6 +535,23 @@ body.drawer-open{overflow:hidden}
 .kline-legend .kl-ln20{background:var(--info)}
 .kline-legend .kl-note{flex:0 0 auto}
 
+/* §5-4 实时 TAPE（轻量轮询版）：最近板块扫描的三柱条带。与 #klinebox 同一纪律——
+   独立 div、不入 #mpbox / #scanbox IIFE 的 innerHTML 生命周期；
+   数据到位一次性重画（setTimeout 自调度链刷新，不入 AnimGate.gatedLoop）。
+   色＝指标系列：--rd 龙头涨幅 / --gd 10日资金 / --cy 板块涨幅，三色分离；
+   涨跌正负号走 hover tooltip 数值通道，色不承担符号编码。 */
+#tapebox{position:relative;padding:8px 12px 6px;border-top:1px solid var(--hairline2)}
+#tapeTitle{display:flex;align-items:baseline;justify-content:space-between;font-size:9.5px;
+  color:var(--faint);font-family:var(--num);margin-bottom:4px}
+#tapeCanvas{display:block;width:100%;height:120px;cursor:crosshair}
+#tapeLegend{display:flex;align-items:center;gap:9px;margin-top:4px;flex-wrap:wrap;
+  font-size:8.5px;color:var(--faint);font-family:var(--num)}
+#tapeLegend .tape-key{display:inline-flex;align-items:center;flex:0 0 auto}
+/* TAPE 图例色块：--rd/--gd/--cy 三色各一段，尺寸比 kline 略宽好分辨 */
+.tape-sw{display:inline-block;width:10px;height:6px;border-radius:2px;
+  vertical-align:middle;margin-right:3px}
+#tapeLegend .tape-note{flex:0 0 auto}
+
 /* ════════ 收盘扫描面板（左栏盯盘主场） ════════ */
 .scan-time{margin-left:auto;font-size:9px;color:var(--faint);font-family:var(--num);font-weight:400}
 #scanbox{padding:0}
@@ -1238,6 +1255,21 @@ body.no-webgl #gl-fallback{display:grid}
           <span class="kl-key"><i class="kl-ln kl-ln20"></i>MA20</span>
           <span class="kl-key"><i class="kl-sw kl-sw-vol"></i>量</span>
           <span class="kl-note">A股红涨绿跌 · 实心涨/空心跌 · 量在下方25%</span>
+        </div>
+      </div>
+      <!-- §5-4 实时 TAPE（轻量轮询版）：最近板块扫描的三柱条带
+           （龙头涨幅 / 10日资金 / 板块涨幅），setTimeout 自调度链轮询 /api/closescan。
+           完整版需 SSE/WebSocket 基建，本轮用轮询模拟实时行情流。
+           独立 div，不在 #mpbox / #scanbox IIFE 的 innerHTML 生命周期里，
+           与 #klinebox / #scanDistbox 同一纪律。 -->
+      <div class="pb" id="tapebox">
+        <div id="tapeTitle"><span>实时 TAPE · 最近板块扫描</span><span id="tapeTime"></span></div>
+        <canvas id="tapeCanvas"></canvas>
+        <div id="tapeLegend">
+          <span class="tape-key"><span class="tape-sw" style="background:var(--rd)"></span>龙头涨幅</span>
+          <span class="tape-key"><span class="tape-sw" style="background:var(--gd)"></span>10日资金(亿)</span>
+          <span class="tape-key"><span class="tape-sw" style="background:var(--cy)"></span>板块涨幅</span>
+          <span class="tape-note">A股红涨绿跌 · 色＝指标系列 · 正负号看 hover</span>
         </div>
       </div>
     </section>
@@ -2501,6 +2533,84 @@ body.no-webgl #gl-fallback{display:grid}
   }
   applyDesired();
   refresh();
+})();
+</script>
+<script>
+/* ── §5-4 实时 TAPE（轻量轮询版）──
+ * 数据复用 /api/closescan?topN=12 的 sectors 数组（和 #scanbox 同一次扫描口径），
+ * 画成"一板块 3 竖柱"的条带：龙头涨幅 / 10日资金 / 板块涨幅。
+ * 完整版需 SSE/WebSocket 基建；本轮用 setTimeout 自调度链轮询模拟实时行情流——
+ *   · 不用 setInterval（避免并发重叠：上一轮还没回来下一轮又发）
+ *   · fetch 带 AbortController，主动刷新时作废在途请求
+ *   · round 计数器：慢的旧请求回来也不覆盖新图
+ * 与情绪温度 / 分布 / K 线同一纪律：独立 div、不入 #mpbox / #scanbox 的
+ * innerHTML 生命周期；数据到位一次性重画，不入 AnimGate.gatedLoop、不新增 rAF 链。 */
+(function(){
+  const canvas = document.getElementById('tapeCanvas');
+  const box = document.getElementById('tapebox');
+  const timeEl = document.getElementById('tapeTime');
+  if (!canvas || !box) return;
+  if (typeof window.Charts !== 'object' || !window.Charts.drawTape) return;
+
+  const C = window.Charts;
+  const TOPN = 12;
+
+  let hover = null;   // bindHover 句柄，重绘前必须 unbind（否则 mousemove 监听会累积）
+  let timer = null;   // 下一次刷新的 setTimeout（自调度链，非 setInterval）
+  let round = 0;      // 刷新计数器：在途请求回来后与它比对，不一致即作废
+  let ctrl = null;    // 在途 fetch 的 AbortController，外部主动刷新时 abort
+
+  function render(data){
+    const secs = (data && data.ok !== false && data.sectors) ? data.sectors : [];
+    /* 空数据也画一遍，让 canvas 显示"暂无数据"而不是上一轮残留 */
+    if (hover){ hover.unbind(); hover = null; }
+    hover = C.bindHover(canvas, C.drawTape(canvas, secs));
+    if (timeEl) timeEl.textContent = secs.length
+      ? (data.dataTime || new Date().toLocaleTimeString('zh-CN',
+          { hour: '2-digit', minute: '2-digit' })) + ' · ' + secs.length + '板块'
+      : '暂无数据';
+  }
+
+  async function refresh(){
+    const myRound = ++round;
+    /* 先作废在途请求，再覆盖 ctrl 指向新的控制器：
+     * 顺序反了的话旧 ctrl 会连同它的 abort 定时器一起变成"孤儿"。 */
+    if (ctrl){ try { ctrl.abort(); } catch (e) {} }
+    let abortT = null;
+    try {
+      if (typeof AbortController !== 'undefined'){
+        /* 控制器同时挂在闭包局部 ac 和外部 ctrl 上：abort 定时器只捕自己那份，
+         * 否则上一轮挂着的定时器会误掐掉新一轮的请求。 */
+        const ac = new AbortController();
+        ctrl = ac;
+        /* 60s：/api/closescan 走东财 clist 分页，最坏十几秒；页面加载时
+         * #scanbox(topN=8) 和本 TAPE(topN=12) 同时打到同一个端点，
+         * 25s 会被慢源掐死（实测并发时单次约 45s）。
+         * 服务端已做在途合并 + 90s 短 TTL 缓存，正常只花一次扫描的钱。 */
+        abortT = setTimeout(function(){ ac.abort(); }, 60e3);
+      }
+      const r = await fetch('/api/closescan?topN=' + TOPN,
+        { signal: ctrl && ctrl.signal });
+      const d = await r.json();
+      if (myRound !== round) return;   /* 期间已刷新过，这一轮作废 */
+      render(d);
+      const now = new Date();
+      const trading = now.getDay() >= 1 && now.getDay() <= 5
+                      && now.getHours() >= 9 && now.getHours() < 15;
+      /* 板块扫描是慢变量：交易时段 5min、收盘后 30min（与日 K 同档，比 C3-A/C3-B 缓） */
+      timer = setTimeout(refresh, trading ? 5 * 60e3 : 30 * 60e3);
+    } catch (e) {
+      if (myRound !== round) return;   /* 主动 abort 走这里，静默退出不改标题 */
+      if (timeEl) timeEl.textContent = '连接失败';
+      timer = setTimeout(refresh, 60e3);
+    } finally {
+      /* 拉取已结束后，abort 定时器就不再需要了（留着它会空转一次） */
+      if (abortT) clearTimeout(abortT);
+    }
+  }
+
+  refresh();
+  window.__tapeRefresh = refresh;   /* 暴露给外部：手动刷新 / CDP 验证用 */
 })();
 </script>
 (function(){

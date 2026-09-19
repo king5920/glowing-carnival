@@ -1116,7 +1116,7 @@ function mkSandbox(opts){
     const s = scheduled.find(x => x.id === id);
     if (s) s.cleared = true;
   }
-  /* 刷新定时器（5min/30min/60s）与 25s 的 abort 定时器区分开 */
+  /* 刷新定时器（5min/30min/60s）与秒级的 abort 定时器区分开 */
   function refreshTimers(){
     return scheduled.filter(s => s.ms >= 60000 && !s.cleared);
   }
@@ -1557,6 +1557,442 @@ test('drawKline 对周/月周期的 bars 同样正常绘制（周期只影响数
     assert(r && r.bars.length === 120, 'bars 应全量绘制');
     assert(r.layout, 'layout 应存在');
   });
+});
+
+/* ═══ §5-4 实时 TAPE（轻量轮询版）：板块三柱条带 ═══
+ * drawTape(canvas, sectors, opts) —— 画布/几何/三色分离/各自归一化/hit/tooltip
+ * index.html 的轮询 IIFE —— setTimeout 自调度链、AbortController、round 计数器
+ */
+
+console.log('\n── §5-4 drawTape() 板块三柱条带 ──');
+
+/* 板块扫描数据：字段形状与 tools/close_scan.js 的 sector 记录一致 */
+function mkTapeSectors(n){
+  const names = ['人工智能','半导体','机器人','低空经济','创新药','固态电池',
+                 '算力租赁','卫星导航','军工','消费电子','化工','贵金属'];
+  const leaders = ['肯特催化','中芯国际','绿的谐波','万丰奥威','恒瑞医药','宁德时代',
+                   '润泽科技','北斗星通','中航沈飞','立讯精密','万华化学','山东黄金'];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push({
+      name: names[i % names.length],
+      leader: leaders[i % leaders.length],
+      leaderCode: '60000' + i,
+      leaderPct: +(10.03 - i * 1.1).toFixed(2),   /* 10.03 → -2.07（正负都有） */
+      d10Yi: +(12.5 - i * 2.0).toFixed(1),        /* 12.5 → -9.5 */
+      changePct: +(3.50 - i * 0.35).toFixed(2),   /* 3.50 → -0.70 */
+      score: 95 - i * 2, grade: '主线候选',
+    });
+  }
+  return out;
+}
+
+const TAPE_OK = { ok: true, dataTime: '15:05', sectors: mkTapeSectors(12) };
+const RD = '#F0485E', GD = '#F2B23E', CY = '#3FD0FF';
+const TAPES = ['leaderPct', 'd10Yi', 'changePct'];
+
+test('空数据 → 画"暂无数据"占位，API 仍是 hit/tooltip/sectors/layout 四件套', () => {
+  const { cv, calls } = makeCanvas(600, 120);
+  const r = C.drawTape(cv, []);
+  assert(r, '返回值应为对象');
+  ['hit', 'tooltip', 'sectors', 'layout'].forEach(k => assert(k in r, '缺字段 ' + k));
+  assert.strictEqual(r.sectors.length, 0);
+  assert.strictEqual(r.layout, null, '空数据 layout 应为 null');
+  assert.strictEqual(r.tooltip(), '暂无数据');
+  assert.strictEqual(r.hit(100, 50), null);
+  const txts = calls.fillText.map(f => f.t);
+  assert(txts.indexOf('暂无数据') >= 0, '应画占位文案，实得 ' + JSON.stringify(txts));
+});
+
+test('sectors=null / 缺 sectors 字段 → 不抛错，同样走占位', () => {
+  const { cv } = makeCanvas(600, 120);
+  assert.strictEqual(C.drawTape(cv, null).tooltip(), '暂无数据');
+  assert.strictEqual(C.drawTape(cv, undefined).tooltip(), '暂无数据');
+  assert.strictEqual(C.drawTape(cv, {}).tooltip(), '暂无数据');
+  assert.strictEqual(C.drawTape(cv, [{ name: 'x' }]).sectors.length, 1,
+    '只有 1 条也不该走占位');
+});
+
+test('canvas 尚未布局（clientWidth=0）→ 返回 null（与 drawKline 同口径）', () => {
+  const { cv } = makeCanvas(600, 120);
+  const zero = Object.assign({}, cv, { clientWidth: 0, clientHeight: 0 });
+  assert.strictEqual(C.drawTape(zero, mkTapeSectors(12)), null);
+});
+
+test('12 板块全量绘制 + layout 几何自洽（等分槽位、零硬编码宽度）', () => {
+  const SECT = mkTapeSectors(12);
+  const r = C.drawTape(makeCanvas(600, 120).cv, SECT);
+  assert.strictEqual(r.sectors.length, 12);
+  const L = r.layout;
+  assert(L, 'layout 应存在');
+  assert.strictEqual(L.n, 12);
+  assert(L.slotW > 0 && L.barW > 0 && L.barGap >= 1 && L.groupGap >= 2, '槽/柱几何应为正');
+  assert.strictEqual(Math.round(L.padLeft + L.n * L.slotW + L.padRight), 600, '槽宽应恰好铺满画布');
+  assert.strictEqual(Math.round(L.padTop + L.plotH + L.padBottom), 120, '高度应恰好铺满画布');
+  TAPES.forEach(k => {
+    assert(Array.isArray(L.ranges[k]), '缺 ranges.' + k);
+    assert(L.ranges[k][0] < L.ranges[k][1], '区间 hi 应大于 lo：' + k);
+  });
+  r.sectors.forEach((g, i) => {
+    assert.strictEqual(g.d, SECT[i], 'sectors[i].d 应引用原数据');
+    assert.strictEqual(g.bars.length, 3, '每板块应 3 柱');
+    assert(Math.abs(g.x - (L.padLeft + i * L.slotW)) < 1e-6, '槽 x 应等分');
+    assert.strictEqual(g.bars[0].k, 'leaderPct');
+    assert.strictEqual(g.bars[1].k, 'd10Yi');
+    assert.strictEqual(g.bars[2].k, 'changePct');
+  });
+});
+
+test('每板块 3 竖柱：12 板块 → fillRect 恰好 36 次 + 名称 12 次 + 基线 1 次', () => {
+  const { cv, calls } = makeCanvas(600, 120);
+  C.drawTape(cv, mkTapeSectors(12));
+  assert.strictEqual(calls.fillRect.length, 36, '36 根柱，实得 ' + calls.fillRect.length);
+  assert.strictEqual(calls.fillText.length, 12, '12 个板块名，实得 ' + calls.fillText.length);
+  assert.strictEqual(calls.stroke, 1, '1 条 plot 基线，实得 ' + calls.stroke);
+  /* 柱底应贴 plot 基线、柱顶不应越出 plot 上边界（归一化不该溢出） */
+  const L = C.drawTape(makeCanvas(600, 120).cv, mkTapeSectors(12)).layout;
+  const base = L.padTop + L.plotH;
+  calls.fillRect.forEach(f => {
+    assert.strictEqual(Math.round(f.y + f.h), Math.round(base), '柱底应贴基线');
+    assert(f.y >= L.padTop - 1e-6, '柱顶不应越出 plot 上边界');
+    assert(f.w > 0 && f.h >= 2, '柱宽应为正、柱高不小于 2px');
+  });
+});
+
+test('三色分离：龙头涨幅 --rd / 10日资金 --gd / 板块涨幅 --cy，三色互不相同', () => {
+  const r = C.drawTape(makeCanvas(600, 120).cv, mkTapeSectors(12));
+  r.sectors.forEach(g => {
+    assert.strictEqual(g.bars[0].fill, RD, '龙头涨幅应 --rd，实得 ' + g.bars[0].fill);
+    assert.strictEqual(g.bars[1].fill, GD, '10日资金应 --gd，实得 ' + g.bars[1].fill);
+    assert.strictEqual(g.bars[2].fill, CY, '板块涨幅应 --cy，实得 ' + g.bars[2].fill);
+  });
+  assert.strictEqual(new Set([RD, GD, CY]).size, 3, '三色应互不相同');
+  /* 校验真正写进 canvas 的填充色（不是返回值元数据） */
+  const { cv, calls } = makeCanvas(600, 120);
+  C.drawTape(cv, mkTapeSectors(12));
+  [RD, GD, CY].forEach(c => assert(calls.fillStyles.indexOf(c) >= 0, 'canvas 缺 ' + c));
+});
+
+test('A 股红涨绿跌：龙头涨幅恒用 --rd（含负值板块），正负号走 tooltip 数值通道', () => {
+  const SECT = mkTapeSectors(12);
+  const r = C.drawTape(makeCanvas(600, 120).cv, SECT);
+  const neg = r.sectors.filter(g => g.bars[0].v != null && g.bars[0].v < 0);
+  assert(neg.length > 0, '测试数据应含负涨幅板块');
+  neg.forEach(g => assert.strictEqual(g.bars[0].fill, RD,
+    '负涨幅的龙头柱仍是 --rd（色＝指标系列），实得 ' + g.bars[0].fill));
+  assert(r.tooltip(neg[0].d).indexOf('-') >= 0, '负值必须在 tooltip 里带负号');
+  /* TAPE 三色里不应出现 --gn（绿只留给 K 线跌柱 / 分布跌区） */
+  const { cv, calls } = makeCanvas(600, 120);
+  C.drawTape(cv, SECT);
+  assert(calls.fillStyles.indexOf('#089981') < 0, 'TAPE 不应出现 --gn');
+});
+
+test('柱高按各自范围归一化：max→满高、min→最小 2px，三指标独立标度', () => {
+  const SECT = mkTapeSectors(12);
+  const r = C.drawTape(makeCanvas(600, 120).cv, SECT);
+  const L = r.layout;
+  TAPES.forEach(f => {
+    const vals = SECT.map(s => s[f]);
+    const maxV = Math.max.apply(null, vals), minV = Math.min.apply(null, vals);
+    const gi = vals.indexOf(maxV), mi = vals.indexOf(minV);
+    const gBar = r.sectors[gi].bars.find(b => b.k === f);
+    const mBar = r.sectors[mi].bars.find(b => b.k === f);
+    assert.strictEqual(gBar.t, 1, f + ' 最大值应归一到 1');
+    assert.strictEqual(mBar.t, 0, f + ' 最小值应归一到 0');
+    assert.strictEqual(gBar.h, L.plotH, f + ' 最大柱应满高 ' + L.plotH);
+    assert.strictEqual(mBar.h, 2, f + ' 最小柱应为 2px');
+    assert.strictEqual(L.ranges[f][0], minV, f + ' 区间 lo 应为全局最小');
+    assert.strictEqual(L.ranges[f][1], maxV, f + ' 区间 hi 应为全局最大');
+  });
+  /* 独立标度：三指标的最大柱同高，但对应的原始数值完全不同 */
+  const hs = TAPES.map(f => r.sectors.find(g => g.bars.find(b => b.k === f && b.t === 1))
+    .bars.find(b => b.k === f).h);
+  assert(hs.every(h => h === hs[0]), '三指标 max 柱应同高（各自归一化），实得 ' + JSON.stringify(hs));
+  /* 三指标的标度区间互不相同 → 证明是各自归一化，不是共用一把标尺 */
+  const hi = TAPES.map(f => L.ranges[f][1]);
+  assert.strictEqual(new Set(hi).size, 3, '三指标的标度上限应各不相同，实得 ' + JSON.stringify(hi));
+});
+
+test('单值板块（全序列同值）→ 区间抬 1 单位台阶，不除零、不糊成等高', () => {
+  const SECT = mkTapeSectors(12).map(s => Object.assign({}, s, { d10Yi: 8.8 }));
+  const r = C.drawTape(makeCanvas(600, 120).cv, SECT);
+  assert.deepStrictEqual(r.layout.ranges.d10Yi, [8.8, 9.8], '应抬 1 单位台阶');
+  const dBar = r.sectors[0].bars.find(b => b.k === 'd10Yi');
+  assert.strictEqual(dBar.t, 0, '同值时归一到 0');
+  assert.strictEqual(dBar.h, 2, '同值时画最小柱高 2px');
+});
+
+test('hit：落在槽位返回对应 sector；plot 外/左右越界返回 null', () => {
+  const SECT = mkTapeSectors(12);
+  const r = C.drawTape(makeCanvas(600, 120).cv, SECT);
+  const L = r.layout;
+  const c3 = L.padLeft + 3 * L.slotW + L.slotW / 2;
+  assert.strictEqual(r.hit(c3, 40), SECT[3], '第 3 槽中心应命中 SECT[3]');
+  assert.strictEqual(r.hit(L.padLeft + 11.5 * L.slotW, 60), SECT[11], '末槽应命中 SECT[11]');
+  /* 底部板块名所在行也算命中（hover 名称仍能看到该板块数值） */
+  assert.strictEqual(r.hit(c3, L.padTop + L.plotH + 10), SECT[3], '名称行应算命中');
+  assert.strictEqual(r.hit(c3, -5), null, 'plot 上方应 null');
+  assert.strictEqual(r.hit(c3, 130), null, 'canvas 下方应 null');
+  assert.strictEqual(r.hit(-10, 40), null, '左侧越界应 null');
+  assert.strictEqual(r.hit(700, 40), null, '右侧越界应 null');
+});
+
+test('tooltip 整句中文：板块名 + 龙头 + 涨幅% + 10日资金亿 + 板块涨幅%', () => {
+  const SECT = mkTapeSectors(12);
+  const r = C.drawTape(makeCanvas(600, 120).cv, SECT);
+  const tip = r.tooltip(SECT[0]);
+  assert.strictEqual(tip, '人工智能 龙头肯特催化+10.03% · 10日资金12.5亿 · 板块+3.50%');
+  assert(/[一-鿿]/.test(tip), '应含中文');
+  ['人工智能', '肯特催化', '10日资金'].forEach(k =>
+    assert(tip.indexOf(k) >= 0, '缺 "' + k + '"'));
+  assert(/%/.test(tip) && /亿/.test(tip), '应同时带 % 与 亿 两种单位');
+  /* 负值板块：涨跌幅带负号，资金带负号 */
+  assert(/-\d+\.\d+%/.test(r.tooltip(SECT[11])),
+    '负涨幅应带负号，实得 "' + r.tooltip(SECT[11]) + '"');
+});
+
+test('缺字段 → 留空槽不画柱、tooltip 显示 —，不抛错', () => {
+  const SECT = mkTapeSectors(12);
+  const sparse = Object.assign({}, SECT[0], { d10Yi: undefined, leaderPct: null });
+  const arr = SECT.map(s => s === SECT[0] ? sparse : s);
+  const { cv, calls } = makeCanvas(600, 120);
+  const r = C.drawTape(cv, arr);
+  assert.strictEqual(calls.fillRect.length, 34,
+    '缺 2 柱 → 34 根，实得 ' + calls.fillRect.length);
+  const b = r.sectors[0].bars;
+  assert.strictEqual(b[0].h, 0, 'leaderPct=null 的柱高应为 0');
+  assert.strictEqual(b[1].h, 0, 'd10Yi=undefined 的柱高应为 0');
+  assert(b[2].h > 0, 'changePct 柱仍应正常绘制');
+  assert.strictEqual(r.tooltip(sparse),
+    '人工智能 龙头肯特催化— · 10日资金— · 板块+3.50%');
+});
+
+test('板块名截断到 4 字（长名不挤压槽宽）+ 空名不抛错', () => {
+  const SECT = mkTapeSectors(12);
+  SECT[0].name = '人工智能+机器人+CPO概念';   /* 超长名 */
+  SECT[1].name = '';
+  const { cv, calls } = makeCanvas(600, 120);
+  C.drawTape(cv, SECT);
+  const labels = calls.fillText.map(f => f.t);
+  assert.strictEqual(labels[0], '人工智能', '超长名应截断到 4 字，实得 "' + labels[0] + '"');
+  assert.strictEqual(labels[1], '', '空名画空串，不抛错');
+  assert.strictEqual(labels.length, 12);
+});
+
+test('drawTape + bindHover → tooltip role=status + aria-live=polite + unbind 干净', () => {
+  const { cv, host } = makeCanvas(600, 120);
+  const r = C.drawTape(cv, mkTapeSectors(12));
+  const hv = C.bindHover(cv, r);
+  assert(hv, 'bindHover 应返回句柄');
+  hv.simulate(r.layout.padLeft + r.layout.slotW * 1.5, 50);
+  const tip = hv.getTip();
+  assert(tip, 'hover 后应有 tooltip');
+  assert.strictEqual(tip.parentElement, host, 'tooltip 应挂在 canvas 的 parent');
+  assert.strictEqual(tip.getAttribute('role'), 'status');
+  assert.strictEqual(tip.getAttribute('aria-live'), 'polite');
+  assert.strictEqual(tip.style.display, 'block');
+  assert(/[一-鿿]/.test(tip.textContent), 'tooltip 应是整句中文');
+  assert(tip.textContent.indexOf('龙头') >= 0
+      && tip.textContent.indexOf('10日资金') >= 0
+      && tip.textContent.indexOf('板块') >= 0, '整句应含 龙头/10日资金/板块');
+  hv.unbind();
+  assert.strictEqual(hv.getTip(), null, 'unbind 应清空 tooltip');
+});
+
+/* ── index.html 的 TAPE 轮询 IIFE（真源码，vm 沙箱）── */
+console.log('\n── §5-4 轮询 IIFE（index.html 真源码）──');
+
+const MARK_T = '§5-4 实时 TAPE（轻量轮询版）──';
+const _ti = HTML.indexOf(MARK_T);
+const _tStart = HTML.lastIndexOf('<script>', _ti);
+const _tEnd = HTML.indexOf('</script>', _ti);
+const TAPE_SRC = _tStart >= 0 && _tEnd > _tStart
+  ? HTML.slice(_tStart, _tEnd).replace(/^<script>/, '').trim() : '';
+
+/* 假时钟：只记录不触发——5/30 分钟的自调度链不能真跑起来挂住进程。
+ * setInterval 做成抛错的哨兵：TAPE 一旦用了 setInterval（并发重叠），测试当场失败。 */
+function mkTapeSandbox(opts){
+  opts = opts || {};
+  const { cv, host } = makeCanvas(600, 120);
+  const els = { tapeCanvas: cv, tapebox: {}, tapeTime: { textContent: '' } };
+
+  const calls = [];
+  const plans = opts.plans || [];
+  function fetchImpl(url, init){
+    const rec = plans.length ? plans.shift() : { resp: { ok: true } };
+    const call = { url: url, id: calls.length, settled: false,
+                   signal: init && init.signal };
+    calls.push(call);
+    return new Promise((resolve, reject) => {
+      call.resolve = (payload) => {
+        if (call.settled) return;
+        call.settled = true;
+        resolve({ json: () => Promise.resolve(payload) });
+      };
+      if (rec.fail){
+        /* 用 setImmediate 而不是 setTimeout：Node 的 0ms 定时器有 1ms 下限，
+         * 而 settle() 只排空 immediate 队列，真定时器来不及触发。 */
+        setImmediate(() => { call.settled = true; reject(rec.fail); });
+        return;
+      }
+      if (rec.manual !== true){
+        setImmediate(() => call.resolve(rec.resp != null ? rec.resp : { ok: true }));
+      }
+      const sig = init && init.signal;
+      if (sig && typeof sig.addEventListener === 'function'){
+        sig.addEventListener('abort', () => {
+          if (!call.settled){ call.settled = true; reject(new Error('AbortError')); }
+        });
+      }
+    });
+  }
+
+  const scheduled = [];
+  let tid = 0;
+  function setTimeoutImpl(fn, ms){
+    scheduled.push({ id: ++tid, fn: fn, ms: ms, cleared: false });
+    return tid;
+  }
+  function clearTimeoutImpl(id){
+    const s = scheduled.find(x => x.id === id);
+    if (s) s.cleared = true;
+  }
+
+  /* 固定"现在"：默认 2026-09-18 周五 10:30（交易时段）；opts.now 可覆盖。
+   * 跨 realm 的 `new Date()` 必须返回 Date 实例，故用显式构造而不是 apply。 */
+  const RealDate = Date;
+  const NOW = opts.now
+    ? new RealDate(opts.now[0], opts.now[1], opts.now[2], opts.now[3], opts.now[4])
+    : new RealDate(2026, 8, 18, 10, 30);
+  function FakeDate(a, b, c, d, e){
+    if (!(this instanceof FakeDate)) throw new Error('FakeDate 必须用 new 调用');
+    return arguments.length
+      ? new RealDate(a, b, c, d, e)
+      : new RealDate(NOW);
+  }
+  FakeDate.now = () => NOW.getTime();
+
+  const win = { Charts: C, devicePixelRatio: 2 };
+  const sandbox = {
+    window: win,
+    document: {
+      getElementById: (id) => els[id] || null,
+      createElement: () => ({
+        style: {}, _attrs: {}, textContent: '', parentElement: null,
+        offsetWidth: 120, offsetHeight: 24,
+        setAttribute(k, v){ this._attrs[k] = v; },
+        getAttribute(k){ return this._attrs[k] == null ? null : this._attrs[k]; },
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 120,
+                                        right: 600, bottom: 120 }),
+      }),
+    },
+    fetch: fetchImpl,
+    AbortController: AbortController,
+    setTimeout: setTimeoutImpl,
+    clearTimeout: clearTimeoutImpl,
+    setInterval: () => { throw new Error('TAPE 不应使用 setInterval（并发重叠）'); },
+    Date: FakeDate,
+    console: console,
+  };
+  vm.runInNewContext(TAPE_SRC, sandbox, { filename: 'ui/index.html#tape' });
+  return { sandbox: sandbox, win: win, calls: calls, scheduled: scheduled,
+           time: els.tapeTime, cv: cv, host: host };
+}
+
+atest('源码可抽取并执行：#tapeCanvas/#tapeTime 都在，__tapeRefresh 挂出', async () => {
+  assert(TAPE_SRC.length > 800, 'IIFE 未抽到（marker "' + MARK_T + '" 失效？）');
+  assert(/getElementById\('tapeCanvas'\)/.test(TAPE_SRC), '缺 #tapeCanvas 读取');
+  assert(/getElementById\('tapeTime'\)/.test(TAPE_SRC), '缺 #tapeTime 读取');
+  assert(/\/api\/closescan\?topN=/.test(TAPE_SRC), '应请求 /api/closescan?topN=');
+  const env = mkTapeSandbox({ plans: [{ resp: TAPE_OK }] });
+  await settle();
+  assert.strictEqual(typeof env.win.__tapeRefresh, 'function',
+    'window.__tapeRefresh 未挂出（CDP 验证/手动刷新依赖它）');
+  assert.strictEqual(env.calls.length, 1, '启动应触发一次 /api/closescan');
+});
+
+atest('启动请求 /api/closescan?topN=12，成功后标题 = "数据时间 · N板块"', async () => {
+  const env = mkTapeSandbox({ plans: [{ resp: TAPE_OK }] });
+  await settle();
+  assert.strictEqual(env.calls.length, 1);
+  assert.strictEqual(env.calls[0].url, '/api/closescan?topN=12',
+    '实得 ' + env.calls[0].url);
+  assert.strictEqual(env.time.textContent, '15:05 · 12板块',
+    '实得 "' + env.time.textContent + '"');
+  assert(env.calls[0].signal, 'fetch 应带 AbortController signal');
+});
+
+atest('setTimeout 自调度链（非 setInterval）：交易时段 5min / 收盘后与周末 30min', async () => {
+  const on = mkTapeSandbox({ plans: [{ resp: TAPE_OK }] });
+  await settle();
+  const onMs = on.scheduled.filter(s => !s.cleared).map(s => s.ms);
+  assert(onMs.indexOf(5 * 60000) >= 0, '周五 10:30 应调度 5min，实得 ' + JSON.stringify(onMs));
+  /* 60s 的 abort 定时器只在请求在途时存在，结束后必须清掉，
+   * 否则下一次刷新会多一个空转定时器。 */
+  assert(onMs.indexOf(60000) < 0, '60s abort 定时器应在请求结束后清掉');
+  assert(on.scheduled.some(s => s.ms === 60000 && s.cleared),
+    'abort 超时定时器应被创建过（60s），实得 ' +
+    JSON.stringify(on.scheduled.map(s => s.ms)));
+
+  const sat = mkTapeSandbox({ plans: [{ resp: TAPE_OK }], now: [2026, 8, 19, 10, 30] });
+  await settle();
+  const satMs = sat.scheduled.filter(s => !s.cleared).map(s => s.ms);
+  assert(satMs.indexOf(30 * 60000) >= 0, '周六 10:30 应调度 30min，实得 ' + JSON.stringify(satMs));
+
+  const after = mkTapeSandbox({ plans: [{ resp: TAPE_OK }], now: [2026, 8, 18, 16, 0] });
+  await settle();
+  const afterMs = after.scheduled.filter(s => !s.cleared).map(s => s.ms);
+  assert(afterMs.indexOf(30 * 60000) >= 0, '工作日 16:00 收盘后应调度 30min，实得 ' + JSON.stringify(afterMs));
+
+  const before = mkTapeSandbox({ plans: [{ resp: TAPE_OK }], now: [2026, 8, 18, 8, 30] });
+  await settle();
+  const beforeMs = before.scheduled.filter(s => !s.cleared).map(s => s.ms);
+  assert(beforeMs.indexOf(30 * 60000) >= 0, '工作日 8:30 开盘前应调度 30min，实得 ' + JSON.stringify(beforeMs));
+});
+
+atest('__tapeRefresh：abort 在途请求 + 慢的旧请求回来不覆盖新图', async () => {
+  const env = mkTapeSandbox({ plans: [
+    { manual: true },    /* 第 1 轮：在途，等 abort */
+    { manual: true },    /* 第 2 轮：在途，等 abort */
+    { resp: TAPE_OK },   /* 第 3 轮：最终数据 */
+  ]});
+  await settle();
+  assert.strictEqual(env.calls.length, 1, '启动 1 次请求');
+  env.win.__tapeRefresh();   /* round 2 → abort round 1 */
+  await settle();
+  env.win.__tapeRefresh();   /* round 3 → abort round 2 */
+  await settle();
+  assert.strictEqual(env.calls.length, 3, '共 3 次请求，实得 ' + env.calls.length);
+  assert.strictEqual(env.calls[0].settled, true, '第 1 轮应被 abort 作废');
+  assert.strictEqual(env.calls[1].settled, true, '第 2 轮应被 abort 作废');
+  assert.strictEqual(env.calls[0].signal.aborted, true, '第 1 轮 signal 应处于 aborted');
+  assert.strictEqual(env.calls[1].signal.aborted, true, '第 2 轮 signal 应处于 aborted');
+  assert.strictEqual(env.calls[2].signal.aborted, false, '第 3 轮不应被 abort');
+  assert.strictEqual(env.time.textContent, '15:05 · 12板块',
+    '慢的旧请求不应覆盖新图，实得 "' + env.time.textContent + '"');
+});
+
+atest('fetch 失败 → 标题"连接失败"，60s 后重试（不抛出未捕获 rejection）', async () => {
+  const env = mkTapeSandbox({ plans: [{ fail: new Error('ECONNRESET') }] });
+  await settle();
+  assert.strictEqual(env.time.textContent, '连接失败',
+    '实得 "' + env.time.textContent + '"');
+  const ms = env.scheduled.filter(s => !s.cleared).map(s => s.ms);
+  assert(ms.indexOf(60000) >= 0, '应 60s 后重试，实得 ' + JSON.stringify(ms));
+  assert.strictEqual(env.calls.length, 1, '失败轮不应重发');
+});
+
+atest('空数据 / ok:false → 标题"暂无数据"（不留上一轮残留），仍继续调度', async () => {
+  const env = mkTapeSandbox({ plans: [{ resp: { ok: true, dataTime: '15:05', sectors: [] } }] });
+  await settle();
+  assert.strictEqual(env.time.textContent, '暂无数据', '实得 "' + env.time.textContent + '"');
+  const ms = env.scheduled.filter(s => !s.cleared).map(s => s.ms);
+  assert(ms.indexOf(5 * 60000) >= 0, '空数据仍应继续调度下一轮');
+
+  const bad = mkTapeSandbox({ plans: [{ resp: { ok: false, error: '板块扫描失败' } }] });
+  await settle();
+  assert.strictEqual(bad.time.textContent, '暂无数据',
+    'ok:false 应走占位，实得 "' + bad.time.textContent + '"');
 });
 
 /* ── 汇总：先排空异步队列，再打印总数（run-tests.js 靠这行自报数）──

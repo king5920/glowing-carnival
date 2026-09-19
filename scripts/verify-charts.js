@@ -1,18 +1,22 @@
 'use strict';
 /**
- * §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布直方图 + C3-C 大盘 K 线）
+ * §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布直方图 + C3-C 大盘 K 线
+ *             + C3-D 实时 TAPE 轻量轮询版）
  *
  * 断言：
- *   1. #mpHeatCanvas + #scanDistCanvas + #klineCanvas 存在、非零尺寸、非全透明
- *   2. window.Charts 暴露 drawSentimentHeatmap + drawDistribution + drawKline + bindHover
- *   3. 三图 hover 触发 tooltip 出现，文本是整句中文（§5 通用条款 role=status）
+ *   1. #mpHeatCanvas + #scanDistCanvas + #klineCanvas + #tapeCanvas 存在、非零尺寸、非全透明
+ *   2. window.Charts 暴露 drawSentimentHeatmap + drawDistribution + drawKline + drawTape + bindHover
+ *   3. 四图 hover 触发 tooltip 出现，文本是整句中文（§5 通用条款 role=status）
  *   4. tooltip DOM 有 role="status" + aria-live
- *   5. 图例（冷静/恐慌 梯度）+（涨区/跌区 双色带）+（涨/跌/MA5/量）都在
- *   6. rAF 链数不变（图表不入 AnimGate.gatedLoop）
+ *   5. 图例（冷静/恐慌 梯度）+（涨区/跌区 双色带）+（涨/跌/MA5/量）+
+ *      （龙头涨幅/10日资金/板块涨幅 三色分离）都在
+ *   6. rAF 链数不变（图表不入 AnimGate.gatedLoop；TAPE 走 setTimeout 自调度链，无 setInterval）
+ *   7. window.__tapeRefresh 暴露（CDP 侧可主动触发一轮）
  *
- * 注意：C3-C 的 /api/kline 走腾讯→新浪外部源，最坏 2×8s+300ms+8s ≈ 25s，
- *       比本地库的 heatmap/distribution 慢一个数量级，所以单独轮询画布像素
- *       直到 painted>=3%（上限 45s），不靠固定 sleep 判"全透明"。
+ * 注意：C3-C 的 /api/kline 走腾讯→新浪外部源（最坏 ≈25s），C3-D 的 /api/closescan
+ *       走东财 clist 分页且无服务端缓存（最坏几十秒），比本地库的 heatmap/distribution
+ *       慢一个数量级，所以各自单独轮询画布像素直到 painted>=3%（上限 45s），
+ *       不靠固定 sleep 判"全透明"。
  *
  * CDP 端口 9338（9335=contrast, 9336=tbmenu, 9337=starmap-plus, 9338=charts）
  */
@@ -31,6 +35,7 @@ const READY = `(() => {
       heat:   !!document.getElementById('mpHeatCanvas'),
       dist:   !!document.getElementById('scanDistCanvas'),
       kline:  !!document.getElementById('klineCanvas'),
+      tape:   !!document.getElementById('tapeCanvas'),
       charts: !!window.Charts,
       mems:   (window.STAR && window.STAR.stats) ? (STAR.stats().memories || 0) : 0,
     });
@@ -113,6 +118,7 @@ const PROBE = `(() => {
         drawSentimentHeatmap: typeof window.Charts.drawSentimentHeatmap,
         drawDistribution: typeof window.Charts.drawDistribution,
         drawKline: typeof window.Charts.drawKline,
+        drawTape: typeof window.Charts.drawTape,
         bindHover: typeof window.Charts.bindHover,
         colorLadder: typeof window.Charts.colorLadder,
         drawHatch: typeof window.Charts.drawHatch,
@@ -217,6 +223,91 @@ const KLINE_PROBE = `(() => {
   } catch(e) { return 'ERR:'+e.message+' | '+e.stack; }
 })()`;
 
+/* TAPE 首绘像素轮询：/api/closescan 无服务端缓存，每次都要走东财 clist 分页，
+ * 最坏几十秒——与 K 线同档，不能靠固定 sleep 判断"全透明" */
+const TAPE_PAINTED = `(() => {
+  try {
+    const cv = document.getElementById('tapeCanvas');
+    if(!cv || cv.width === 0 || cv.height === 0) return JSON.stringify({ pct: -1 });
+    const full = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+    let n = 0;
+    for(let i = 3; i < full.data.length; i += 4) if(full.data[i] > 0) n++;
+    return JSON.stringify({ pct: n / (full.width * full.height) * 100 });
+  } catch(e){ return JSON.stringify({ err: e.message }); }
+})()`;
+
+/* §5-4 TAPE probe：与 probeOne 同构，但图例是 #tapeLegend（--rd/--gd/--cy 三色块），
+ * tooltip 必须逐个含 龙头 / 10日资金 / 板块，且带 % 与 亿 两种单位 */
+const TAPE_PROBE = `(() => {
+  try {
+    const cv = document.getElementById('tapeCanvas');
+    const box = document.getElementById('tapebox');
+    const out = { canvasExists: !!cv, canvasSize: null, paintedPct: null,
+                  nonEmptyPixels: 0, hoverTest: null };
+    if (cv) {
+      out.canvasSize = { w: cv.clientWidth, h: cv.clientHeight,
+                         physicalW: cv.width, physicalH: cv.height };
+      try {
+        const full = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+        let n = 0, total = full.width * full.height;
+        for (let i = 3; i < full.data.length; i += 4) if (full.data[i] > 0) n++;
+        out.paintedPct = +(n / total * 100).toFixed(2);
+        out.nonEmptyPixels = n;
+      } catch(e) { out.pixelSample = { err: e.message }; }
+
+      /* hover：中间槽位、高度 0.45（落在 plot 区中部，避开底部板块名行） */
+      const rect = cv.getBoundingClientRect();
+      const x = rect.width * 0.5;
+      const y = rect.height * 0.45;
+      cv.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: rect.left + x, clientY: rect.top + y, bubbles: true,
+      }));
+      const tip = box && box.querySelector('.chart-tip');
+      out.hoverTest = {
+        x: x, y: y,
+        tipFound: !!tip,
+        tipDisplay: tip ? getComputedStyle(tip).display : null,
+        tipText: tip ? tip.textContent : null,
+        tipRole: tip ? tip.getAttribute('role') : null,
+        tipAriaLive: tip ? tip.getAttribute('aria-live') : null,
+        tipTextHasChinese: tip ? /[一-鿿]/.test(tip.textContent) : false,
+        /* §5-4 明确要求整句含 板块名 + 龙头 + 涨幅% + 10日资金亿 + 板块涨幅% */
+        tipHits: tip ? ['龙头','10日资金','板块'].filter(function(k){
+          return tip.textContent.indexOf(k) >= 0;
+        }) : [],
+        tipTextHasPct: tip ? /%/.test(tip.textContent) : false,
+        tipTextHasYi: tip ? /亿/.test(tip.textContent) : false,
+        /* assertChart 通用断言读 tipTextHasUnit：TAPE 的单位是 % / 亿 */
+        tipTextHasUnit: tip ? /%|亿/.test(tip.textContent) : false,
+      };
+      cv.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+      out.hoverTest.tipAfterLeave = tip ? getComputedStyle(tip).display : null;
+    }
+
+    const legend = box && box.querySelector('#tapeLegend');
+    out.legendText = legend ? legend.textContent.replace(/\\s+/g, ' ').trim() : '';
+    out.legendWords = legend
+      ? ['龙头涨幅','10日资金','板块涨幅'].filter(function(k){
+          return out.legendText.indexOf(k) >= 0;
+        })
+      : [];
+    /* 三个色块必须真的上色（--rd 龙头 / --gd 资金 / --cy 板块） */
+    out.legendSwatches = legend ? [
+      ['龙头涨幅', 0], ['10日资金', 1], ['板块涨幅', 2],
+    ].map(function(pair){
+      const el = legend.querySelectorAll('.tape-sw')[pair[1]];
+      const s = el ? getComputedStyle(el) : null;
+      const bg = s ? s.backgroundColor : null;
+      return { name: pair[0], exists: !!el, bg: bg,
+               transparent: !bg || bg === 'rgba(0, 0, 0, 0)' };
+    }) : [];
+    out.titleText = document.getElementById('tapeTime')
+                    ? document.getElementById('tapeTime').textContent : null;
+    out.refreshHook = typeof window.__tapeRefresh;
+    return JSON.stringify(out);
+  } catch(e) { return 'ERR:'+e.message+' | '+e.stack; }
+})()`;
+
 let child = null;
 function die(code, msg) { if (msg) console.log(msg); killEdge(); process.exit(code); }
 function killEdge() { try { if (child && !child.killed) child.kill('SIGTERM'); } catch(_){} }
@@ -296,7 +387,7 @@ async function main() {
     const raw = r.result && r.result.value;
     if (typeof raw === 'string' && raw.startsWith('ERR:')) die(2, '页面抛错：' + raw);
     const s = raw ? JSON.parse(raw) : null;
-    if (s && s.banner && s.heat && s.dist && s.kline && s.charts) break;
+    if (s && s.banner && s.heat && s.dist && s.kline && s.tape && s.charts) break;
     if (Date.now() - t0 > 60000) die(3, '等待超时（Charts/canvas 未就绪）');
     await sleep(500);
   }
@@ -329,6 +420,29 @@ async function main() {
   const raw3 = r3.result && r3.result.value;
   if (typeof raw3 === 'string' && raw3.startsWith('ERR:')) die(2, 'KLINE_PROBE 抛错：' + raw3);
   const kline = JSON.parse(raw3);
+
+  /* ── §5-4 TAPE 单独等首绘：/api/closescan 无缓存，走东财 clist 分页，最坏几十秒 ── */
+  let tapePct = -1, tapeErr = null;
+  const tp0 = Date.now();
+  for (;;) {
+    const tp = await cdp.send('Runtime.evaluate', { expression: TAPE_PAINTED, returnByValue: true });
+    let tv = null;
+    try { tv = JSON.parse(tp.result && tp.result.value); } catch (_) {}
+    if (tv && typeof tv.pct === 'number') tapePct = tv.pct;
+    if (tv && tv.err) tapeErr = tv.err;
+    if (tapePct >= 3) break;
+    if (Date.now() - tp0 > 45000) break;
+    await sleep(1000);
+  }
+  console.log('TAPE 首绘（板块扫描）painted=' +
+    (tapePct < 0 ? '采样失败' : tapePct.toFixed(2) + '%') +
+    ' 用时 ' + ((Date.now() - tp0) / 1000).toFixed(1) + 's' +
+    (tapeErr ? '  [采样报错 ' + tapeErr + ']' : ''));
+
+  const r4 = await cdp.send('Runtime.evaluate', { expression: TAPE_PROBE, returnByValue: true });
+  const raw4 = r4.result && r4.result.value;
+  if (typeof raw4 === 'string' && raw4.startsWith('ERR:')) die(2, 'TAPE_PROBE 抛错：' + raw4);
+  const tape = JSON.parse(raw4);
 
   /* 截图（clip 到 #mpHeatbox 附近——顶栏以下到画布底部） */
   const clip = await cdp.send('Runtime.evaluate', {
@@ -394,16 +508,38 @@ async function main() {
     require('fs').writeFileSync(out3, Buffer.from(shot3.data, 'base64'));
   }
 
+  /* 第四张：TAPE 所在区块截图 */
+  const clip4 = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const el = document.getElementById('tapebox');
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const y = Math.max(0, r.top - 8);
+      const h = Math.min(document.documentElement.scrollHeight, r.bottom - y + 8);
+      return JSON.stringify({ x: 0, y: Math.round(y), width: ${VP.w}, height: Math.round(h) });
+    })()`,
+    returnByValue: true,
+  });
+  if (clip4.result && clip4.result.value) {
+    const clip4Json = JSON.parse(clip4.result.value);
+    const shot4 = await cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      clip: { x: clip4Json.x, y: clip4Json.y, width: clip4Json.width, height: clip4Json.height, scale: 1 },
+    });
+    const out4 = OUT.replace('-c3.png', '-c3-tape.png');
+    require('fs').writeFileSync(out4, Buffer.from(shot4.data, 'base64'));
+  }
+
   cdp.close();
 
-  console.log('\n── §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布 + C3-C 大盘K线）──');
+  console.log('\n── §5 图表验证（C3-A 情绪温度热力柱 + C3-B 板块涨幅分布 + C3-C 大盘K线 + C3-D 实时TAPE）──');
   console.log('截图 → ' + OUT + ' (' + kb + ' KB)');
 
   const fail = [];
 
   /* ═══ 通用：单图断言 ═══ */
   const FNS_EXPECTED = [
-    'drawSentimentHeatmap', 'drawDistribution', 'drawKline', 'bindHover',
+    'drawSentimentHeatmap', 'drawDistribution', 'drawKline', 'drawTape', 'bindHover',
     'colorLadder', 'drawHatch', 'drawCandle', 'drawBar', 'drawText',
     'drawAxis', 'resizeCanvas', 'css',
   ];
@@ -497,10 +633,44 @@ async function main() {
   if (kline.titleText && !/\d+\s*日/.test(kline.titleText))
     fail.push('大盘K线: 标题缺"N 日"："' + kline.titleText + '"');
 
+  /* ═══ C3-D §5-4 实时 TAPE 断言 ═══ */
+  assertChart('实时TAPE', tape, {
+    minPct: 3,
+    mustHaveText: [/龙头涨幅/, /10日资金/, /板块涨幅/],
+  });
+  /* 三个色块必须真的上色（--rd 龙头 / --gd 资金 / --cy 板块） */
+  (tape.legendSwatches || []).forEach(function(s){
+    if (!s.exists) { fail.push('实时TAPE: 图例色块缺失 .tape-sw[' + s.name + ']'); return; }
+    if (s.transparent)
+      fail.push('实时TAPE: 图例色块"' + s.name + '"背景全透明（色没渲染出来）');
+  });
+  /* hover 整句必须逐个含 龙头 / 10日资金 / 板块（用户明确要求的三个字段），
+   * 且同时带 % 与 亿 两种单位 */
+  if (tape.hoverTest && tape.hoverTest.tipFound) {
+    const missing = ['龙头', '10日资金', '板块'].filter(function(k){
+      return tape.hoverTest.tipHits.indexOf(k) < 0;
+    });
+    if (missing.length)
+      fail.push('实时TAPE: tooltip 缺字段 ' + missing.join('/') +
+                '："' + (tape.hoverTest.tipText || '') + '"');
+    if (!tape.hoverTest.tipTextHasPct)
+      fail.push('实时TAPE: tooltip 缺 % 涨幅单位："' +
+                (tape.hoverTest.tipText || '') + '"');
+    if (!tape.hoverTest.tipTextHasYi)
+      fail.push('实时TAPE: tooltip 缺 亿 资金单位："' +
+                (tape.hoverTest.tipText || '') + '"');
+  }
+  /* 轮询钩子必须暴露（CDP 侧可主动触发一轮） */
+  if (tape.refreshHook !== 'function')
+    fail.push('实时TAPE: window.__tapeRefresh 未暴露（typeof=' + tape.refreshHook + '）');
+  /* 标题应含板块计数 */
+  if (tape.titleText && !/板块/.test(tape.titleText) && !/暂无数据/.test(tape.titleText))
+    fail.push('实时TAPE: 标题缺板块计数："' + tape.titleText + '"');
+
   /* ── 打印摘要 ── */
   console.log('  模块     window.Charts 暴露: ' + (out.chartsFns ?
     FNS_EXPECTED.map(k => k + '=' + out.chartsFns[k]).join('  ') : '未暴露'));
-  console.log('  canvas 总数  ' + out.canvasTotal + ' 个（starfield 多 GL + 图表 3 张新增）');
+  console.log('  canvas 总数  ' + out.canvasTotal + ' 个（starfield 多 GL + 图表 4 张新增）');
 
   console.log('\n── C3-A 情绪温度热力柱 ──');
   console.log('  canvas   ' + (out.heat.canvasSize ? (out.heat.canvasSize.w + 'x' + out.heat.canvasSize.h +
@@ -553,6 +723,29 @@ async function main() {
       '  开高低收量=[' + (kline.hoverTest.tipHits || []).join('') + ']');
   }
 
+  console.log('\n── C3-D 实时 TAPE（轻量轮询版）──');
+  console.log('  canvas   ' + (tape.canvasSize ? (tape.canvasSize.w + 'x' + tape.canvasSize.h +
+    ' 物理 ' + tape.canvasSize.physicalW + 'x' + tape.canvasSize.physicalH) : '未找到'));
+  console.log('  绘制     非空像素 ' + (tape.paintedPct == null ? '?' : tape.paintedPct + '%') +
+    '  (' + (tape.nonEmptyPixels || 0) + ' 像素)  首绘 ' +
+    ((Date.now() - tp0) / 1000).toFixed(1) + 's');
+  console.log('  图例     "' + (tape.legendText || '(空)') + '"');
+  console.log('           命中词  ' + ((tape.legendWords || []).join(' ') || '(无)'));
+  (tape.legendSwatches || []).forEach(function(s){
+    console.log('           ' + (s.exists ? (s.transparent ? '✗' : '✓') : '✗') +
+      '  ' + s.name + (s.bg ? '  ' + s.bg : ''));
+  });
+  console.log('  标题     "' + (tape.titleText || '(空)') + '"  __tapeRefresh=' + tape.refreshHook);
+  if (tape.hoverTest && tape.hoverTest.tipFound) {
+    console.log('  hover    tooltip: "' + (tape.hoverTest.tipText || '').slice(0, 90) +
+      (tape.hoverTest.tipText && tape.hoverTest.tipText.length > 90 ? '…' : '') + '"');
+    console.log('           role=' + tape.hoverTest.tipRole + '  aria-live=' + tape.hoverTest.tipAriaLive +
+      '  中文=' + (tape.hoverTest.tipTextHasChinese ? '✓' : '✗') +
+      '  %= ' + (tape.hoverTest.tipTextHasPct ? '✓' : '✗') +
+      '  亿=' + (tape.hoverTest.tipTextHasYi ? '✓' : '✗') +
+      '  字段=[' + (tape.hoverTest.tipHits || []).join('') + ']');
+  }
+
   console.log('\n── 判定 ──');
   if (fail.length) {
     fail.forEach(f => console.log('  ✗ ' + f));
@@ -569,6 +762,11 @@ async function main() {
     (klinePct < 0 ? '?' : klinePct.toFixed(2) + '%') + '）');
   console.log('  ✓ 大盘K线：图例齐全（涨/跌/MA5/MA10/MA20/量 + A股红涨绿跌注释）');
   console.log('  ✓ 大盘K线：hover tooltip 是整句中文含 开/高/低/收/量 + % + 日期，role=status + aria-live');
+  console.log('  ✓ 实时TAPE：canvas 有实际绘制（非全透明，板块扫描首绘 ' +
+    (tapePct < 0 ? '?' : tapePct.toFixed(2) + '%') + '）');
+  console.log('  ✓ 实时TAPE：图例齐全（龙头涨幅/10日资金/板块涨幅 三色分离 + A股红涨绿跌注释）');
+  console.log('  ✓ 实时TAPE：hover tooltip 是整句中文含 板块名/龙头/涨幅%/资金亿，role=status + aria-live');
+  console.log('  ✓ 实时TAPE：window.__tapeRefresh 可主动触发一轮（setTimeout 自调度 + AbortController）');
   console.log('  ✓ window.Charts ' + FNS_EXPECTED.length + ' 个 API 全部暴露');
   console.log('  ✓ 未新增 rAF 链（canvas 总数 ' + out.canvasTotal + '，图表数据驱动一次性绘制）');
   process.exit(0);

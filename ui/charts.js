@@ -709,6 +709,146 @@
     };
   }
 
+  /* ═══ §5-4 实时 TAPE：板块三柱条带（龙头涨幅 / 10日资金 / 板块涨幅）═══
+   * 一板块一槽位，槽内 3 根竖柱；柱高按**各自指标范围**归一化
+   * （跨板块可比、不跨指标混标度），底部板块名截断 4 字。
+   * 色＝指标系列三色分离：龙头涨幅 --rd / 10日资金 --gd / 板块涨幅 --cy。
+   * A 股红涨绿跌由 --rd 承载在"龙头涨幅"（涨）系列上；正负号走 tooltip 数值通道，
+   * 不做正负分色（否则 3 指标会退化成红绿两色，破坏三色分离）。
+   * 数据到位一次性重画（不入 AnimGate.gatedLoop，不新增 rAF 链）。
+   * sectors 元素形状来自 tools/close_scan.js：name/leader/leaderPct/d10Yi/changePct */
+  function drawTape(canvas, sectors, opts){
+    opts = opts || {};
+    const num = function(v){ return (typeof v === 'number' && isFinite(v)) ? v : null; };
+    const EMPTY = '暂无数据';
+    /* 空数据兜底：与 drawKline 同形，hit 永远 null、tooltip 固定文案、layout=null */
+    const fallback = { hit: function(){ return null; },
+                       tooltip: function(){ return EMPTY; },
+                       sectors: [], layout: null };
+    const empty = function(ctx, w, h){
+      drawText(ctx, EMPTY, w / 2, h / 2,
+        { align: 'center', font: 11, fill: css('--faint') || '#8ba0b8' });
+      return fallback;
+    };
+
+    const R = resizeCanvas(canvas);
+    if(!R) return null;
+    const ctx = R.ctx, w = R.w, h = R.h;
+    ctx.clearRect(0, 0, w, h);
+
+    if(!sectors || !sectors.length) return empty(ctx, w, h);
+
+    /* 系列定义：k=数据字段，c=系列色（--rd/--gd/--cy 三色分离）。
+     * 顺序即槽内左→右绘制顺序，hit/tooltip 复用同一数组，避免两处漂移。 */
+    const SERIES = [
+      { k: 'leaderPct', c: css('--rd') || '#F0485E' },   /* 龙头涨幅：A股涨色红 */
+      { k: 'd10Yi',     c: css('--gd') || '#F2B23E' },   /* 10日资金：金色 */
+      { k: 'changePct', c: css('--cy') || '#3FD0FF' },   /* 板块涨幅：青色 */
+    ];
+
+    const padTop = 6, padBottom = 15, padLeft = 6, padRight = 6;
+    const plotW = w - padLeft - padRight;
+    const plotH = h - padTop - padBottom;
+    /* 画布过窄放不下 12 槽×3 柱（或高度连最小柱高都放不下）→ 走占位，不硬画糊 */
+    if(plotW < 12 || plotH < 26) return empty(ctx, w, h);
+
+    const n = sectors.length;
+    const slotW = plotW / n;
+    const groupGap = Math.max(2, slotW * 0.10);
+    const barGap   = Math.max(1, slotW * 0.05);
+    const barW     = Math.max(1, (slotW - groupGap - 2 * barGap) / 3);
+
+    /* 每个指标各自范围归一化：min→0（最小柱高 2px）、max→全高。
+     * hi<=lo 时抬一个 1 单位台阶，避免除零后所有柱等高糊成一条 */
+    const ranges = {};
+    SERIES.forEach(function(s){
+      let lo = Infinity, hi = -Infinity;
+      for(let i = 0; i < n; i++){
+        const v = num(sectors[i][s.k]);
+        if(v == null) continue;
+        if(v < lo) lo = v;
+        if(v > hi) hi = v;
+      }
+      ranges[s.k] = (isFinite(lo) && isFinite(hi)) ? [lo, hi <= lo ? lo + 1 : hi] : null;
+    });
+
+    /* 预计算每板块几何 + 数据引用，hitTest 直接复用，不重算布局 */
+    const groups = [];
+    for(let i = 0; i < n; i++){
+      const d = sectors[i];
+      const gx = padLeft + i * slotW + groupGap / 2;
+      const bars = [];
+      for(let k = 0; k < SERIES.length; k++){
+        const spec = SERIES[k];
+        const x = gx + k * (barW + barGap);
+        const v = num(d[spec.k]);
+        const rg = ranges[spec.k];
+        if(v == null || !rg){
+          /* 缺字段/全序列缺失 → 留空槽，不画柱（tooltip 里显示 —） */
+          bars.push({ k: spec.k, x: x, y: padTop + plotH, w: barW, h: 0,
+                      fill: spec.c, v: null, t: null });
+          continue;
+        }
+        const t = Math.max(0, Math.min(1, (v - rg[0]) / (rg[1] - rg[0])));
+        const barH = Math.max(2, t * plotH);
+        const y = padTop + plotH - barH;
+        bars.push({ k: spec.k, x: x, y: y, w: barW, h: barH, fill: spec.c, v: v, t: t });
+        drawBar(ctx, x, y, barW, barH, spec.c);
+      }
+      groups.push({ i: i, x: padLeft + i * slotW, slotW: slotW, d: d, bars: bars });
+      /* 底部板块名截断 4 字：形状/文字通道，色盲场景也能读出是哪一列 */
+      drawText(ctx, String(d.name || '').slice(0, 4), padLeft + i * slotW + slotW / 2, h - 3,
+        { align: 'center', font: 8.5, fill: css('--faint') || '#8ba0b8' });
+    }
+
+    /* 基线：plot 底边一条淡线，让"柱高"有共同参照 */
+    ctx.save();
+    ctx.strokeStyle = css('--line') || 'rgba(140,175,225,.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const baseY = Math.round(padTop + plotH) + 0.5;
+    ctx.moveTo(padLeft, baseY);
+    ctx.lineTo(padLeft + plotW, baseY);
+    ctx.stroke();
+    ctx.restore();
+
+    /* Hit 检测：x 落在哪个槽位（覆盖 plot 区 + 底部名称区，命中整槽更宽容） */
+    function hit(hx, hy){
+      if(hx < padLeft || hx > padLeft + plotW) return null;
+      if(hy < padTop || hy > padTop + plotH + padBottom) return null;
+      const idx = Math.floor((hx - padLeft) / slotW);
+      if(idx < 0 || idx >= n) return null;
+      return groups[idx].d;
+    }
+
+    function fmtPct(v){
+      if(v == null) return '—';
+      return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+    }
+    function fmtYi(v){
+      if(v == null) return '—';
+      return v.toFixed(1) + '亿';
+    }
+
+    /* Tooltip 整句（§5 通用条款）：
+     * 「人工智能 龙头肯特催化+10.03% · 10日资金12.5亿 · 板块+3.5%」
+     * 板块名 + 龙头名 + 龙头涨幅 + 10日资金 + 板块涨幅，全带单位 */
+    function tooltip(d){
+      const name = String(d.name || '').slice(0, 6);
+      const lead = String(d.leader || '—');
+      return name + ' 龙头' + lead + fmtPct(num(d.leaderPct))
+        + ' · 10日资金' + fmtYi(num(d.d10Yi))
+        + ' · 板块' + fmtPct(num(d.changePct));
+    }
+
+    return {
+      hit: hit, tooltip: tooltip, sectors: groups,
+      layout: { padLeft: padLeft, padTop: padTop, padRight: padRight, padBottom: padBottom,
+                plotW: plotW, plotH: plotH, slotW: slotW, barW: barW,
+                barGap: barGap, groupGap: groupGap, n: n, ranges: ranges },
+    };
+  }
+
   window.Charts = {
     css,
     resizeCanvas,
@@ -721,6 +861,7 @@
     drawSentimentHeatmap,
     drawDistribution,
     drawKline,
+    drawTape,
     bindHover,
     /* 供测试用 */
     _hexToRgb: hexToRgb,

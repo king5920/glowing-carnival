@@ -351,6 +351,58 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+/* ══ 收盘扫描的在途合并 + 短 TTL 缓存 ══
+ *
+ * 背景（2026-09-19 §5-4 TAPE 落地时实测）：
+ *   /api/closescan 走东财 clist 分页，单次 ~13s；页面加载时 #scanbox
+ *   （topN=8）与 §5-4 实时 TAPE（topN=12）同时各发一次，两次并发扫描
+ *   各自变成 ~45s——外部源被同一份数据打了两遍，还慢三倍以上。
+ *
+ * 做法：把扫描结果按"全量"（topN 无关）缓存，topN 只影响 sectors 截断。
+ *   · 并发：同一时刻只跑一次 cs.scan，后来的请求等同一个 promise。
+ *   · TTL：默认 90s。面板与 TAPE 都是 5 分钟轮询，90s 远小于轮询间隔，
+ *     人眼不会看到滞后；非交易时段数据本身不变化，更不会受影响。
+ *   · 只缓存成功结果（r.ok 为真）。失败不缓存——让下一次请求真去重试，
+ *     不然一次东财抖动会让整页卡满一个 TTL 周期。
+ *
+ * 为什么 topN 无关是安全的：close_scan 先按 score 降序排完 deduped，
+ * 再 slice(0, topN)；mainlines 由全量 deduped 过滤而来，与 topN 无关。
+ * 所以 scan({topN:30}).sectors.slice(0, 8) === scan({topN:8}).sectors。
+ * server 侧 topN 已钳在 3..30，不会越界。 */
+const CS_TOPN_MAX = 30;
+const CS_CACHE_TTL_MS = 90 * 1000;
+let csSlot = null;   /* { at: number, r: object } —— 最近一次成功的全量扫描 */
+let csInflight = null;  /* Promise —— 在途的那一次扫描 */
+
+async function csScanFull() {
+  if (!csInflight) {
+    csInflight = require('./tools/close_scan')
+      .scan({ topN: CS_TOPN_MAX })
+      .then(r => {
+        if (r && r.ok) csSlot = { at: Date.now(), r };
+        return r;
+      })
+      .finally(() => { csInflight = null; });
+  }
+  return csInflight;
+}
+
+/* 取一次扫描结果，topN 只做 sectors 截断；顺带标注是否命中缓存。 */
+async function csScanTrimmed(topN) {
+  if (csSlot && Date.now() - csSlot.at <= CS_CACHE_TTL_MS) {
+    const r = csSlot.r;
+    return Object.assign({}, r, {
+      sectors: (r.sectors || []).slice(0, topN),
+      fromCache: true,
+    });
+  }
+  const r = await csScanFull();
+  return Object.assign({}, r, {
+    sectors: (r.sectors || []).slice(0, topN),
+    fromCache: false,
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = req.url || '/';
 
@@ -477,8 +529,9 @@ const server = http.createServer(async (req, res) => {
     try {
       const q = new URL(url, 'http://x').searchParams;
       const topN = Math.min(30, Math.max(3, parseInt(q.get('topN') || '12', 10) || 12));
-      const cs = require('./tools/close_scan');
-      const r = await cs.scan({ topN });
+      /* 走在途合并 + 短 TTL 缓存：页面加载时 #scanbox(topN=8) 与
+       * §5-4 TAPE(topN=12) 会同时命中这里，不合并就是一次东财扫描被打两遍。 */
+      const r = await csScanTrimmed(topN);
       /* 面板只需结构化字段，不带 formatScan 的 text（那是给模型看的） */
       const { text, ...rest } = r;
       return sendJson(res, 200, rest);
