@@ -45,8 +45,7 @@ const PROBE = `(() => {
     out.metaHidden = cs(meta).display;
 
     /* ── 点开面板 ── */
-    btn.click();
-
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     /* 等待一帧让 transition/display 生效 */
     out.step = 'open-clicked';
 
@@ -144,9 +143,9 @@ const PROBE = `(() => {
                           btnExpanded: btn.getAttribute('aria-expanded') };
 
     /* ── 再点一次按钮 → 应打开；再点 → 应关闭（toggle 验证）── */
-    btn.click();
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     out.toggle1 = cs(panel).display;
-    btn.click();
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     out.toggle2 = cs(panel).display;
 
     out.clip = { x: 0, y: 0, w: VP_W, h: VP_H, px: R(VP_W*2), py: R(VP_H*2) };
@@ -253,7 +252,7 @@ async function main(){
 
   /* 截图 —— 面板打开状态下（重开一次以便截图） */
   await cdp.send('Runtime.evaluate', {
-    expression: "document.getElementById('tbmenu').click()", returnByValue: true });
+    expression: "document.getElementById('tbmenu').dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}))", returnByValue: true });
   await sleep(400);
   const shot = await cdp.send('Page.captureScreenshot', {
     format: 'png', clip: { x:0, y:0, width: VP.w, height: VP.h, scale: 1 },
