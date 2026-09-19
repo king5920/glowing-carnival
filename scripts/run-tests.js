@@ -45,6 +45,7 @@ const SUITES = [
   ['上游 jiwen',          'src/jiwen.test.js'],
   ['LLM llm',             'src/llm.test.js'],
   ['语音 voice',          'src/voice.test.js'],
+  ['收盘预热 cs-warm',    'src/jarvis-cs-warm.test.js'],
   ['TTS边缘 edge',        'src/tts_edge.test.js'],
 ];
 

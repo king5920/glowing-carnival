@@ -25,7 +25,7 @@ const brain = require('./brain');
 const feishu = require('./feishu');
 
 const HOST = '127.0.0.1';
-const PORT = 3800;
+const PORT = Number(process.env.PORT) || 3800;   // 默认 3800；PORT 覆盖仅供临时验证/多实例
 const UI_DIR = path.join(__dirname, '..', 'ui');
 
 /* 设置页的接入预设。
@@ -401,6 +401,51 @@ async function csScanTrimmed(topN) {
     sectors: (r.sectors || []).slice(0, topN),
     fromCache: false,
   });
+}
+
+/* ══ 收盘扫描的服务端预热（方案 A，2026-09-19）══
+ *
+ * 要解决的问题：CS_CACHE_TTL_MS 只有 90s，而前端轮询是交易 5min / 非交易 30min，
+ * 轮询间隔 ≫ 缓存寿命 → 每个访客首访时缓存几乎必冷，要硬吃一次东财 clist 冷扫描
+ * （实测 37~46s）。90s 缓存只救了同一页加载瞬间 scanbox(TOPN=8) 与 TAPE(TOPN=12)
+ * 的并发，救不了"第一个访客"。
+ *
+ * 做法：交易时段由服务端主动把缓存续热，让任何访客任何时刻首访都命中。
+ *   · 只在 tradingSession() ∈ {上午盘, 下午盘} 预热——复用 src/clock.js 的交易日历
+ *     （含节假日/调休），绝不用 getDay()+小时 的简陋判断，否则节假日会误扫东财。
+ *   · 每 60s 轻量 tick 一次；仅当无缓存或缓存已超过 75s（将冷）才真扫一次。
+ *     用"检查 + 阈值"而非"固定 75s 硬扫"，是为了让真实用户请求顺带续期后，
+ *     定时器不重复扫，尽量省外部源调用。
+ *   · 预热走同一个 csScanFull()：与真实请求撞车时由在途合并自动并成一次。
+ *   · 失败静默（csScanFull 只缓存成功结果），不重试轰炸、不影响任何接口。
+ *   · timer.unref()：不阻止进程退出；非交易时段零外部请求。 */
+const CS_WARM_CHECK_MS = 60 * 1000;    /* 多久检查一次"缓存该不该续" */
+const CS_WARM_AGE_MS = 75 * 1000;      /* 缓存超过这个年龄就续（略小于 90s TTL） */
+let csWarmTimer = null;
+
+function csWarmTick() {
+  let session = '';
+  try {
+    session = require('./clock').tradingSession(new Date());
+  } catch (e) {
+    return;   /* clock 不可用时宁可不预热，也不能拖垮服务 */
+  }
+  /* 决策规则在 src/tools/cs_warm.js（纯函数，被单测覆盖）：
+   * 非竞价时段→non-session；缓存新鲜→fresh；无缓存/将冷→no-cache/stale 才真扫。 */
+  const slotAt = csSlot ? csSlot.at : null;
+  const decision = require('./tools/cs_warm')
+    .shouldWarmCloseScan({ session, slotAt, now: Date.now(), maxAgeMs: CS_WARM_AGE_MS });
+  if (!decision.warm) return;
+  /* 不 await、不阻塞 tick；失败由 csScanFull 自身处理（只缓存成功结果） */
+  console.log('  收盘扫描预热：交易时段缓存将冷（' + decision.reason + '），静默续热…');
+  csScanFull().catch(() => {});
+}
+
+function startCloseScanWarmer() {
+  if (csWarmTimer) return;
+  csWarmTimer = setInterval(csWarmTick, CS_WARM_CHECK_MS);
+  if (typeof csWarmTimer.unref === 'function') csWarmTimer.unref();
+  console.log('  收盘扫描预热: 已启用（仅上午盘/下午盘，60s 检查 / 75s 续热）');
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1142,6 +1187,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   mind.init();   // 启动主动意识（加载持久化状态 + 开始心跳）
+  startCloseScanWarmer();   // 交易时段预热收盘扫描缓存，首访 TAPE 不冷启动
   const c = db.counts();
   console.log(`  JARVIS 已启动  http://${HOST}:${PORT}`);
   console.log(`  模型: ${llm.MODEL}   密钥: ${llm.hasKey() ? '已加载' : '缺失'}`);
