@@ -343,6 +343,30 @@ async function scan(opts = {}) {
     }
   }
 
+  /* ══════ 真备胎：东财整源失败 → 降级同花顺行业 ══════
+   * 2026-09-21 实测 push2/push2delay 全 RST，上面行业+概念都抓不到。
+   * 同花顺普通列表页（ths_board）给 50 个带完整行情的行业。
+   * 只在东财 sectors 全空时触发；口径差异必须显式标注（见 boardFallback）：
+   *   仅行业无概念、无今日/5日/10日主力净额、覆盖面与东财不同。 */
+  let boardFallback = null;
+  if (!sectors.length) {
+    try {
+      const ths = require('./ths_board');
+      const thsRows = await ths.industryBoards();
+      coverage.industry = { got: thsRows.length, total: 90, complete: false };
+      coverage.concept = { got: 0, total: null, complete: false };
+      thsRows.forEach(s => sectors.push(Object.assign({}, s, scoreMainline(s))));
+      boardFallback = {
+        source: 'ths.board',
+        reason: '东财行业板块整源不可用：' + errors.join(' / '),
+        note: '已降级同花顺行业（仅 50 个带行情行业、无概念、无主力多日净额），口径与东财不同，请以实时行情软件为准',
+      };
+      errors.length = 0;            // 已成功兜底，不再把它当致命错误
+    } catch (e) {
+      errors.push('ths: ' + e.message);
+    }
+  }
+
   /* 数据时点：任取一条即可（同批请求时点一致）。
    * 报告里必须带上 —— 否则读者无法判断这是盘中快照还是终盘数据。 */
   const dataTs = sectors.length ? sectors[0].dataTs : null;
@@ -454,6 +478,8 @@ async function scan(opts = {}) {
     /* 覆盖率：抓到多少 / 上游总共多少。不全时必须让调用方看见。 */
     coverage,
     coverageComplete: Object.values(coverage).every(c => c.complete),
+    /* 非 null 表示已降级同花顺（口径差异在 note 里），面板必须让用户看见 */
+    boardFallback,
     timing, indexes, indexError,
     sectors: top,
     mainlineCount: mainlines.length,

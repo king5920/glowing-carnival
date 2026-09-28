@@ -46,6 +46,7 @@ const SUITES = [
   ['LLM llm',             'src/llm.test.js'],
   ['语音 voice',          'src/voice.test.js'],
   ['收盘预热 cs-warm',    'src/jarvis-cs-warm.test.js'],
+  ['同花顺板块 ths-board','src/jarvis-ths-board.test.js'],
   ['TTS边缘 edge',        'src/tts_edge.test.js'],
 ];
 

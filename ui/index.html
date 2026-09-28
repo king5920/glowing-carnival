@@ -566,6 +566,9 @@ body.drawer-open{overflow:hidden}
 /* 时点/覆盖警告 */
 .scan-warn{margin:0;padding:6px 12px;background:rgba(255,159,28,.12);border-bottom:1px solid rgba(255,159,28,.3);
   font-size:10px;color:var(--warn);line-height:1.5}
+/* 数据源降级横幅：青蓝色＝已切换备胎（非故障红、非警告橙），数据仍可用 */
+.scan-warn.scan-fb{background:rgba(63,208,255,.10);border-bottom:1px solid rgba(63,208,255,.3);color:var(--cy)}
+.scan-warn .scan-fb-note{color:var(--dim);margin-top:2px}
 /* ② 板块卡 */
 .scard{border:1px solid var(--hairline2);border-radius:8px;background:rgba(24,34,50,.4);
   margin:8px 10px;overflow:hidden}
@@ -1581,8 +1584,13 @@ body.no-webgl #gl-fallback{display:grid}
     const maxF = Math.max(1, ...secs.map(s => Math.abs(s.d10Yi || 0)));
     let h = '';
 
-    /* 时点警告（顶格） */
-    if (d.staleWarning) h += '<div class="scan-warn">⚠ ' + esc(d.staleWarning) + '</div>';
+    /* 数据源降级横幅（最高优先）：东财挂了已切同花顺，必须让用户看见口径差异 */
+    if (d.boardFallback) {
+      h += '<div class="scan-warn scan-fb">⚠ 行情源已切换为同花顺行业'
+        + '<div class="scan-fb-note">' + esc(d.boardFallback.note) + '</div></div>';
+    } else if (d.staleWarning) {
+      h += '<div class="scan-warn">⚠ ' + esc(d.staleWarning) + '</div>';
+    }
     else if (d.coverageComplete === false) h += '<div class="scan-warn">⚠ 板块未抓全，可能漏掉低位启动的主线</div>';
 
     /* ① 指数判时机 */

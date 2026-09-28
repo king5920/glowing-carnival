@@ -158,6 +158,7 @@ async function fundFlow(code, days = 5) {
     + `&fields1=${FIELDS1}&fields2=${FIELDS2}`;
 
   let j;
+  let emFailed = null;
   try {
     /* 走 em_client 的防风控队列（串行、keep-alive、熔断）。
      * 传完整 push2 URL —— em_client 会识别 push2 系列，
@@ -165,11 +166,42 @@ async function fundFlow(code, days = 5) {
     const fullUrl = 'https://push2.eastmoney.com' + path;
     j = await em.emGetJson(fullUrl, { headers: { Referer: 'https://data.eastmoney.com/' } });
   } catch (e) {
-    health.record(SOURCE, false, '请求失败: ' + e.message);
-    throw new Error(`资金流接口不可用（${code}）：${e.message}`);
+    /* 2026-09-28：push2 全系列（含 push2delay）在本机被 TCP RST，
+     * 且无 datacenter/F10 备用端点可达。不能让整个调用抛错——
+     * 落到独立风控面的新浪 MoneyFlow 取真实净流入（口径不同，下面如实标注）。 */
+    emFailed = e;
   }
 
   const klines = j && j.data && Array.isArray(j.data.klines) ? j.data.klines : null;
+
+  /* ── EM 全挂降级：用新浪净流入返回真实数据（口径诚实，绝不冒充四档）── */
+  if (emFailed) {
+    let sinaRows = null, sinaErr = null;
+    try { sinaRows = await sinaFundFlowHistory(code, lmt); }
+    catch (e) { sinaErr = e; }
+    if (sinaRows && sinaRows.length) {
+      /* 新浪只有净流入总额：days[].main 放总额，small/medium/large=null，
+       * 并在 caliber 字段写死"新浪净流入总额·非四档"，调用方据此不做四档解读。 */
+      const rowsS = sinaRows.map(r => ({
+        date: r.date, main: r.netAmount, small: null, medium: null, large: null,
+      }));
+      health.record(SOURCE, true);   // 取到真实数据=源可用（经备用域名），不制造假故障
+      return {
+        code: String(code), secid, name: null,
+        days: rowsS, requested: lmt, received: rowsS.length,
+        shortfall: rowsS.length < Math.min(lmt, 3)
+          ? { requested: lmt, received: rowsS.length, reason: '新浪历史仅返回这些天' } : null,
+        source: 'sina.moneyflow',
+        caliber: '净流入总额（新浪口径·无主力/大单/中单/小单四档拆分）',
+        note: `东财 fflow 全系列当前不可达（${emFailed.message}），已切新浪 MoneyFlow 独立域名；`
+          + '数值是净流入总额、非主力四档，不可与东财口径直接互减',
+      };
+    }
+    health.record(SOURCE, false, '请求失败: 东财与新浪均不可用');
+    throw new Error(`资金流接口不可用（${code}）：东财 ${emFailed.message}`
+      + (sinaErr ? `；新浪 ${sinaErr.message}` : ''));
+  }
+
   if (!klines || !klines.length) {
     /* data 为 null 通常意味着：代码不存在、是指数、或当天还没有数据。
      * 必须区分"接口坏了"和"这只票确实没数据" ——
@@ -328,9 +360,20 @@ async function fundFlow(code, days = 5) {
  * 三层都没有才只报当日 —— 并**明确说明趋势不可判**，不假装有结论。
  */
 async function fundFlowSummary(code, days = 5) {
-  const r = await fundFlow(code, days);
   const fmt = v => (v / 1e4).toFixed(1) + '万';
-  const today = r.days[r.days.length - 1] || null;
+  /* ── 东财当日四档：允许整源失败，不能让它中断整个摘要 ──
+   * 2026-09-21 实测：push2 / push2delay 同时被 TCP RST，旧代码在
+   * `await fundFlow(...)` 这一行直接抛错，下面的新浪降级永远走不到——
+   * 「双源备份」在最该生效的东财全挂场景反而失效。
+   * 改为 try/catch：东财挂了 r=null，仍继续用新浪独立域名给多日趋势，
+   * 并在文本里如实标注「当日四档缺失」，绝不用新浪总额冒充主力四档。 */
+  let r = null, emError = null;
+  try {
+    r = await fundFlow(code, days);
+  } catch (e) {
+    emError = String((e && e.message) || e);
+  }
+  const today = r ? (r.days[r.days.length - 1] || null) : null;
 
   /* ── 多日趋势：新浪优先，本地库兜底 ── */
   let series = [], caliber = null, trendSource = null;
@@ -366,6 +409,9 @@ async function fundFlowSummary(code, days = 5) {
     parts.push(`${r.name || r.code} ${today.date} 当日四档（东财）：`
       + `主力${fmt(today.main)} 大单${fmt(today.large)} `
       + `中单${fmt(today.medium)} 小单${fmt(today.small)}`);
+  } else {
+    parts.push(`当日主力四档暂不可用（东财 fflow 整源失败${emError ? '：' + emError : ''}），`
+      + '下面仅为新浪口径的多日净流入总额，**不代表主力/大单拆分**');
   }
   if (series.length) {
     const total = series.reduce((s, d) => s + d.net, 0);
@@ -378,9 +424,12 @@ async function fundFlowSummary(code, days = 5) {
   }
 
   return {
-    code: r.code,
-    name: r.name,
+    code: r ? r.code : String(code),
+    name: r ? r.name : null,
     text: parts.join('\n'),
+    /* 东财是否可用：false 时 today 必为 null，调用方/模型应看到当日四档缺失 */
+    eastmoneyOk: !!r,
+    eastmoneyError: emError,
     today: today ? {
       date: today.date, main: today.main, large: today.large,
       medium: today.medium, small: today.small,
@@ -390,8 +439,8 @@ async function fundFlowSummary(code, days = 5) {
     trendSource,
     caliber,
     totalNet: series.length ? series.reduce((s, d) => s + d.net, 0) : null,
-    source: r.source,
-    note: r.note
+    source: r ? r.source : trendSource,
+    note: (r ? r.note : '东财 fflow 整源不可用，无当日主力四档')
       + '；东财 fflow 每次只返回当日，多日趋势取自新浪 MoneyFlow（独立风控面）'
       + '。两者口径不同：东财有主力/大单四档，新浪只有净流入总额，数值不可直接互减',
   };

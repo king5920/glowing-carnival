@@ -794,6 +794,24 @@ test('资金流：两个源口径不同必须显式标注，不能混算', () =>
     'get_fund_flow 的 description 必须解释同日反向是正常现象，否则模型会误判');
 });
 
+test('资金流：东财整源失败时摘要必须容错并继续走新浪', () => {
+  /* 2026-09-21 实测：push2 / push2delay 同时被 TCP RST。
+   * 旧 fundFlowSummary 第一行 `const r = await fundFlow(...)` 直接抛错，
+   * 后面的新浪降级永远走不到 —— 双源备份在东财全挂时反而失效。
+   * 必须把东财当日四档包在 try/catch 里，失败也继续用新浪给趋势，
+   * 并显式标注当日四档缺失（绝不用新浪总额冒充主力四档）。 */
+  const src = require('fs').readFileSync(
+    require('path').join(__dirname, 'tools', 'stock_fundflow.js'), 'utf8');
+  const m = /async function fundFlowSummary\(/.exec(src);
+  assert(m, '找不到 fundFlowSummary');
+  const body = src.slice(m.index, src.indexOf('\n}\n', m.index));
+  assert(/await fundFlow\(/.test(body), '内部仍需调用 fundFlow 取当日四档');
+  assert(/try\s*\{[\s\S]*await fundFlow\(/.test(body),
+    '东财 fundFlow 必须包在 try 里 —— 否则整源失败会在取新浪前中断');
+  assert(/eastmoneyOk/.test(body),
+    '必须返回 eastmoneyOk 让调用方看到东财是否可用');
+});
+
 test('资金流：必须声明数据来自延时域名', () => {
   /* 「静默降级」和「静默失败」一样有害 ——
    * 不能让调用方以为拿到的是实时数据。 */
