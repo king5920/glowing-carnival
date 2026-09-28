@@ -394,9 +394,57 @@ function runPs(script, timeoutMs = 30000) {
 
 /* ─────────────────────────── TTS ─────────────────────────── */
 
+/* ── 数字 / 符号口语化 ──
+ *
+ * 背景：cleanForSpeech 原本只去 Markdown，数字带着裸符号直接进 TTS。
+ * edge 神经语音偶尔读对，但降级 SAPI 时 % . , - 基本乱读 —— 用户实测
+ * 「不会报小数点或百分数，播报数字很多错误」。
+ *
+ * 原则：把"引擎读不准的符号"预先换成"确定能读对的中文"，数字本体保留
+ * 阿拉伯数字（两引擎读整数/小数都可靠）。所有匹配都用 \d 上下文约束，
+ * 避免误伤普通文字里的标点。
+ */
+function numbersForSpeech(src) {
+  let s = String(src || '');
+
+  // 1) 日期 2026-09-12 / 2026/9/12 → 2026年9月12日（先于正负号，吃掉横线；去前导0）
+  s = s.replace(/(\d{4})[-/](\d{1,2})[-/](\d{1,2})/g,
+    (m, y, mo, d) => `${y}年${Number(mo)}月${Number(d)}日`);
+
+  // 2) 时间 14:30(:05) → 14点30分(05秒)；小时去前导0，分/秒保留两位数
+  s = s.replace(/(\d{1,2}):(\d{2})(?::(\d{2}))?/g, (m, h, mi, se) =>
+    se ? `${Number(h)}点${mi}分${se}秒` : `${Number(h)}点${mi}分`);
+
+  // 3) 千分位逗号：1,234,567 → 1234567（逗号两侧都是数字、且右侧成组）
+  s = s.replace(/(\d),(?=\d{3}(\D|$))/g, '$1');
+
+  // 4) 小数点：仅"数字 . 数字" → 点（避免吃掉句末的英文句点）
+  s = s.replace(/(\d)\.(?=\d)/g, '$1点');
+
+  // 5) 正负号：须早于百分号，否则 -3.5% 的负号会失配。
+  //    用"前面不是数字"的负向断言：覆盖句首/中文/空格/括号之后，且排除范围 1-5（前面是数字）。
+  s = s.replace(/(?<![\d])[+-](?=\d)/g, m => m === '+' ? '正' : '负');
+
+  // 6) 百分号 / 千分号（含中文全角％、‰）。数字此时可能已含"点"，前缀可带"负/正"；
+  //    正负号要提到"百分之"之外：-3.5% → 负百分之3点5，而非"百分之负3点5"。
+  s = s.replace(/([负正]?)([\d点]+)\s*[%％]/g, (m, sign, num) => `${sign}百分之${num}`);
+  s = s.replace(/([负正]?)([\d点]+)\s*‰/g, (m, sign, num) => `${sign}千分之${num}`);
+
+  // 7) 货币：¥/￥13.5（点已转）→ 13点5元；$13.5 → 13点5美元
+  s = s.replace(/[¥￥]\s*([\d点]+)/g, '$1元');
+  s = s.replace(/\$\s*([\d点]+)/g, '$1美元');
+
+  // 8) 温度 / 比率 / 区间
+  s = s.replace(/([\d点]+)\s*℃/g, '$1摄氏度');
+  s = s.replace(/([\d点]+)\s*[:：]\s*(\d+)/g, '$1比$2');
+  s = s.replace(/\s*[~～]\s*/g, '至');
+
+  return s;
+}
+
 /** 朗读文本的清洗：把 Markdown / 代码块去掉，避免把符号读出来 */
 function cleanForSpeech(text) {
-  return String(text || '')
+  const out = String(text || '')
     .replace(/```[\s\S]*?```/g, '，代码略，')   // 代码块不朗读
     .replace(/`([^`]+)`/g, '$1')
     .replace(/\*\*([^*]+)\*\*/g, '$1')
@@ -404,8 +452,8 @@ function cleanForSpeech(text) {
     .replace(/^[-*]\s+/gm, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')     // 链接只留文字
     .replace(/https?:\/\/\S+/g, '链接')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/\s+/g, ' ');
+  return numbersForSpeech(out).trim();
 }
 
 /** 语音合成缓存：同一句话（含音色）不重复合成 */
@@ -1213,7 +1261,7 @@ Write-Output ('{"voices":"' + $voices + '","recognizers":"' + $recs + '"}')
 }
 
 module.exports = {
-  synthesize, synthesizeStream, cleanForSpeech, probe, Listener,
+  synthesize, synthesizeStream, cleanForSpeech, numbersForSpeech, probe, Listener,
   WAKE_WORDS, WAKE_MIN_CONFIDENCE, TTS_VOICE,
   CONVO_WINDOW_MS, SPEECH_MIN_CONFIDENCE, SPEECH_MIN_CHARS,
   VAD_END_SILENCE_SEC, VAD_BABBLE_SEC,

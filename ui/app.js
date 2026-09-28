@@ -476,12 +476,13 @@
         streamBubble.text = '';
         streamBubble.el = assistantBubble('', 'JARVIS');
         amp = 0.12;
-        if (currentTurnVoice && speakOn) speakStart(true);
+        // 朗读开关开着就念 —— 打字轮/语音轮都出声；fromVoice 仅决定念完后的提示行为
+        if (speakOn) speakStart(!!currentTurnVoice);
       }
       streamBubble.text += piece;
       streamBubble.el.innerHTML = renderMarkdown(streamBubble.text);
       chat.scrollTop = chat.scrollHeight;
-      if (currentTurnVoice && speakOn) speakFeed(piece);
+      if (speakOn) speakFeed(piece);
     }
     else if (ev === 'reply') {
       hideThinking();
@@ -493,7 +494,7 @@
           streamBubble.text = d.text;
           streamBubble.el.innerHTML = renderMarkdown(d.text);
         }
-        if (currentTurnVoice && speakOn) speakEnd();
+        if (speakOn) speakEnd();
         else if (currentTurnVoice && micOn) showListenHint();  // 朗读关着也要给窗口提示
       } else {
         assistantBubble(d.text, 'JARVIS');
@@ -857,6 +858,7 @@
 
   function syncBtns() {
     spkBtn.classList.toggle('on', speakOn);
+    spkBtn.title = speakOn ? '朗读回复：开（打字/语音都会念，点击关闭）' : '朗读回复：关（点击开启，打字也会念）';
     micBtn.classList.toggle('on', micOn && !awake);
     micBtn.classList.toggle('awake', awake);
     micBtn.title = !micOn ? '语音输入（点击开启常听）'
@@ -1003,8 +1005,26 @@
       // 还有句子在预取/生成 → fetch 完成后 pumpPlay 会接上
     };
     a.addEventListener('ended', next);
-    a.addEventListener('error', next);     // 单句失败不拖垮整轮
-    a.play().catch(next);
+    // 解码失败：可见提示（只报一次），再跳下一句不拖垮整轮
+    a.addEventListener('error', () => {
+      if (!speakQ._playWarned) {
+        speakQ._playWarned = true;
+        notify('这一句音频解码失败，已跳过', 'warn');
+      }
+      next();
+    });
+    // play() 被自动播放策略拦截时旧写法是 .catch(next) 静默跳过 —— 有字没声还不报错。
+    // 改为可见提示，并引导再点一次朗读按钮（那次点击即用户手势，可解锁播放）。
+    const p = a.play();
+    if (p && p.catch) {
+      p.catch(err => {
+        if (!speakQ._playWarned) {
+          speakQ._playWarned = true;
+          notify('浏览器拦截了自动播放：请再点一次朗读按钮开启声音', 'warn');
+        }
+        next();
+      });
+    }
   }
 
   function finishSpeak() {
@@ -1143,10 +1163,27 @@
       .catch(() => {});
   }
 
+  /* 音频自动播放解锁：
+     Chrome/Edge 规定页面须先有用户手势才允许 Audio.play() 出声。
+     在"点击开启朗读"这个手势里播一个极短静音，把后续播放权限解锁，
+     否则打字轮第一句的 play() 可能被静默拦截 —— 那正是"开了朗读还是没声"的坑。 */
+  let audioUnlocked = false;
+  function unlockAudio() {
+    try {
+      // 0.1 秒静音 mp3（data URI，不依赖网络/接口）
+      const silent = new Audio('data:audio/mpeg;base64,/+NIxAAAAAoAAAAAAAAAAAAAAAAAAAAAA/+NIxAAAAAoAAAAAAAAAAAAAAAAAAAAAA/');
+      silent.volume = 0;
+      const p = silent.play();
+      if (p && p.then) p.then(() => { audioUnlocked = true; }).catch(() => { audioUnlocked = false; });
+      else audioUnlocked = true;
+    } catch (_) { audioUnlocked = false; }
+  }
+
   spkBtn.onclick = () => {
     speakOn = !speakOn;
     localStorage.setItem('jarvis_speak', speakOn ? '1' : '0');
-    if (!speakOn) stopSpeaking();
+    if (speakOn) unlockAudio();          // 借本次点击手势解锁音频播放
+    else stopSpeaking();
     syncBtns();
   };
 
