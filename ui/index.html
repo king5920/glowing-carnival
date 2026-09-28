@@ -116,7 +116,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
   box-shadow:0 0 0 2px rgba(63,208,255,.35)}
 
 #tbmenuPanel{display:none;position:fixed;top:42px;right:8px;z-index:6;
-  min-width:240px;max-width:min(320px,calc(100vw - 16px));padding:11px 13px;border-radius:12px;
+  min-width:240px;width:calc(100vw - 16px);max-width:320px;padding:11px 13px;border-radius:12px;
   background:rgba(12,20,32,.94);border:1px solid var(--hairline);
   backdrop-filter:blur(18px) saturate(1.1);-webkit-backdrop-filter:blur(18px) saturate(1.1);
   box-shadow:0 8px 30px rgba(0,0,0,.5),inset 0 1px 0 rgba(190,222,255,.06)}
@@ -146,7 +146,7 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9;
   opacity:0;pointer-events:none;transition:opacity .32s ease}
 #drawerBackdrop.open{opacity:1;pointer-events:auto}
 #drawerPanel{position:fixed;top:0;right:0;bottom:0;z-index:31;
-  width:min(480px,calc(100vw - 40px));
+  width:480px;max-width:calc(100vw - 40px);
   background:rgba(12,20,32,.96);border-left:1px solid var(--hairline);
   backdrop-filter:blur(18px) saturate(1.1);-webkit-backdrop-filter:blur(18px) saturate(1.1);
   box-shadow:-8px 0 30px rgba(0,0,0,.5);
@@ -243,16 +243,10 @@ body.drawer-open{overflow:hidden}
 .drw-kline-legend .kl-ln20{background:var(--info)}
 .drw-kline-legend .kl-note{flex:0 0 auto}
 
-/* 小屏 <1400px 底部全屏上滑（预留，本轮暂不实现） */
-@media (max-width:1400px){
-  #drawerPanel{top:auto;left:0;right:0;bottom:0;width:100%;
-    height:min(70vh,560px);border-left:none;border-top:1px solid var(--hairline);
-    box-shadow:0 -8px 30px rgba(0,0,0,.5);transform:translateY(100%);
-    border-radius:16px 16px 0 0}
-  #drawerPanel.open{transform:translateY(0)}
-  #drawerPanel.from-left{left:0;right:0;bottom:0;top:auto;transform:translateY(100%)}
-  #drawerPanel.from-left.open{transform:translateY(0)}
-}
+/* 抽屉【始终从侧面滑】（2026-09-22 调整）：
+   原方案在 ≤1400px 改成底部上滑，但会误伤"高分屏+高缩放导致 CSS 视口变窄"的桌面用户，
+   且用户明确要任何宽度都保持左/右侧滑的一致体验。故移除底部上滑规则——
+   宽度靠基础规则的 width:480px; max-width:calc(100vw-40px) 自适应，窄窗也不会超出。 */
 
 /* ════════ 预警横幅 ════════ */
 #srcbanner{display:none;position:fixed;left:50%;transform:translateX(-50%);
@@ -286,7 +280,7 @@ body.drawer-open{overflow:hidden}
   background:rgba(4,7,12,.72);backdrop-filter:blur(4px);
   align-items:center;justify-content:center;padding:24px}
 #setmask.show{display:flex}
-#setwin{width:min(640px,100%);max-height:min(86vh,760px);display:flex;flex-direction:column;
+#setwin{width:640px;max-width:calc(100% - 24px);max-height:86vh;display:flex;flex-direction:column;
   background:rgba(13,20,31,.98);border:1px solid rgba(150,175,215,.28);
   border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.7);overflow:hidden}
 .set-hd{display:flex;align-items:center;padding:12px 16px;flex:none;
@@ -431,7 +425,61 @@ body.drawer-open{overflow:hidden}
   background:var(--accent);opacity:.8}
 
 /* ════════ 大盘定时机面板（缠论阶段 + 崩溃冰点） ════════ */
+/* B 全息环轨（情绪值 3D 仪表）：独立于 #mpbox 的 innerHTML 生命周期，与 mpHeatbox 同模式 */
+#mpRingBox{padding:6px 10px 0}
+.mp-ring-stage{position:relative;height:236px}
+.mp-ring-stage canvas{position:absolute;inset:0;width:100%;height:100%}
+.mp-ring-readout{position:absolute;left:0;right:0;top:50%;transform:translateY(-44%);text-align:center;pointer-events:none}
+.mp-ring-readout .v{font-size:38px;font-weight:800;line-height:1;font-family:var(--num);font-variant-numeric:var(--tnum);color:var(--txt);text-shadow:0 0 16px rgba(63,208,255,.4)}
+.mp-ring-readout .u{font-size:10px;color:var(--dim);letter-spacing:2px;margin-top:3px}
+.mp-ring-readout .p{display:inline-block;margin-top:7px;padding:1px 10px;border-radius:3px;font-size:11px;letter-spacing:3px;color:var(--warm);border:1px solid rgba(255,159,28,.4);background:rgba(255,159,28,.09)}
 #mpbox{padding:0}
+/* A+C 情绪主读数 */
+.ms-hero{padding:12px 13px 6px}
+.ms-top{display:flex;align-items:center;gap:14px}
+.ms-big{font-size:46px;font-weight:800;line-height:1;font-family:var(--num);font-variant-numeric:var(--tnum)}
+.ms-big small{font-size:13px;color:var(--faint);font-weight:400}
+.ms-cap{font-size:13px;font-weight:700;letter-spacing:2px;margin-top:4px}
+.ms-chip{margin-left:auto;font-size:10px;color:var(--dim);text-align:right;line-height:1.5}
+.ms-chip b{display:inline-block;font-weight:800;color:var(--warm);border:1px solid rgba(255,159,28,.4);
+  background:rgba(255,159,28,.09);padding:2px 10px;border-radius:20px;letter-spacing:1px}
+.ms-track{height:10px;border-radius:6px;background:rgba(150,175,215,.13);position:relative;margin:13px 0 5px}
+.ms-fillgrad{position:absolute;inset:0;border-radius:6px;
+  background:linear-gradient(90deg,#2ec4a6,#f2b23e 55%,#f23645)}
+.ms-knob{position:absolute;top:50%;width:16px;height:16px;border-radius:50%;background:#eef3fa;
+  transform:translate(-50%,-50%);box-shadow:0 0 0 3px rgba(7,11,17,.9),0 2px 7px rgba(0,0,0,.6)}
+.ms-scale{display:flex;justify-content:space-between;font-size:9px;color:var(--faint);font-family:var(--num)}
+.ms-diverge{display:flex;gap:7px;align-items:flex-start;font-size:10.5px;color:#bcd3ef;
+  background:rgba(79,140,255,.10);border:1px solid rgba(79,140,255,.28);
+  border-radius:9px;padding:8px 10px;line-height:1.55;margin:11px 0 2px}
+.ms-diverge b{color:#9fc6ff}
+.ms-wavewrap{padding:6px 13px 0}
+.ms-wavewrap .wlab{font-size:9px;letter-spacing:1.3px;color:var(--faint);margin-bottom:2px}
+#msWave{width:100%;height:96px;display:block}
+/* 详情折叠：旧的笔中枢/三料细节收进来 */
+.ms-detail{border-top:1px solid var(--hairline2);margin-top:8px}
+.ms-detail summary{cursor:pointer;list-style:none;padding:8px 13px;font-size:10px;
+  letter-spacing:1px;color:var(--faint);user-select:none}
+.ms-detail summary::-webkit-details-marker{display:none}
+.ms-detail summary::after{content:'▾';float:right;transition:transform .2s}
+.ms-detail[open] summary::after{transform:rotate(180deg)}
+/* 抽屉版情绪星球（A 方案详情）：stage 高度约束，读数覆盖层不入 canvas */
+.mpd-stage{position:relative;height:300px;margin:0 -4px}
+.mpd-stage canvas{position:absolute;inset:0;width:100%;height:100%}
+.mpd-zl{position:absolute;font-size:10px;color:var(--faint);letter-spacing:1px;pointer-events:none}
+.mpd-hero{text-align:center;margin-top:-26px;position:relative}
+.mpd-tag{display:inline-block;padding:2px 14px;border-radius:3px;font-size:12px;letter-spacing:3px;
+  color:var(--warm);border:1px solid rgba(255,159,28,.4);background:rgba(255,159,28,.09)}
+.mpd-tag b{font-family:var(--num);font-variant-numeric:var(--tnum)}
+.mpd-hint{color:var(--faint);font-size:11px;margin-top:6px}
+.mpd-chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:12px 0 4px}
+.mpd-tide{padding:4px 0 0}
+.mpd-tide .wlab{font-size:9px;letter-spacing:1.3px;color:var(--faint);margin-bottom:2px}
+#mpdWave{width:100%;height:110px;display:block}
+#mpRingBox{cursor:pointer}
+#mpRingBox:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:4px}
+.ms-detbody{padding:0 13px 11px}
+.ms-note2{font-size:9px;color:var(--faint);padding:8px 13px 11px;line-height:1.55}
 .mp-sec{padding:9px 12px;border-bottom:1px solid var(--hairline2)}
 .mp-sec:last-child{border-bottom:none}
 .mp-phase{font-size:16px;font-weight:800;letter-spacing:2px;line-height:1.2}
@@ -1208,6 +1256,16 @@ body.no-webgl #gl-fallback{display:grid}
     <!-- 大盘定时机：缠论生命阶段 + 散户崩溃冰点（未标定·仅供观察） -->
     <section class="panel" data-panel="marketphase">
       <div class="ph">大盘定时机 <span class="en">MARKET PHASE</span> <span id="mpTime" class="scan-time"></span><span class="fold">▾</span></div>
+      <div class="pb" id="mpRingBox">
+        <div class="mp-ring-stage">
+          <canvas id="mpRing" aria-hidden="true"></canvas>
+          <div class="mp-ring-readout">
+            <div class="v" id="mpRingVal">—</div>
+            <div class="u">情绪值 / 100</div>
+            <div class="p" id="mpRingPhase">读取中</div>
+          </div>
+        </div>
+      </div>
       <div class="pb" id="mpbox"><div class="empty">读取中…</div></div>
       <!-- §5 情绪温度 60 日热力柱：与缠论阶段配对，让"当下阶段"看到历史脉络。
            独立 div，不在 #mpbox IIFE 的 innerHTML 生命周期里（IIFE 只操作 #mpbox）。 -->
@@ -1392,8 +1450,6 @@ body.no-webgl #gl-fallback{display:grid}
     <section class="panel" data-panel="telemetry">
       <div class="ph">系统遥测 <span class="en">TELEMETRY</span><span class="fold">▾</span></div>
       <div class="pb viz">
-        <div class="vt"><b>◉</b> 节点球 · GLOBE</div>
-        <canvas id="globe" aria-hidden="true"></canvas>
         <div class="vt"><b>◉</b> 雷达 · RADAR <span class="vat" id="radar-stat">…</span></div>
         <canvas id="radar" aria-hidden="true"></canvas>
         <div class="vt"><b>◉</b> 活跃度 · ENERGY <span class="vat" id="spark-stat">—</span></div>
@@ -1703,56 +1759,126 @@ body.no-webgl #gl-fallback{display:grid}
   };
 
   const TREND_TXT = { up: '上涨', down: '下跌', range: '震荡' };
+  /* 最近一次 /api/market_phase 数据：抽屉打开时直接用，不重复请求 */
+  let lastData = null;
   function render(d) {
     if (!d || d.ok === false) {
       box.innerHTML = '<div class="scan-err">⚠ 大盘状态暂不可用<br><span style="color:var(--faint);font-size:10px">' + esc(d && d.error || '未知错误') + '</span></div>';
       return;
     }
-    let h = '<div class="mp-sec">';
-    h += '<div class="mp-phase ' + (PHASE_CLS[d.phase] || 'tim-def') + '">' + esc(d.phase === 'unknown' ? '待定' : d.phase) + '</div>';
+
+    const sc = d.sentimentScore || {};
+    const f = d.fear;
     const lv = d.chan && d.chan.levels && d.chan.levels.day;
+    const tech = d.shTechnical;
+
+    /* 主读数未知（基准没攒够）：明确解释，不假装没事 */
+    if (sc.score == null) {
+      if (window.__mpRingUpdate) window.__mpRingUpdate(null, d && d.phase);
+      const n = (f && f.sampleN) || 0;
+      box.innerHTML =
+        '<div class="ms-hero"><div class="ms-top"><span class="ms-big" style="color:var(--faint)">—</span>'
+        + '<span class="ms-cap" style="color:var(--faint)">情绪基准还在攒</span>'
+        + '<span class="ms-chip">结构<b>' + esc(d.phase) + '</b></span></div>'
+        + '<div class="ms-note2" style="padding:10px 0 4px">判断散户恐慌到什么程度，要先有平时跌停数、炸板率的尺子。'
+        + '系统每个交易日自动攒，已攒 <b style="color:var(--dim)">' + n + '</b> 天；现在看到今天数据也不当作"没事"。</div></div>';
+      return;
+    }
+
+    const s = sc.score;
+    if (window.__mpRingUpdate) window.__mpRingUpdate(s, d.phase);
+    const col = s >= 70 ? 'var(--panic,#f23645)' : s >= 40 ? 'var(--mid,#f2b23e)' : 'var(--calm,#2ec4a6)';
+
+    let h = '';
+    /* ── 主读数：大字 + 标签 + 结构芯片 ── */
+    h += '<div class="ms-hero"><div class="ms-top">'
+      + '<span class="ms-big" style="color:' + col + '">' + s + '<small>/100</small></span>'
+      + '<span class="ms-chip"><b>' + esc(d.phase) + '</b></span></div>'
+      + '<div class="ms-cap" style="color:' + col + '">' + esc(sc.label) + '</div>';
+
+    /* 能量条 */
+    h += '<div class="ms-track"><span class="ms-fillgrad" style="clip-path:inset(0 ' + (100 - s) + '% 0 0)"></span>'
+      + '<span class="ms-knob" style="left:' + s + '%"></span></div>'
+      + '<div class="ms-scale"><span>0 平静</span><span>警戒</span><span>100 恐慌</span></div>';
+
+    /* 一句话点破结构与情绪的关系 */
+    h += '<div class="ms-diverge"><span>◉</span><span>' + divergeText(d, s) + '</span></div>';
+    h += '</div>';
+
+    /* ── 情绪曲线（C）── */
+    const series = Array.isArray(d.sentimentSeries) ? d.sentimentSeries : [];
+    if (series.length) {
+      h += '<div class="ms-wavewrap"><div class="wlab">情绪趋势 · 近 ' + series.length + ' 日（越高越恐慌）</div>'
+        + '<canvas id="msWave"></canvas></div>';
+    }
+
+    /* ── 详情折叠：笔/中枢/三料/技术 旧细节不丢 ── */
+    h += '<details class="ms-detail"><summary>结构与三料详情</summary><div class="ms-detbody">';
     if (lv) {
       const posTxt = { above: '运行在中枢上方', below: '已跌到中枢下方', inside: '在中枢里来回' }[lv.pricePos] || '位置待定';
       h += '<div class="mp-struc" style="font-family:inherit">' + esc(TREND_TXT[lv.trend] || '趋势待定') + ' · ' + posTxt
-        + '<br>笔 ' + (lv.strokeCount != null ? lv.strokeCount : '—')
-        + ' · 中枢 ' + (lv.segZoneCount != null ? lv.segZoneCount : '—')
+        + '<br>笔 ' + lv.strokeCount + ' · 中枢 ' + lv.segZoneCount
         + ' · 买卖点 ' + lv.pointCount + ' · 背驰 ' + lv.divergenceCount + '</div>';
     }
-    if (d.chan && d.chan.reason) {
-      h += '<div class="mp-struc" style="font-family:inherit;color:var(--faint)">' + esc(d.chan.reason) + '</div>';
-    }
-    h += '</div>';
-
-    /* 散户情绪（冰点）：用人话解释，尤其在基准没攒够时 */
-    const f = d.fear;
-    h += '<div class="mp-sec">';
-    const need = 15;
-    if (!f || f.tier === 'unknown') {
-      const n = (f && f.sampleN) || 0;
-      h += '<div class="mp-fear"><span class="mp-dot" style="background:var(--faint)"></span>'
-        + '<span style="color:var(--dim)">情绪基准还在攒，先不下结论</span></div>';
-      h += '<div class="mp-note" style="margin-top:6px">判断"散户是否恐慌到极点"，要先知道平时的跌停数、炸板率大概多少，'
-        + '再拿今天去比。系统正在每个交易日自动攒这个基准，已攒 <b style="color:var(--dim)">' + n + '/' + need + '</b> 天；'
-        + '攒够 ' + need + ' 个交易日后这里才会给出冰点提示。现在看到今天数据也不当作"没事"，只是还没有比较的尺子。</div>';
-    } else {
-      const st = FEAR_STYLE[f.tier] || { c: 'var(--dim)', t: f.label };
-      h += '<div class="mp-fear"><span class="mp-dot" style="background:' + st.c + '"></span>'
-        + '<span style="color:' + st.c + '">' + esc(st.t) + '</span></div>';
-      h += '<div class="mp-ings">' + f.ingredients.map(i =>
+    if (d.chan && d.chan.reason) h += '<div class="mp-struc" style="font-family:inherit;color:var(--faint);margin-top:5px">' + esc(d.chan.reason) + '</div>';
+    if (f && Array.isArray(f.ingredients)) {
+      h += '<div class="mp-ings" style="margin-top:8px">' + f.ingredients.map(i =>
         '<span class="mp-ing ' + (i.unknown ? 'unk' : i.hit ? 'hit' : '') + '" title="' + esc(i.detail || '') + '">'
         + (i.hit ? '●' : '○') + ' ' + esc(i.name) + '</span>').join('') + '</div>';
-      if (f.oversold && f.oversold.detail) h += '<div class="mp-struc" style="font-family:inherit;margin-top:5px">超跌参考：' + esc(f.oversold.detail) + '</div>';
-      if (f.reason) h += '<div class="mp-note" style="margin-top:6px">' + esc(f.reason) + '</div>';
     }
-    const tech = d.shTechnical;
+    if (f && f.oversold && f.oversold.detail) h += '<div class="mp-struc" style="font-family:inherit;margin-top:6px">超跌参考：' + esc(f.oversold.detail) + '</div>';
     if (tech && tech.rsi14 != null) {
       h += '<div class="mp-struc" style="font-family:inherit;margin-top:7px">上证 ' + num(tech.close, 0)
         + ' · RSI14 ' + num(tech.rsi14, 1)
         + ' · 价格在MA20' + (tech.aboveMa20 === true ? '上方' : tech.aboveMa20 === false ? '下方' : '附近') + '</div>';
     }
-    h += '<div class="mp-note">结构信号与情绪冰点都还在观察期（未标定），只提示"值得关注"，不是买入建议。</div>';
-    h += '</div>';
+    h += '</div></details>';
+
+    h += '<div class="ms-note2">情绪恐慌指数为分位合成（跌停/炸板率/RSI），权重未标定·仅供观察；"值得关注"不是"可以买"，非买入建议。</div>';
+
     box.innerHTML = h;
+
+    /* 画曲线 */
+    const wave = document.getElementById('msWave');
+    if (wave) drawWave(wave, series);
+  }
+
+  /* 结构与情绪关系的一句话：把两个维度读成一句结论 */
+  function divergeText(d, s) {
+    const phase = d.phase || '';
+    if (s >= 70) return '<b>恐慌冰点：</b>散户情绪崩溃，列入反向关注（非买入建议），结合结构阶段「' + esc(phase) + '」观察。';
+    if (s >= 40) return '<b>情绪警戒：</b>恐慌在累积但还没到冰点，先观察，不急于出手。';
+    // 平静
+    if (/退潮|磨底/.test(phase)) return '<b>结构「' + esc(phase) + '」、但情绪平静：</b>散户没恐慌，更像弱反弹/震荡而非恐慌底，不急于出手，继续等冰点或主线确认。';
+    return '<b>情绪平静：</b>结构「' + esc(phase) + '」，散户不恐慌；按结构信号走，别把平静当安全。';
+  }
+
+  /* 情绪曲线绘制（平滑折线+面积+今日点） */
+  function drawWave(cv, series) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, hgt = cv.clientHeight;
+    cv.width = w * dpr; cv.height = hgt * dpr;
+    const x = cv.getContext('2d'); x.scale(dpr, dpr);
+    const vals = series.map(p => p.score).filter(v => v != null);
+    if (!vals.length) return;
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const idx = series.map((p, i) => p.score == null ? null : i).filter(v => v != null);
+    const xx = i => 8 + i / (series.length - 1) * (w - 16);
+    const yy = v => hgt - 8 - (v - min) / (max - min || 1) * (hgt - 18);
+    // 50参考线
+    x.strokeStyle = 'rgba(150,175,215,.16)'; x.setLineDash([4, 5]); x.lineWidth = 1;
+    x.beginPath(); x.moveTo(8, hgt / 2); x.lineTo(w - 8, hgt / 2); x.stroke(); x.setLineDash([]);
+    const pts = series.map((p, i) => p.score == null ? null : [xx(i), yy(p.score)]).filter(Boolean);
+    const g = x.createLinearGradient(0, 0, 0, hgt);
+    g.addColorStop(0, 'rgba(46,196,166,.32)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.beginPath();
+    pts.forEach((p, i) => i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1]));
+    x.lineTo(pts[pts.length - 1][0], hgt - 4); x.lineTo(pts[0][0], hgt - 4); x.closePath();
+    x.fillStyle = g; x.fill();
+    x.beginPath(); pts.forEach((p, i) => i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1]));
+    x.strokeStyle = '#2ec4a6'; x.lineWidth = 1.8; x.lineJoin = 'round'; x.stroke();
+    const last = pts[pts.length - 1];
+    x.beginPath(); x.arc(last[0], last[1], 3.5, 0, 7); x.fillStyle = '#eef3fa'; x.fill();
   }
   function num(v, d) { return (v == null || isNaN(v)) ? '—' : (+v).toFixed(d == null ? 1 : d); }
 
@@ -1760,7 +1886,9 @@ body.no-webgl #gl-fallback{display:grid}
   async function refresh() {
     try {
       const r = await fetch('/api/market_phase');
-      render(await r.json());
+      const d = await r.json();
+      lastData = d;
+      render(d);
       if (timeEl) timeEl.textContent = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
       const now = new Date();
       const trading = now.getDay() >= 1 && now.getDay() <= 5 && now.getHours() >= 9 && now.getHours() < 15;
@@ -1771,6 +1899,104 @@ body.no-webgl #gl-fallback{display:grid}
     }
   }
   refresh();
+
+  /* ── A 情绪星球抽屉（§6 L1）：点击环轨打开，左栏条目从左滑出 ──
+   * 数据直接复用 lastData（与面板同一帧），hash 还原时走 fetcher 重取。
+   * mount 钩子在 innerHTML 注入后初始化 WebGL 星球 + 潮汐曲线。
+   * 注意：本内联脚本位于 drawer.js 的 <script src> 之前，必须等 DOMContentLoaded
+   * 再注册（drawer.js 的 hash 还原也挂 DOMContentLoaded 且更晚，时序正好）。 */
+  document.addEventListener('DOMContentLoaded', function () {
+    if (typeof window.Drawer !== 'object' || !window.Drawer.register) return;
+    const num2 = (v, dd) => (v == null || isNaN(v)) ? '—' : (+v).toFixed(dd == null ? 1 : dd);
+
+    function renderPlanetDrawer(d) {
+      const sc = (d && d.sentimentScore) || {};
+      const s = sc.score;
+      const lv = d && d.chan && d.chan.levels && d.chan.levels.day;
+      const tech = d && d.shTechnical;
+      const f = d && d.fear;
+      let h = '';
+
+      /* 星球舞台：读数覆盖层独立于 canvas， canvas 只负责 3D */
+      h += '<div class="mpd-stage"><canvas id="mpdPlanet"></canvas>'
+        + '<span class="mpd-zl" style="left:18px;top:22px">冰点</span>'
+        + '<span class="mpd-zl" style="right:18px;top:22px">亢奋</span></div>'
+        + '<div class="mpd-hero"><span class="mpd-tag">' + esc(d && d.phase || '待标定')
+        + (s != null ? ' · <b>' + Math.round(s) + '</b>' : '') + '</span>'
+        + '<div class="mpd-hint">表面越平静越冷 = 情绪越低迷 · 越沸腾越暖 = 越亢奋</div></div>';
+
+      if (s == null) {
+        const n = (f && f.sampleN) || 0;
+        h += '<div class="ms-note2" style="margin-top:10px">情绪基准还在攒，已攒 <b>' + n + '</b> 天；星球当前按低活动静态显示。</div>';
+      }
+
+      /* 恐慌三料 chips（金色语义 = 风控结论） */
+      if (f && Array.isArray(f.ingredients) && f.ingredients.length) {
+        h += '<div class="mpd-chips">' + f.ingredients.map(i =>
+          '<span class="mp-ing ' + (i.unknown ? 'unk' : i.hit ? 'hit' : '') + '" title="' + esc(i.detail || '') + '">'
+          + (i.hit ? '●' : '○') + ' ' + esc(i.name) + '</span>').join('') + '</div>';
+      }
+
+      /* 潮汐曲线：近 14 日情绪 */
+      const series = Array.isArray(d && d.sentimentSeries) ? d.sentimentSeries.slice(-14) : [];
+      if (series.length) {
+        h += '<div class="drw-sec" style="margin-top:14px"><div class="mpd-tide">'
+          + '<div class="wlab">情绪潮汐 · 近 ' + series.length + ' 日（越高越恐慌）</div>'
+          + '<canvas id="mpdWave"></canvas></div></div>';
+      }
+
+      /* 四宫格：结构与技术硬指标 */
+      h += '<div class="drw-grid" style="margin-top:6px">';
+      h += '<div class="drw-kv"><span class="k">笔 / 中枢</span><span class="v">'
+        + (lv ? lv.strokeCount + ' / ' + lv.segZoneCount : '—') + '</span></div>';
+      h += '<div class="drw-kv"><span class="k">买卖点 / 背驰</span><span class="v">'
+        + (lv ? lv.pointCount + ' / ' + lv.divergenceCount : '—') + '</span></div>';
+      h += '<div class="drw-kv"><span class="k">上证收盘</span><span class="v">' + (tech ? num2(tech.close, 0) : '—') + '</span></div>';
+      h += '<div class="drw-kv"><span class="k">RSI14</span><span class="v">' + (tech ? num2(tech.rsi14, 1) : '—') + '</span></div>';
+      h += '</div>';
+
+      h += '<div class="ms-note2">情绪恐慌指数为分位合成（跌停/炸板率/RSI），权重未标定·仅供观察；非买入建议。</div>';
+      return h;
+    }
+
+    function mountPlanetDrawer(bodyEl, d) {
+      const pcv = bodyEl.querySelector('#mpdPlanet');
+      if (pcv && window.MPlanet) {
+        const sc = (d && d.sentimentScore) || {};
+        window.MPlanet.mount(pcv, sc.score);
+      }
+      const wcv = bodyEl.querySelector('#mpdWave');
+      if (wcv) {
+        const series = (Array.isArray(d && d.sentimentSeries) ? d.sentimentSeries : []).slice(-14);
+        drawWave(wcv, series);
+      }
+    }
+
+    window.Drawer.register('marketphase', {
+      fetcher: function () { return fetch('/api/market_phase').then(r => r.json()); },
+      render: renderPlanetDrawer,
+      mount: mountPlanetDrawer,
+      title: '大盘定时机 · 情绪星球',
+    });
+
+    /* 环轨即入口：整区可点（键盘也可达） */
+    const ringBox = document.getElementById('mpRingBox');
+    if (ringBox) {
+      ringBox.setAttribute('tabindex', '0');
+      ringBox.setAttribute('role', 'button');
+      ringBox.setAttribute('aria-label', '打开大盘情绪星球详情');
+      const openMp = function () {
+        window.Drawer.open('marketphase', 'current', {
+          sourceEl: ringBox, side: 'left',
+          data: lastData || undefined,
+        });
+      };
+      ringBox.addEventListener('click', openMp);
+      ringBox.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openMp(); }
+      });
+    }
+  });
 })();
 </script>
 <script>
@@ -1853,6 +2079,8 @@ body.no-webgl #gl-fallback{display:grid}
 <script src="/starplus.js"></script>
 <script src="/markdown.js"></script>
 <script src="/animgate.js"></script>
+<script src="/mpring.js"></script>
+<script src="/mplanet.js"></script>
 <script src="/charts.js"></script>
 <script src="/drawer.js"></script>
 <script src="/starfield.js"></script>

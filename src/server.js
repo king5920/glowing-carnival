@@ -28,6 +28,23 @@ const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT) || 3800;   // 默认 3800；PORT 覆盖仅供临时验证/多实例
 const UI_DIR = path.join(__dirname, '..', 'ui');
 
+/* market_phase 预温缓存（SWR）：情绪快照冷启动27s，不能在请求路径现算。 */
+let _mpCache = null;
+function marketPhaseCache() {
+  if (_mpCache) return _mpCache;
+  const sentiment = require('./tools/sentiment');
+  const kline = require('./tools/stock_kline');
+  const dbm = require('./db');
+  const mp = require('./tools/market_phase');
+  const { createCache } = require('./tools/mp_cache');
+  _mpCache = createCache(() => mp.assess({
+    getBars: (period) => kline.kline('000001', period, period === 'day' ? 240 : 320).then(k => k.bars),
+    snapshot: () => sentiment.snapshot(),
+    alertSamples: () => dbm.alertSamplesDaily(),
+  }, {}));
+  return _mpCache;
+}
+
 /* 设置页的接入预设。
  * 这些只是"填表模板"，方便切换服务商时不用记 URL；
  * 是否真能用取决于你的 Key —— 所以设置页有「测试连接」按钮，
@@ -346,7 +363,14 @@ function serveStatic(req, res, urlPath) {
   }
   fs.readFile(full, (err, buf) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream' });
+    const ext = path.extname(full).toLowerCase();
+    const ct = MIME[ext] || 'application/octet-stream';
+    // HTML 必须 revalidate：旧 UI 被 Edge 启发式缓存会导致抽屉等新版布局错乱（2026-09-22 实测）。
+    // 入口 HTML 不常变且体积小，no-cache（用前校验）比 no-store 更合适；静态资源可长缓存。
+    const headers = { 'Content-Type': ct };
+    if (ext === '.html') headers['Cache-Control'] = 'no-cache';
+    else headers['Cache-Control'] = 'max-age=3600';
+    res.writeHead(200, headers);
     res.end(buf);
   });
 }
@@ -646,17 +670,14 @@ const server = http.createServer(async (req, res) => {
   if (url === '/api/market_phase' || url.startsWith('/api/market_phase?')) {
     try {
       const q = new URL(url, 'http://x').searchParams;
-      const withMinute = q.get('minute') === '1';
-      const sentiment = require('./tools/sentiment');
-      const kline = require('./tools/stock_kline');
-      const dbm = require('./db');
-      const mp = require('./tools/market_phase');
-      const r = await mp.assess({
-        getBars: (period) => kline.kline('000001', period, period === 'day' ? 240 : 320).then(k => k.bars),
-        snapshot: () => sentiment.snapshot(),
-        alertSamples: () => dbm.alertSamplesDaily(),
-      }, { withMinute });
-      return sendJson(res, 200, r);
+      const force = q.get('refresh') === '1';
+      // 读预温缓存（SWR）；refresh=1 时强制后台重拉一次但仍先返回现有值，避免请求挂27s。
+      if (force) marketPhaseCache().refresh().catch(()=>{});
+      const hit = await marketPhaseCache().get();
+      if (!hit) return sendJson(res, 200, { ok: false, error: '大盘状态正在初始化，请稍后刷新' });
+      const v = hit.value;
+      // 附带缓存口径（前端可显示数据时间，不把旧数据伪装实时）
+      return sendJson(res, 200, Object.assign({}, v, { _cache: { stale: hit.stale, cachedAt: hit.cachedAt, ageMs: hit.ageMs } }));
     } catch (e) {
       return sendJson(res, 200, { ok: false, error: String(e.message || e) });
     }
@@ -1188,6 +1209,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   mind.init();   // 启动主动意识（加载持久化状态 + 开始心跳）
   startCloseScanWarmer();   // 交易时段预热收盘扫描缓存，首访 TAPE 不冷启动
+  marketPhaseCache().start();   // 预温大盘状态，/api/market_phase 秒回（SWR后台刷新）
   const c = db.counts();
   console.log(`  JARVIS 已启动  http://${HOST}:${PORT}`);
   console.log(`  模型: ${llm.MODEL}   密钥: ${llm.hasKey() ? '已加载' : '缺失'}`);

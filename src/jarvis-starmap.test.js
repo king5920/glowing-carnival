@@ -423,6 +423,39 @@ test('starfield.js 已改用 kNN 对称化（不是固定半径）', () => {
     '旧的 linkNearIdx 还在 —— 留着会有人再用错');
   assert(!/linkNearIdx\(/.test(src), '还有地方在调用 linkNearIdx');
 });
+
+/* ══════════ §6 抽屉联动：相机偏移数学（C3） ══════════
+ * 偏移错了肉眼很难发现（"好像歪了一点"），所以公式抽进 pickmath.js 做数值验算。 */
+
+test('worldPerPx：fit 距离处的世界/像素换算与投影公式一致', () => {
+  const fit = 2.0, fovy = 1.0, h = 650;
+  const wpp = PM.worldPerPx(fit, fovy, h);
+  /* 垂直可视世界高 = 2*fit*tan(fovy/2)，均分到 h 像素 */
+  const expect = 2 * fit * Math.tan(fovy / 2) / h;
+  assert(Math.abs(wpp - expect) < 1e-12, `wpp=${wpp} 期望 ${expect}`);
+  /* 高度为 0 不能除零崩掉 */
+  assert(isFinite(PM.worldPerPx(fit, fovy, 0)), 'height=0 必须兜底');
+});
+
+test('camShiftTarget：右抽屉负、左抽屉正、关闭为零', () => {
+  const wpp = 0.003;
+  const right = PM.camShiftTarget(true, false, wpp, 200);
+  const left = PM.camShiftTarget(true, true, wpp, 200);
+  assert(right < 0, `右抽屉偏移应为负（场景左移），实际 ${right}`);
+  assert(left > 0, `左抽屉偏移应为正（场景右移），实际 ${left}`);
+  assert(Math.abs(right + left) < 1e-12, '左右偏移应等大反向');
+  assert(PM.camShiftTarget(false, false, wpp, 200) === 0, '关闭必须归零');
+  assert(PM.camShiftTarget(false, true, wpp, 200) === 0, '关闭必须归零（左抽屉同）');
+});
+
+test('camShiftTarget：默认让位 200px，偏移量随 wpp 线性缩放', () => {
+  const wpp = 0.004;
+  const dflt = PM.camShiftTarget(true, false, wpp);
+  const expl = PM.camShiftTarget(true, false, wpp, 200);
+  assert(Math.abs(dflt - expl) < 1e-12, '默认 shiftPx 应为 200');
+  const half = PM.camShiftTarget(true, false, wpp / 2, 200);
+  assert(Math.abs(half - dflt / 2) < 1e-12, 'wpp 减半偏移应减半（线性关系）');
+});
 console.log('\n───────────────────────────────────');
 console.log('  通过: ' + pass + '  |  失败: ' + fail);
 console.log('───────────────────────────────────\n');

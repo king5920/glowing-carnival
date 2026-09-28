@@ -36,6 +36,8 @@ const SUITES = [
   ['冰点 capitulation',   'src/jarvis-capitulation.test.js'],
   ['恐惧回填 fearbk',     'src/jarvis-fear-backfill.test.js'],
   ['fuyao',               'src/jarvis-fuyao.test.js'],
+  ['情绪指数 sscore',      'src/jarvis-sentiment-score.test.js'],
+  ['大盘缓存 mpcache',     'src/jarvis-mp-cache.test.js'],
   ['缠论 chan',           'src/jarvis-chan.test.js'],
   ['minkline',            'src/jarvis-minkline.test.js'],
   ['标的池 universe',     'src/jarvis-universe.test.js'],

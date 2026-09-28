@@ -306,6 +306,12 @@
   let bDim, bEDim, dimArr = null, eDimArr = null;
   let galHubIdx = {}, semEdges = [], hoverIdx = -1;
   let focRy = 0, focRx = 0, focZ = 1, focTRy = 0, focTRx = 0, focTZ = 1;
+  /* §6 抽屉联动：抽屉开时星图相机横向让位。
+   * camX 当前偏移（世界坐标），camXT 目标偏移。
+   * 右抽屉 400px 开 → 场景左移半栏宽（200px 屏幕换算）；
+   * 左抽屉（.from-left）→ 右移。300ms 缓动（0.15 lerp ≈ 18 帧收敛 95%），
+   * reduced-motion 直跳终值。偏移在 VP 矩阵构建处注入，拾取复用 lastVP 自动正确。 */
+  let camX = 0, camXT = 0;
   /* STAGE1 fov 轻推：悬停时把垂直半视角收窄 3°（约 0.052 rad）。
    * 目的不是"看到更多"，而是让非聚焦节点在视觉上更"贴"着被聚焦的一度圈，
    * 配合 alpha dim 的 1.0/0.45/0.12 三档，让眼睛顺着聚焦区域读。
@@ -1113,6 +1119,22 @@
   }
   schedulerReady = true;
 
+  /* §6 抽屉联动唤醒：camX 缓动在 starfieldDraw 内推进，
+   * 但待机停帧时回调已注销——抽屉开合必须 wake() 把渲染拉起，
+   * 否则星图会瞬跳（无缓动）或停在半偏移状态。
+   * 监听 body 的 class 变化即可，drawer.js 开合时切 drawer-open。 */
+  if (window.MutationObserver) {
+    new MutationObserver(function (muts) {
+      for (let i = 0; i < muts.length; i++) {
+        if (muts[i].attributeName === 'class') {
+          if (Math.abs(camXT - camX) > 1e-9 ||
+              document.body.classList.contains('drawer-open')) wake('drawer');
+          return; // 一帧最多 wake 一次
+        }
+      }
+    }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  }
+
   /* idle 慢转：待机时让球以极慢速度持续自转，但用极低帧率（~11fps），
      GPU 开销远小于满帧。失焦/隐藏/reduced-motion/开场播放中不启用。 */
   const IDLE_SPIN_MS = 50;          // idle 慢转帧间隔（≈20fps，顺滑且省电）
@@ -1185,6 +1207,25 @@
     /* STAGE1 hover fov 轻推，节奏与 STAGE2 对齐 */
     hoverFov += (hoverFovT - hoverFov) * 0.045;
 
+    /* §6 抽屉联动：读 body.drawer-open + #drawerPanel 滑出方向，算目标偏移。
+     * 屏幕 200px → 世界坐标：fit 距离处 world/px = 2*fit*tan(FOVY/2)/画布高。
+     * 每帧读 classList 开销可忽略，省掉事件订阅。 */
+    {
+      const open = document.body.classList.contains('drawer-open');
+      const panel = open && document.getElementById('drawerPanel');
+      const fromLeft = !!(panel && panel.classList.contains('from-left'));
+      const FOVY0 = 1.0 - hoverFov * 0.052;
+      const fit0 = contentR / Math.tan(FOVY0 / 2) * 1.18 / BRAIN_SCALE * focZ;
+      /* 偏移数学在 pickmath.js（与 buildVP 同一族投影公式，Node 可单测） */
+      const PMX = window.PICKMATH;
+      const wpp = PMX ? PMX.worldPerPx(fit0, FOVY0, cv.height || 1)
+                      : 2 * fit0 * Math.tan(FOVY0 / 2) / (cv.height || 1);
+      camXT = PMX ? PMX.camShiftTarget(open, fromLeft, wpp, 200)
+                  : (open ? (fromLeft ? 1 : -1) * 200 * wpp : 0);
+      camX = prefersReducedMotion() ? camXT : camX + (camXT - camX) * 0.15;
+      if (Math.abs(camX - camXT) < 1e-6) camX = camXT;
+    }
+
     let M = mul(rY(ry + px + focRy), rX(rx + py + focRx));
     /* 相机距离：让内容球正好填满画面（不乘 spread，着色器已用 uSpread 缩放坐标）
      *
@@ -1204,7 +1245,7 @@
      * 8% 余量不够，上下被裁掉了。contentR 取的是最大半径（水平方向），
      * 垂直方向虽然略小但点还有自身像素尺寸，需要更多留白。 */
     const fit = contentR / Math.tan(FOVY / 2) * 1.18 / BRAIN_SCALE * focZ;
-    M = mul(tr(0, 0, -fit), M);
+    M = mul(tr(camX, 0, -fit), M);
     const VP = mul(persp(FOVY, cv.width / cv.height, 0.1, 20), M);
     lastVP = VP;                 // 供点击拾取使用（见 pick）
     lastSpread = eff.spread;

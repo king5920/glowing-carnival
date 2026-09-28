@@ -16,6 +16,7 @@
 
 const chan = require('./chan');
 const cap = require('./capitulation');
+const ss = require('./sentiment_score');
 
 /**
  * 计算当前大盘状态。
@@ -59,6 +60,33 @@ async function assess(deps, opt = {}) {
 
   const fear = cap.evaluate(se, sh, history, market ? { phase: market.phase } : null);
 
+  /* 2.5) 情绪主读数：0–100 恐慌指数（当日）+ 近20日序列（A+C） */
+  const ing = {};
+  if (fear && Array.isArray(fear.ingredients)) {
+    fear.ingredients.forEach(i => {
+      if (/跌停/.test(i.name)) ing.limitDownPct = i.pct;
+      else if (/炸板/.test(i.name)) ing.brokenRatePct = i.pct;
+    });
+  }
+  if (ing.limitDownPct == null || ing.brokenRatePct == null) {
+    // 兜底：直接从当日三料与历史算分位（fear 在样本不足时可能不带pct）
+    ing.limitDownPct = ss.percentileOf(history.map(h => h.limit_down), se && se.limitDownCount);
+    ing.brokenRatePct = ss.percentileOf(history.map(h => h.broken_rate), se && (se.brokenRate == null ? null : +se.brokenRate.toFixed(1)));
+  }
+  const sentimentScore = ss.scoreToday({
+    limitDownPct: ing.limitDownPct, brokenRatePct: ing.brokenRatePct,
+    rsi: sh && sh.rsi14 != null ? sh.rsi14 : null,
+  });
+  // RSI 序列：历史回填无指数RSI，仅最新一天可能有（series 里只对当天三料）
+  let rsiByDate = null;
+  if (sh && sh.rsi14 != null && history.length) {
+    const todayKey = lastDate(history);
+    rsiByDate = new Map();
+    history.slice(-20).forEach(r => rsiByDate.set(r.date, null));
+    rsiByDate.set(todayKey, sh.rsi14);
+  }
+  const sentimentSeries = ss.series(history, rsiByDate, 20);
+
   /* 3) 综合一句话（大白话，供模型/网页） */
   const phase = market ? market.phase : 'unknown';
   const summary = buildSummary(phase, fear, errors);
@@ -77,6 +105,8 @@ async function assess(deps, opt = {}) {
       calibrated: false,         // 缠论画法待用户持续对图，默认未标定
     } : null,
     fear,                        // {tier, fear, resonance, side, label, ...}
+    sentimentScore,              // {score 0-100, label, state, calibrated:false}
+    sentimentSeries,             // [{date,score,hasRsi}] 近20日情绪曲线
     shTechnical: sh && !sh.error ? {
       close: sh.close, rsi14: sh.rsi14, aboveMa20: sh.aboveMa20, macdCross: sh.macdCross,
     } : null,
@@ -110,5 +140,6 @@ function buildSummary(phase, fear, errors) {
 }
 
 async function safe(fn) { try { return await fn(); } catch (_) { return null; } }
+function lastDate(history) { const r = (history || []).slice().sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0); return r.length ? r[r.length-1].date : null; }
 
 module.exports = { assess, buildSummary, summarizeLevel };

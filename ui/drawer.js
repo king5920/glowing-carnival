@@ -145,6 +145,7 @@
       side: opts.side || 'right',
       title: title,
       render: render,
+      mount: opts.mount || cfg.mount || null,
       sourceEl: opts.sourceEl || null,
       data: opts.data || null,
       fetcher: fetcher || null,
@@ -178,6 +179,7 @@
       side: opts.side || 'right',
       title: opts.title || cfg.title || type,
       render: opts.render || cfg.render,
+      mount: opts.mount || cfg.mount || null,
       sourceEl: opts.sourceEl || null,
       data: opts.data || null,
       fetcher: cfg.fetcher || null,
@@ -260,7 +262,8 @@
   /**
    * 注册条目类型的数据获取器 + 渲染器。
    * @param {string} type - 条目类型
-   * @param {object} cfg - { fetcher(id)→Promise<data>, render(data)→HTML, title? }
+   * @param {object} cfg - { fetcher(id)→Promise<data>, render(data)→HTML, title?,
+   *                         mount?(bodyEl, data)→void 渲染注入后钩子（canvas 初始化等） }
    */
   function register(type, cfg){
     _fetchers[type] = cfg;
@@ -279,7 +282,10 @@
         // 只接受当前栈顶；期间已切换或已关闭则丢弃
         if(!_open || _stack.length === 0 || _stack[_stack.length-1] !== entry) return;
         entry.data = data;  // 缓存到栈，pop 回来不重抓
-        if(_bodyEl && entry.render) _bodyEl.innerHTML = entry.render(data);
+        if(_bodyEl && entry.render){
+          _bodyEl.innerHTML = entry.render(data);
+          if(entry.mount) entry.mount(_bodyEl, data);
+        }
       }).catch(function(){
         if(!_open || _stack.length === 0 || _stack[_stack.length-1] !== entry) return;
         if(_bodyEl) _bodyEl.innerHTML = '<div class="drw-error">数据暂不可用</div>';
@@ -288,7 +294,10 @@
     }
 
     if(entry.render){
-      if(_bodyEl) _bodyEl.innerHTML = entry.render(body || {});
+      if(_bodyEl){
+        _bodyEl.innerHTML = entry.render(body || {});
+        if(entry.mount) entry.mount(_bodyEl, body || {});
+      }
     } else {
       if(_bodyEl) _bodyEl.innerHTML = '<div class="drw-error">未注册渲染器</div>';
     }

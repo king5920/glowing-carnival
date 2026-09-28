@@ -1720,6 +1720,64 @@ test('close 后焦点还给 sourceEl（左抽屉触发点）', () => {
   assert(document._activeElement === source, 'close 后焦点应还给 sourceEl');
 });
 
+/* ── mount 钩子（C3-B：canvas 类组件必须在 innerHTML 注入后初始化） ── */
+
+console.log('\n── mount 钩子 ──');
+
+test('传 data 时 render 注入后同步调用 mount(bodyEl, data)', () => {
+  resetState();
+  const calls = [];
+  D.register('mpt', {
+    render: (d) => '<canvas id="c"></canvas><div>' + d.mark + '</div>',
+    mount: (bodyEl, d) => calls.push([bodyEl === bodyEl ? 'body' : '?', d.mark, bodyEl._html.includes('mark-ok')]),
+  });
+  D.open('mpt', 'x', { side: 'left', data: { mark: 'mark-ok' } });
+  assert.strictEqual(calls.length, 1, `mount 应调用 1 次，实际 ${calls.length}`);
+  assert.strictEqual(calls[0][1], 'mark-ok', 'mount 应收到同一份 data');
+  assert.strictEqual(calls[0][2], true, 'mount 时 render 结果必须已在 DOM 里');
+  D.close();
+});
+
+test('fetcher 路径：数据到达后 render → mount（异步顺序正确）', async () => {
+  resetState();
+  const order = [];
+  D.register('mpf', {
+    fetcher: () => Promise.resolve({ v: 1 }),
+    render: () => { order.push('render'); return '<canvas></canvas>'; },
+    mount: () => order.push('mount'),
+  });
+  D.open('mpf', 'y', { side: 'right' });
+  await new Promise(r => setTimeout(r, 0));
+  assert.deepStrictEqual(order, ['render', 'mount'], `顺序应为 render→mount，实际 ${order.join('→')}`);
+  D.close();
+});
+
+test('未注册 mount 的条目不受影响（向后兼容）', () => {
+  resetState();
+  D.register('legacy', { render: () => '<div>old</div>' });
+  D.open('legacy', 'z', { side: 'right', data: {} });
+  assert(bodyEl._html.includes('old'), '无 mount 的旧条目渲染不能坏');
+  D.close();
+});
+
+test('push 下钻也走 mount（L2 的 canvas 组件同样需要初始化钩子）', async () => {
+  resetState();
+  let mounts = 0;
+  D.register('l1', {
+    render: () => '<div>L1</div>',
+    mount: () => mounts++,
+  });
+  D.register('l2', {
+    render: () => '<div>L2</div>',
+    mount: () => mounts++,
+  });
+  D.open('l1', 'a', { side: 'right', data: {} });
+  D.push('l2', 'b', { side: 'right', data: {} });
+  await new Promise(r => setTimeout(r, 0));
+  assert.strictEqual(mounts, 2, `L1+L2 各应 mount 1 次，实际 ${mounts}`);
+  D.close();
+});
+
 /* ── 结果 ── */
 console.log('\n═══════════════════════════════════════');
 console.log('通过: ' + pass + ' | 失败: ' + fail);

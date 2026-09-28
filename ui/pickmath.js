@@ -156,7 +156,37 @@ function pickNode(nodes, px, py, ctx) {
 const API = {
   mul, persp, translate, rotX, rotY, buildVP,
   project, ndcToPx, pxToNdc, hitRadiusPx, pickNode,
+  worldPerPx, camShiftTarget,
 };
+
+/**
+ * §6 抽屉联动：抽屉开时星图相机的横向偏移量（世界坐标）。
+ *
+ * 为什么抽到这里：偏移公式涉及透视投影（fit 距离处的 world/px 换算），
+ * 和 buildVP/project 同一族数学；starfield.js 内联写死就没法在 Node 里验算，
+ * 而"偏移错了"肉眼很难发现（看起来只是"好像歪了一点"）。
+ *
+ * @param {number} fit      相机距离（contentR / tan(fovY/2) * 余量）
+ * @param {number} fovy     垂直视场角（弧度）
+ * @param {number} height   画布高（px）
+ * @returns {number} 每屏幕像素对应的世界坐标长度
+ */
+function worldPerPx(fit, fovy, height) {
+  return 2 * fit * Math.tan(fovy / 2) / Math.max(1, height);
+}
+
+/**
+ * 抽屉相机偏移目标值（世界坐标，带符号）。
+ * @param {boolean} open     抽屉是否打开
+ * @param {boolean} fromLeft 抽屉是否从左滑出
+ * @param {number} wpp       worldPerPx() 的结果
+ * @param {number} [shiftPx] 屏幕让位像素（默认 200 = 400px 抽屉的一半）
+ * @returns {number} 右抽屉为负（场景左移）、左抽屉为正、关闭为 0
+ */
+function camShiftTarget(open, fromLeft, wpp, shiftPx) {
+  if (!open) return 0;
+  return (fromLeft ? 1 : -1) * (shiftPx == null ? 200 : shiftPx) * wpp;
+}
 
 /* 双环境导出：浏览器挂 window，Node 走 module.exports */
 if (typeof module !== 'undefined' && module.exports) module.exports = API;

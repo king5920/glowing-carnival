@@ -1568,7 +1568,7 @@
   inp.focus();
 
 /* ════════════════════════════════════════════════
-   声波粒子喷泉 + 遥测面板（globe / radar / spark）
+   声波粒子喷泉 + 遥测面板（radar / spark）
 
    在 app.js IIFE 内部：直接读 amp（真实语音振幅）与
    stateEl 的状态 class，全部来自既有状态机，无模拟。
@@ -1638,78 +1638,6 @@
         fx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + a.toFixed(3) + ')';
         fx.fill();
       }
-    }
-
-    /* ── 线框地球仪（节点球）── */
-    const gc = document.getElementById('globe');
-    let gx = null; let gW = 0, gH = 0;
-    let globeRot = 0;
-    if (gc) {
-      gW = gc.clientWidth || 180;
-      gH = gc.clientHeight || 120;
-      gx = resizeTo(gc, gW, gH);
-    }
-    const CAT_COL = { person:[113,236,187], project:[104,211,196],
-      interest:[95,188,208], place:[87,165,218], event:[80,144,226], ent:[255,189,87] };
-    let globePts = [];
-    function refreshGlobePts() {
-      const sd = window.__starData;
-      if (!sd || !Array.isArray(sd.entities) || !sd.entities.length) { globePts = []; return; }
-      globePts = sd.entities.slice(0, 60).map(e => {
-        const gidx = (e.id * 47 + e.name.length * 13) % 1000;
-        return {
-          lat: (gidx % 18) * 10 - 85,
-          lon: ((gidx * 13) % 360) - 180,
-          hot: Math.min(1, (e.memCount || 0) / 8 + 0.2),
-          col: CAT_COL[e.category] || [150, 170, 220],
-        };
-      });
-    }
-    function drawGlobe(ts) {
-      if (!gx) return;
-      gx.clearRect(0, 0, gW, gH);
-      const cx = gW / 2, cy = gH / 2, R = Math.min(gW, gH) * 0.44;
-      globeRot += 0.008;
-      /* 纬线 */
-      gx.strokeStyle = 'rgba(120,160,220,.30)';
-      gx.lineWidth = 1;
-      for (let i = 0; i <= 6; i++) {
-        const lat = (i - 3) * 30;
-        const rr = Math.cos(lat * Math.PI / 180) * R;
-        const yy = cy - Math.sin(lat * Math.PI / 180) * R;
-        gx.beginPath(); gx.ellipse(cx, yy, Math.abs(rr), Math.abs(rr) * 0.38, 0, 0, 6.2832); gx.stroke();
-      }
-      /* 经线（旋转）*/
-      for (let i = 0; i < 10; i++) {
-        const lon = (i / 10) * 360 + globeRot * 57.3;
-        gx.beginPath();
-        for (let k = 0; k <= 32; k++) {
-          const lat = (k / 32) * 180 - 90;
-          const th = lat * Math.PI / 180, ph = lon * Math.PI / 180;
-          const x = cx + Math.cos(ph) * Math.cos(th) * R;
-          const y = cy - Math.sin(th) * R;
-          k ? gx.lineTo(x, y) : gx.moveTo(x, y);
-        }
-        gx.stroke();
-      }
-      /* 实体光点 */
-      if (!globePts.length && window.__starData) refreshGlobePts();
-      for (const p of globePts) {
-        const ph = p.lon * Math.PI / 180 + globeRot;
-        const th = p.lat * Math.PI / 180;
-        const px = cx + Math.cos(ph) * Math.cos(th) * R;
-        const py = cy - Math.sin(th) * R;
-        if (Math.cos(ph) < -0.1) continue;
-        const hot = p.hot * (0.6 + 0.4 * Math.sin(ts * 0.002 + p.lon));
-        gx.beginPath();
-        gx.arc(px, py, 1 + Math.min(3, hot * 1.8), 0, 6.2832);
-        gx.fillStyle = 'rgba(' + p.col[0] + ',' + p.col[1] + ',' + p.col[2] + ',' + Math.min(1, hot).toFixed(3) + ')';
-        gx.fill();
-      }
-      /* 发光外环 */
-      gx.beginPath(); gx.arc(cx, cy, R + 2, 0, 6.2832);
-      gx.strokeStyle = 'rgba(63,208,255,.5)';
-      gx.lineWidth = 1.4; gx.stroke();
     }
 
     /* ── 雷达 ── */
@@ -1807,7 +1735,7 @@
     }
 
     /* ── 总循环（读真实 amp，不模拟）── */
-    if (fx || gx || rx || sx) {
+    if (fx || rx || sx) {
       let last = performance.now();
       // 纯渲染体：一帧只画四个视口，不负责排帧
       function renderFx(ts) {
@@ -1823,7 +1751,6 @@
           updateParts(dt, energy, col);
           fx.globalCompositeOperation = 'source-over';
         }
-        if (gx) drawGlobe(ts);
         if (rx) drawRadar(ts, energy);
         if (sx) drawSpark(energy);
       }
