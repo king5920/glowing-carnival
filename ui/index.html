@@ -433,6 +433,11 @@ body.drawer-open{overflow:hidden}
 .mp-ring-readout .v{font-size:38px;font-weight:800;line-height:1;font-family:var(--num);font-variant-numeric:var(--tnum);color:var(--txt);text-shadow:0 0 16px rgba(63,208,255,.4)}
 .mp-ring-readout .u{font-size:10px;color:var(--dim);letter-spacing:2px;margin-top:3px}
 .mp-ring-readout .p{display:inline-block;margin-top:7px;padding:1px 10px;border-radius:3px;font-size:11px;letter-spacing:3px;color:var(--warm);border:1px solid rgba(255,159,28,.4);background:rgba(255,159,28,.09)}
+/* 结构阶段：与情绪暖色明确分开——冷青蓝、细线、小标签，永远不要和情绪档位同色 */
+.mp-ring-readout .mp-ring-struct{display:flex;align-items:center;justify-content:center;gap:4px;margin-top:8px;font-size:10px;color:#7fc7e8}
+.mp-ring-readout .mp-ring-struct i{font-style:normal;color:#4bb8e0;font-size:11px}
+.mp-ring-readout .mp-ring-struct .rs-lab{color:var(--dim);letter-spacing:1px}
+.mp-ring-readout .mp-ring-struct b{font-weight:600;color:#9fd8f0;letter-spacing:1px}
 #mpbox{padding:0}
 /* A+C 情绪主读数 */
 .ms-hero{padding:12px 13px 6px}
@@ -443,6 +448,10 @@ body.drawer-open{overflow:hidden}
 .ms-chip{margin-left:auto;font-size:10px;color:var(--dim);text-align:right;line-height:1.5}
 .ms-chip b{display:inline-block;font-weight:800;color:var(--warm);border:1px solid rgba(255,159,28,.4);
   background:rgba(255,159,28,.09);padding:2px 10px;border-radius:20px;letter-spacing:1px}
+/* 结构阶段芯片：冷青蓝，与情绪暖色明确分色；带"结构阶段"小标签，不与情绪读数混同 */
+.ms-chip-struct{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.ms-chip-struct .ms-chip-lab{font-size:9px;letter-spacing:1px;color:var(--dim)}
+.ms-chip-struct b{color:#9fd8f0;border-color:rgba(75,184,224,.4);background:rgba(75,184,224,.08);font-weight:600}
 .ms-track{height:10px;border-radius:6px;background:rgba(150,175,215,.13);position:relative;margin:13px 0 5px}
 .ms-fillgrad{position:absolute;inset:0;border-radius:6px;
   background:linear-gradient(90deg,#2ec4a6,#f2b23e 55%,#f23645)}
@@ -468,9 +477,16 @@ body.drawer-open{overflow:hidden}
 .mpd-stage canvas{position:absolute;inset:0;width:100%;height:100%}
 .mpd-zl{position:absolute;font-size:10px;color:var(--faint);letter-spacing:1px;pointer-events:none}
 .mpd-hero{text-align:center;margin-top:-26px;position:relative}
-.mpd-tag{display:inline-block;padding:2px 14px;border-radius:3px;font-size:12px;letter-spacing:3px;
+.mpd-tags{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.mpd-tag{display:inline-flex;align-items:center;gap:6px;padding:2px 12px;border-radius:3px;font-size:12px;letter-spacing:2px;
   color:var(--warm);border:1px solid rgba(255,159,28,.4);background:rgba(255,159,28,.09)}
 .mpd-tag b{font-family:var(--num);font-variant-numeric:var(--tnum)}
+.mpd-taglab{font-size:9px;letter-spacing:1px;color:var(--dim)}
+/* 结构阶段：冷青蓝；情绪：暖色系——两个标签同框也不混 */
+.mpd-tag-struct{color:#9fd8f0;border-color:rgba(75,184,224,.4);background:rgba(75,184,224,.08)}
+.mpd-tag-struct .mpd-taglab{color:#7fb6cf}
+.mpd-tag-emo b{color:#ffd47a}
+.mpd-tagstate{font-size:10px;letter-spacing:1px;color:var(--faint)}
 .mpd-hint{color:var(--faint);font-size:11px;margin-top:6px}
 .mpd-chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin:12px 0 4px}
 .mpd-tide{padding:4px 0 0}
@@ -1263,6 +1279,7 @@ body.no-webgl #gl-fallback{display:grid}
             <div class="v" id="mpRingVal">—</div>
             <div class="u">情绪值 / 100</div>
             <div class="p" id="mpRingPhase">读取中</div>
+            <div class="mp-ring-struct" id="mpRingStruct" hidden><i>◇</i><span class="rs-lab">结构阶段</span><b id="mpRingStructVal">—</b></div>
           </div>
         </div>
       </div>
@@ -1774,26 +1791,26 @@ body.no-webgl #gl-fallback{display:grid}
 
     /* 主读数未知（基准没攒够）：明确解释，不假装没事 */
     if (sc.score == null) {
-      if (window.__mpRingUpdate) window.__mpRingUpdate(null, d && d.phase);
+      if (window.__mpRingUpdate) window.__mpRingUpdate(null, '情绪未知', d && d.phase);
       const n = (f && f.sampleN) || 0;
       box.innerHTML =
         '<div class="ms-hero"><div class="ms-top"><span class="ms-big" style="color:var(--faint)">—</span>'
         + '<span class="ms-cap" style="color:var(--faint)">情绪基准还在攒</span>'
-        + '<span class="ms-chip">结构<b>' + esc(d.phase) + '</b></span></div>'
+        + '<span class="ms-chip ms-chip-struct"><span class="ms-chip-lab">结构阶段</span><b>' + esc(d.phase) + '</b></span></div>'
         + '<div class="ms-note2" style="padding:10px 0 4px">判断散户恐慌到什么程度，要先有平时跌停数、炸板率的尺子。'
         + '系统每个交易日自动攒，已攒 <b style="color:var(--dim)">' + n + '</b> 天；现在看到今天数据也不当作"没事"。</div></div>';
       return;
     }
 
     const s = sc.score;
-    if (window.__mpRingUpdate) window.__mpRingUpdate(s, d.phase);
+    if (window.__mpRingUpdate) window.__mpRingUpdate(s, sc.label, d.phase);
     const col = s >= 70 ? 'var(--panic,#f23645)' : s >= 40 ? 'var(--mid,#f2b23e)' : 'var(--calm,#2ec4a6)';
 
     let h = '';
     /* ── 主读数：大字 + 标签 + 结构芯片 ── */
     h += '<div class="ms-hero"><div class="ms-top">'
       + '<span class="ms-big" style="color:' + col + '">' + s + '<small>/100</small></span>'
-      + '<span class="ms-chip"><b>' + esc(d.phase) + '</b></span></div>'
+      + '<span class="ms-chip ms-chip-struct"><span class="ms-chip-lab">结构阶段</span><b>' + esc(d.phase) + '</b></span></div>'
       + '<div class="ms-cap" style="color:' + col + '">' + esc(sc.label) + '</div>';
 
     /* 能量条 */
@@ -1921,8 +1938,10 @@ body.no-webgl #gl-fallback{display:grid}
       h += '<div class="mpd-stage"><canvas id="mpdPlanet"></canvas>'
         + '<span class="mpd-zl" style="left:18px;top:22px">冰点</span>'
         + '<span class="mpd-zl" style="right:18px;top:22px">亢奋</span></div>'
-        + '<div class="mpd-hero"><span class="mpd-tag">' + esc(d && d.phase || '待标定')
-        + (s != null ? ' · <b>' + Math.round(s) + '</b>' : '') + '</span>'
+        + '<div class="mpd-hero"><div class="mpd-tags">'
+        + '<span class="mpd-tag mpd-tag-struct"><span class="mpd-taglab">结构阶段</span>' + esc(d && d.phase || '待标定') + '</span>'
+        + (s != null ? '<span class="mpd-tag mpd-tag-emo"><span class="mpd-taglab">情绪</span><b>' + Math.round(s) + '</b><span class="mpd-tagstate">' + esc(sc.label || '') + '</span></span>' : '')
+        + '</div>'
         + '<div class="mpd-hint">表面越平静越冷 = 情绪越低迷 · 越沸腾越暖 = 越亢奋</div></div>';
 
       if (s == null) {

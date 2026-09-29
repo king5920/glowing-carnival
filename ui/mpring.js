@@ -8,18 +8,53 @@
   if (!cv) return;
   const valEl = document.getElementById("mpRingVal");
   const phaseEl = document.getElementById("mpRingPhase");
+  const structEl = document.getElementById("mpRingStruct");
+  const structVal = document.getElementById("mpRingStructVal");
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   let uV = 0.28;
 
-  window.__mpRingUpdate = function (score, phase) {
+  /* 情绪档位配色（与 A+C 面板一致）：恐慌红 / 警戒黄 / 平静青 */
+  function emotionColor(score) {
+    return score >= 70 ? ["#f23645", "rgba(242,54,69,.4)", "rgba(242,54,69,.09)"]
+      : score >= 40 ? ["#f2b23e", "rgba(242,178,62,.4)", "rgba(242,178,62,.09)"]
+      : ["#2ec4a6", "rgba(46,196,166,.4)", "rgba(46,196,166,.09)"];
+  }
+
+  /**
+   * @param score 情绪分 0-100（null=未知）
+   * @param emotionLabel 情绪档位文字（恐慌冰点/情绪警戒/情绪平静）
+   * @param structPhase 缠论结构阶段（退潮期…），单独冷色显示，与情绪分开
+   */
+  window.__mpRingUpdate = function (score, emotionLabel, structPhase) {
+    /* 结构阶段：独立冷色行，任何分数下都与情绪区分 */
+    if (structEl && structVal) {
+      if (structPhase && structPhase !== "unknown") {
+        structVal.textContent = structPhase;
+        structEl.hidden = false;
+      } else {
+        structEl.hidden = true;
+      }
+    }
+
     if (score == null || isNaN(score)) {
       if (valEl) valEl.textContent = "—";
-      if (phaseEl) phaseEl.textContent = phase || "待标定";
+      if (phaseEl) {
+        phaseEl.textContent = emotionLabel || "情绪未知";
+        phaseEl.style.color = "var(--faint)";
+        phaseEl.style.borderColor = "rgba(150,170,200,.3)";
+        phaseEl.style.background = "transparent";
+      }
       return;
     }
     uV = Math.max(0, Math.min(1, score / 100));
-    if (valEl) valEl.textContent = Math.round(score);
-    if (phaseEl) phaseEl.textContent = phase || "";
+    const [c, bd, bg] = emotionColor(score);
+    if (valEl) { valEl.textContent = Math.round(score); valEl.style.color = c; }
+    if (phaseEl) {
+      phaseEl.textContent = emotionLabel || "";
+      phaseEl.style.color = c;
+      phaseEl.style.borderColor = bd;
+      phaseEl.style.background = bg;
+    }
   };
 
   const VS = "attribute vec2 aP; void main(){ gl_Position = vec4(aP,0.,1.); }";
