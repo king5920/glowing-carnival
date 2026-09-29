@@ -199,6 +199,37 @@ async function assess(deps, opt = {}) {
     };
   } catch (e) { marketWindow = { error: e.message }; }
 
+  /* 2.8) 板块方向：当前主线候选 + 样本外成绩单（方法论后半句"板块定方向"） */
+  let sectorMainline = null;
+  try {
+    const dbm = require('../db');
+    const sml = require('./sector_mainline');
+    const dates = dbm.sectorDailyDates();
+    if (!dates.length) {
+      sectorMainline = { status: 'empty', candidates: [], note: '板块每日数据尚未开始积累' };
+    } else {
+      /* 当前主线：用截至最新日全部行选出 */
+      const acc = [];
+      for (const d of dates) acc.push(...dbm.sectorDailyAt(d));
+      const cur = sml.selectAsOf(acc, dates).filter(x => x.mainline).slice(0, 5)
+        .map(x => ({ code: x.code, name: x.name, kind: x.kind,
+          streak: x.streak, totalYi: x.totalYi, rangePct: x.rangePct }));
+      /* 样本外状态（T+1 目前事件最多；都不足时如实说明） */
+      const bt1 = sml.backtest(dates, d => dbm.sectorDailyAt(d), { fwdKey: 'fwd_d1' });
+      const bt3 = sml.backtest(dates, d => dbm.sectorDailyAt(d), { fwdKey: 'fwd_d3' });
+      sectorMainline = {
+        status: 'ok', days: dates.length,
+        candidates: cur,
+        oos: {
+          d1: { n: bt1.withFwd, winRate: bt1.stats.winRate, reliable: bt1.reliable },
+          d3: { n: bt3.withFwd, winRate: bt3.stats.winRate, reliable: bt3.reliable },
+          note: bt3.reliable ? bt3.note
+            : `板块主线样本外事件不足（T+1 ${bt1.withFwd}/T+3 ${bt3.withFwd}，需≥${sml.MIN_ML_EVENTS}），胜率暂不采信，继续积累交易日`,
+        },
+      };
+    }
+  } catch (e) { sectorMainline = { error: e.message }; }
+
   /* 3) 综合一句话（大白话，供模型/网页） */
   const phase = market ? market.phase : 'unknown';
   const summary = buildSummary(phase, fear, errors);
@@ -220,6 +251,7 @@ async function assess(deps, opt = {}) {
     sentimentScore,              // {score 0-100, label, state, calibrated:false}
     sentimentMulti,              // 多因子（经前向收益标定）：{score,label,calibrated,effective,evidence,factors,weights}
     marketWindow,                // 时机总开关：{window,code,reason,evidence{d3,d5}}
+    sectorMainline,              // 板块方向：{candidates,oos{d1,d3,note}}
     sentimentSeries,             // [{date,score,hasRsi}] 近20日情绪曲线
     shTechnical: sh && !sh.error ? {
       close: sh.close, rsi14: sh.rsi14, aboveMa20: sh.aboveMa20, macdCross: sh.macdCross,

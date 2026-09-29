@@ -511,6 +511,13 @@ body.drawer-open{overflow:hidden}
 .smf-oos-lab{display:inline-block;margin-right:6px;font-size:9px;color:#7fc7e8;letter-spacing:.5px}
 .smf-confirm{margin-top:6px;font-size:9px;color:#bcd8f0;line-height:1.6}
 .smf-confirm-none{color:var(--faint)}
+/* 板块主线候选 */
+.sml-list{margin-top:7px;display:flex;flex-direction:column;gap:5px}
+.sml-row{display:flex;align-items:baseline;justify-content:space-between;font-size:10px}
+.sml-name{color:var(--txt)}
+.sml-meta{color:var(--faint);font-variant-numeric:var(--tnum)}
+.sml-oos{margin-top:8px;padding-top:7px;border-top:1px solid var(--hairline2)}
+.smf-foot{margin-top:8px;font-size:9px;color:var(--faint)}
 .smf-factors{margin-top:8px;display:flex;flex-direction:column;gap:5px}
 .smf-frow{display:flex;align-items:center;gap:8px;font-size:9px}
 .smf-fname{width:64px;color:var(--dim);flex-shrink:0}
@@ -1951,6 +1958,22 @@ body.no-webgl #gl-fallback{display:grid}
         .join('');
       if (fbars) h += '<div class="smf-factors">' + fbars + '</div>';
       h += '</div>';
+    }
+
+    /* 板块方向：主线候选 + 样本外状态（方法论后半句） */
+    const sl = d.sectorMainline;
+    if (sl && !sl.error) {
+      h += '<div class="smf-box sml-box"><div class="smf-head"><span class="smf-title">板块方向 · 主线候选</span>'
+        + '<span class="smf-badge uncal">已攒 ' + sl.days + ' 日</span></div>';
+      if (sl.candidates && sl.candidates.length) {
+        h += '<div class="sml-list">' + sl.candidates.map(c =>
+          '<div class="sml-row"><span class="sml-name">' + esc(c.name) + '</span>'
+          + '<span class="sml-meta">连续' + (c.streak || 0) + '流入·' + (c.rangePct > 0 ? '+' : '') + c.rangePct + '%</span></div>').join('') + '</div>';
+      } else {
+        h += '<div class="smf-ev" style="margin-top:6px">当前无满足持续性门槛的主线候选（不等于"没有主线"，可能数据未攒够）</div>';
+      }
+      if (sl.oos) h += '<div class="smf-ev sml-oos">' + esc(sl.oos.note) + '</div>';
+      h += '<div class="smf-foot">板块只定方向·非买入指令</div></div>';
     }
     h += '</div></details>';
 
