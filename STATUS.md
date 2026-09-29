@@ -1,3 +1,56 @@
+## Phase 42：大盘恐慌指数 + 全息环轨/情绪星球 3D 面板（含降级收口）
+
+### 一、起因
+旧「大盘定时机」面板把笔/中枢/缠论三料胶囊全摊出来，**没有"一个数读情绪"**；
+且指数读数被埋在第 8 行小字。目标是给散户情绪一个主读数，并用 3D 直观呈现，同时不丢数据可信度。
+
+### 二、交付内容（4 个提交：3d601f9 及数据韧性批，最终收口 4859349）
+
+| 模块 | 文件 | 职责 |
+|---|---|---|
+| 恐慌指数 | `src/tools/sentiment_score.js` | 跌停/炸板率/指数RSI 三**分位**合成 0–100，权重 0.45/0.40/0.15（明确标"未标定"），`null≠0`；历史回填无RSI → 两料重归一化 |
+| SWR 缓存 | `src/tools/mp_cache.js` | `/api/market_phase` 冷启动实测 27s+，改为启动预温、过期返回旧值并后台刷新、刷新失败不清空旧值 |
+| 后端接线 | `src/tools/market_phase.js` | 输出当日 `sentimentScore` + 近20日 `sentimentSeries` |
+| 服务 | `src/server.js` | market_phase 走预温缓存秒回，返回 `_cache{stale,cachedAt,ageMs}`；HTML `no-cache` |
+| 3D | `ui/mpring.js`（手写 WebGL1 raymarch 全息环轨）、`ui/mplanet.js`（fbm 情绪星球，抽屉详情） | 零依赖、零外链 |
+| 抽屉/相机 | `ui/drawer.js`（新增 `mount` 钩子）、`ui/pickmath.js`/`starfield.js`（抽屉开合星图相机让位）、`app.js`（移除旧线框地球仪 globe） | 3D 取代 globe |
+
+### 三、P1 核验结论（2026-09-29 实测，非推测）
+
+**1) 三个读数同源、无独立请求：**
+- `#mpbox` 2D 大字、mpring 环轨（`__mpRingUpdate(s)`）、mplanet 抽屉（复用 `lastData`/`mount(cv,score)`）
+  全部来自**同一份** `/api/market_phase` 的 `sentimentScore.score`；仅 hash 还原才走 fetcher。
+- `score==null`（基准没攒够）时三者一致显示"情绪基准还在攒"，绝不用 0 顶上。
+- 生命周期：抽屉关闭、canvas `isConnected=false` → mplanet `draw()` 返回 false，AnimGate tick 自动注销回调 + `loseContext`，无残留（双保险）。
+
+**2) 降级路径信息不丢：**
+| 场景 | 主面板环轨 | 抽屉星球 |
+|---|---|---|
+| 无 WebGL | 隐藏 canvas，独立 DOM 大字数字/阶段仍可读 | canvas 隐藏，`mpd-tag` 情绪数值独立于 canvas，三料/潮汐/四宫格全在 |
+| `prefers-reduced-motion` | 只渲一帧静态、不挂循环 | 同 |
+
+**3) 动效纪律：** 两模块正常只挂 `window.AnimGate` 共享循环（animgate.js 在其前同步加载）；
+"AnimGate 缺失才独立 rAF"的兜底分支实为死代码，属合理容错，未改动。
+
+### 四、降级演进（为什么最终是 4859349）
+- 同花顺备胎最初只在 `scan()` 外层触发；`4859349` 把降级**下沉进 `fetchSectorFlow()` 本身**——
+  东财首页失败不再 `throw`，内部改走 `ths_board` 真实行业；东财+同花顺都失败才抛错。
+- 概念板同花顺无列表，**诚实抛错**，不伪造。
+- patrol 测试口径分两条，杜绝"拿粗口径伪装全覆盖"：
+  东财直出要求 `>200 / ≥total 98%`；同花顺降级验证每条带真实涨跌幅 + `boardFallback` 口径说明 + 自身 `complete=true`。
+
+### 五、诚实边界
+- 恐慌指数是**展示合成**：权重未标定，分位基准随交易日累积；读数用于观察，非买入建议（面板已明示）。
+- 同花顺降级仅约 50 个行业、无概念、无主力多日净额，口径与东财不同。
+- 全套件本地逐文件直跑核验（沙箱内 `spawnSync` 整源跑会因 `EBUSY` 假崩，须绕开派生层）。
+
+### 六、遗留
+- 无 WebGL 时抽屉 3D 舞台区会空（读数仍在）；可选补一句"当前环境不支持 3D"提示。
+- 远端默认分支 `main`，实际内容在 `master`，是否统一待定。
+- 旧仓库 `killer-is-is` 明文 `.env` 密钥建议轮换。
+
+---
+
 ## Phase 41：TTS 数字/小数点/百分数口语化 + 打字轮朗读（修"播报数字很多错误"）
 
 ### 一、起因
