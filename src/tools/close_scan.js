@@ -140,10 +140,10 @@ async function fetchSectorFlow(kind = 'industry', maxPages = 12) {
     try {
       j = await em.emGetJson(url, { headers: { Referer: 'https://data.eastmoney.com/' } });
     } catch (e) {
-      /* 已经抓到一部分就不要整体失败 —— 部分数据 + 明确标注短缺
-       * 比"什么都没有"有用。但必须记为失败让面板看见。 */
+      /* 已经抓到一部分就保留部分数据（下面覆盖率会诚实标 complete=false）；
+       * 一帧都没有也不在此 throw —— 跳出循环走函数末尾的同花顺内部降级，
+       * 让本函数（而非仅外层 scan）本身就是可靠的。 */
       health.record(SOURCE, false, `第 ${pn} 页请求失败: ${e.message}`);
-      if (!out.length) throw new Error(`板块资金流不可用：${e.message}`);
       break;
     }
 
@@ -189,8 +189,36 @@ async function fetchSectorFlow(kind = 'industry', maxPages = 12) {
   }
 
   if (!out.length) {
-    health.record(SOURCE, false, '板块资金流返回空');
-    throw new Error('板块资金流返回空（东财可能在风控）');
+    /* ══ 内部降级：东财整源失败（封IP/风控）→ 同花顺普通列表页 ══
+     * 只有行业有备胎；同花顺无概念列表。
+     * 降级行带 source='ths.board' 与 boardFallback 口径说明，
+     * 绝不把 50 个粗口径行业伪装成东财 496 个全覆盖。 */
+    if (kind === 'industry') {
+      const ths = require('./ths_board');
+      let thsRows = null;
+      try { thsRows = await ths.industryBoards(); } catch (e2) {
+        health.record(SOURCE, false, '东财与同花顺均不可用: ' + e2.message);
+        throw new Error('板块资金流不可用：东财风控，同花顺备胎也失败（' + e2.message + '）');
+      }
+      const tTotal = thsRows.length;
+      const rows = thsRows.map(s => Object.assign({
+        code: s.code, name: s.name, level: s.level, changePct: s.changePct,
+        todayYi: null, d5Yi: null, d10Yi: null, mainPct: null,
+        upCount: s.upCount, downCount: s.downCount,
+        leader: s.leader, leaderCode: null, leaderPct: s.leaderPct,
+        dataTs: null, kind, source: 'ths.board',
+      }, {
+        total: tTotal, coverage: 1, complete: true,
+        boardFallback: {
+          source: 'ths.board',
+          reason: '东财行业板块整源不可用（push2 全系列 TCP RST）',
+          note: '已内部降级同花顺：仅 ' + tTotal + ' 个带行情行业、无概念、无主力多日净额，口径较粗，请以实时软件为准',
+        },
+      }));
+      return rows;
+    }
+    health.record(SOURCE, false, '概念板块返回空（东财风控，且无概念备胎）');
+    throw new Error('概念板块资金流返回空（东财可能在风控，同花顺无概念列表可降级）');
   }
 
   /* ══ 覆盖率断言（和资金流的数量短缺同一类 bug）══

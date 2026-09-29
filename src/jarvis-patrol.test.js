@@ -804,13 +804,29 @@ test('第二优先：板块必须分页抓全，不能只抓第一页', async ()
 
   const cs = require('./tools/close_scan');
   const rows = await cs.fetchSectorFlow('industry');
-  const total = rows[0] && rows[0].total;
-  if (total) {
-    assert(rows.length >= total * 0.98,
-      `只抓到 ${rows.length}/${total} —— 分页没抓全，中段板块会漏`);
+
+  /* 口径分两条，绝不混为一谈：
+   *  - 东财直出：分页必须抓全（≥total 98% 且 >200），守"中段板块不漏"的原 bug；
+   *  - 内部降级同花顺：必然只有约50个，此时不能再硬卡200（那是东财口径），
+   *    但必须证明它诚实——source 标明、带 boardFallback、每条有真实涨跌幅，
+   *    而不是把粗口径静默伪装成东财全覆盖。 */
+  const degraded = rows[0] && rows[0].source === 'ths.board';
+  if (degraded) {
+    assert(rows.length >= 30, `同花顺行业只解析出 ${rows.length} 个，解析可能坏了`);
+    assert(rows.every(r => typeof r.changePct === 'number'),
+      '降级行必须带真实涨跌幅');
+    assert(rows[0].boardFallback && /同花顺/.test(rows[0].boardFallback.note),
+      '降级必须带 boardFallback 口径说明，不能伪装成东财全覆盖');
+    assert(rows[0].complete === true, '同花顺自身这50个是抓全的，complete 应为 true');
+  } else {
+    const total = rows[0] && rows[0].total;
+    if (total) {
+      assert(rows.length >= total * 0.98,
+        `只抓到 ${rows.length}/${total} —— 分页没抓全，中段板块会漏`);
+    }
+    assert(rows.length > 200,
+      `行业板块只抓到 ${rows.length} 个，实测上游有 496 个`);
   }
-  assert(rows.length > 200,
-    `行业板块只抓到 ${rows.length} 个，实测上游有 496 个`);
 });
 
 test('第三优先：盘后调用必须校验数据时点', async () => {
