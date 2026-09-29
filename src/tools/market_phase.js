@@ -106,6 +106,7 @@ async function assess(deps, opt = {}) {
     enriched = enriched.map(r => {
       const b = closeByDate.get(r.date);
       if (r.sh_close == null && b != null) r.sh_close = b;
+      if (r.sh_volume == null && b != null && b.volume != null) r.sh_volume = b.volume;
       return r;
     });
     /* 现算 fwd_d3（日K按交易日对齐），供 calibrate */
@@ -118,10 +119,11 @@ async function assess(deps, opt = {}) {
     });
     const calib = sm.calibrate(enriched);
     /* 严格样本外：滚动只用过去窗口标定，给出可信的样本外胜率 */
-    let oos = null;
+    let oos = null, oosConfirmed = null;
     try {
       const wf = require('./walkforward');
       oos = wf.walkForward(enriched, { trainWindow: 90 });
+      oosConfirmed = wf.evaluateConfirmed(enriched);
     } catch (e) { oos = { error: e.message }; }
     /* 当日：优先用今天的实时行（含 limit_down/broken_rate/ladder），past=之前daily */
     const todayRow = enriched.length ? enriched[enriched.length - 1] : null;
@@ -134,7 +136,8 @@ async function assess(deps, opt = {}) {
     sentimentMulti.calibrationNote = calib.note;
     sentimentMulti.oos = (oos && !oos.error)
       ? { n: oos.signal.n, winRate: oos.signal.winRate, avgFwd: oos.signal.avgFwd,
-          signalMin: oos.signalMin, note: oos.note }
+          signalMin: oos.signalMin, note: oos.note,
+          confirmed: oosConfirmed ? oosConfirmed.confirmed : [] }
       : null;
   } catch (e) { sentimentMulti = { error: e.message }; }
 

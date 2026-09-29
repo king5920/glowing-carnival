@@ -17,6 +17,10 @@
 
 const sm = require('./sentiment_model');
 
+/* 过滤器"确认"门槛：必须样本足够、胜率明显高于50、均值为正 */
+const CONFIRM_WINRATE = 0.60;
+const CONFIRM_MIN_N = 15;
+
 /* 移动平均（取最近 n 行可得收盘；不足返回 null） */
 function ma(closes, n) {
   const xs = closes.filter(x => x != null && isFinite(x));
@@ -35,6 +39,25 @@ const FILTERS = {
       const m = ma(closes, 20);
       if (m == null || r.sh_close == null) return null;
       return r.sh_close >= m ? 'MA20上方(回踩)' : 'MA20下方(接刀)';
+    },
+  },
+  trend60: {
+    label: '上证相对MA60',
+    group: (r, past) => {
+      const closes = past.map(p => p.sh_close).concat([r.sh_close]);
+      const m = ma(closes, 60);
+      if (m == null || r.sh_close == null) return null;
+      return r.sh_close >= m ? 'MA60上方' : 'MA60下方';
+    },
+  },
+  volume: {
+    label: '量能(当日/MA20量)',
+    group: (r, past) => {
+      const vols = past.map(p => p.sh_volume).concat([r.sh_volume]);
+      const m = ma(vols, 20);
+      if (m == null || r.sh_volume == null) return null;
+      const ratio = r.sh_volume / m;
+      return ratio < 0.8 ? '缩量(<0.8)' : ratio > 1.3 ? '放量(>1.3)' : '平量(0.8–1.3)';
     },
   },
   rsiRegime: {
@@ -132,4 +155,53 @@ function walkForward(daily, opt = {}) {
   };
 }
 
-module.exports = { walkForward, FILTERS, ma, winStats };
+/**
+ * 跨训练窗稳健性评估：只确认在【多个窗口】都满足门槛的过滤组。
+ * 这样把"换个窗口胜率就跳"的偶然结果自动剔除，无需人工挑选。
+ *
+ * @returns {confirmed:[{filter,label,group,n,winRate,avgFwd}], evaluated:窗口数, note}
+ */
+function evaluateConfirmed(rows, opt = {}) {
+  const windows = opt.windows || [60, 90, 120];
+  const signalMin = opt.signalMin || 40;
+  const runs = windows.map(tw => {
+    const r = walkForward(rows, Object.assign({}, opt, { trainWindow: tw, signalMin }));
+    const m = new Map();
+    for (const [fk, rep] of Object.entries(r.filters)) {
+      for (const g of rep.groups) {
+        m.set(fk + '|' + g.group, g);
+      }
+    }
+    return m;
+  });
+
+  /* 候选 = 第一个窗口里达标的组，再要求在其余每个窗口也都达标 */
+  const strong = g =>
+    g.n >= CONFIRM_MIN_N && g.winRate >= CONFIRM_WINRATE && g.avgFwd > 0;
+
+  const confirmed = [];
+  for (const [key, g] of runs[0]) {
+    if (!strong(g)) continue;
+    let allOk = true;
+    for (let k = 1; k < runs.length; k++) {
+      const o = runs[k].get(key);
+      if (!o || !strong(o)) { allOk = false; break; }
+    }
+    if (allOk) {
+      const [fk, group] = key.split('|');
+      confirmed.push({ filter: fk, label: FILTERS[fk].label, group,
+        n: g.n, winRate: g.winRate, avgFwd: g.avgFwd });
+    }
+  }
+
+  return {
+    confirmed,
+    evaluated: windows.length,
+    note: confirmed.length
+      ? `跨 ${windows.length} 个训练窗稳健达标的过滤组 ${confirmed.length} 个（仍非买入指令）`
+      : `跨 ${windows.length} 个训练窗，没有任何过滤组同时满足 n≥${CONFIRM_MIN_N}、胜率≥${(CONFIRM_WINRATE * 100).toFixed(0)}%、均值为正——过滤器暂不确认，维持原观察口径`,
+  };
+}
+
+module.exports = { walkForward, evaluateConfirmed, FILTERS, ma, winStats,
+  CONFIRM_WINRATE, CONFIRM_MIN_N };

@@ -85,6 +85,39 @@ test('walkForward: 无信号时note诚实不编造',()=>{
   ok(/不足/.test(r.note));
 });
 
+test('MA60/量能过滤器存在且分组安全',()=>{
+  const rows=mkData(120);
+  const r=wf.walkForward(rows,{trainWindow:80});
+  ok(r.filters.trend60);
+  ok(r.filters.volume);
+  // 量能分组标签只在三档之内或null
+  for(const p of r.predictions){
+    const v=p.groups.volume;
+    ok(v==null||/缩量|放量|平量/.test(v));
+  }
+});
+
+test('evaluateConfirmed: 输出结构与门槛诚实',()=>{
+  const rows=mkData(160);
+  const c=wf.evaluateConfirmed(rows,{windows:[60,90]});
+  ok(Array.isArray(c.confirmed));
+  eq(c.evaluated,2);
+  // 每个确认项必须满足门槛
+  for(const x of c.confirmed){
+    ok(x.n>=wf.CONFIRM_MIN_N);
+    ok(x.winRate>=wf.CONFIRM_WINRATE);
+    ok(x.avgFwd>0);
+  }
+  ok(typeof c.note==='string');
+});
+
+test('enrichDaily: volume按日期补齐',()=>{
+  const rows=mkData(40).map(r=>({...r,sh_volume:null}));
+  const bars=rows.map(r=>({date:r.date,close:r.sh_close,volume:12345}));
+  const out=sm.enrichDaily(rows,bars,null);
+  eq(out.filter(x=>x.sh_volume===12345).length,40);
+});
+
 (async()=>{
   for(const [n,fn] of tests){
     try{await fn();console.log('  ✓ '+n);pass++;}

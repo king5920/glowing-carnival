@@ -314,6 +314,7 @@ function enrichDaily(daily, shBars, cybBars) {
       const idx = sh.findIndex(b => b.date === r.date);
       if (idx > 0) out.__shChange = (e.b.close - sh[idx - 1].close) / sh[idx - 1].close * 100;
       if (out.sh_rsi14 == null && e.rsi != null) out.sh_rsi14 = +e.rsi.toFixed(1);
+      if (out.sh_volume == null && e.b.volume != null) out.sh_volume = e.b.volume;
     }
     if (cybByDate) {
       const cv = cybByDate.get(r.date);
