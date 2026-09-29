@@ -45,6 +45,17 @@ function marketPhaseCache() {
   return _mpCache;
 }
 
+/* 实时指数 SWR 缓存：盘中 15s 复用，避免指数条反复刷新打爆腾讯快照+4路分时。
+   quote() 内部会判 isOpen；非交易时段数据不变，15s TTL 也只是返回旧快照，无副作用。 */
+let _iqCache = null;
+function indexQuoteCache() {
+  if (_iqCache) return _iqCache;
+  const mb = require('./tools/market_board');
+  const { createCache } = require('./tools/mp_cache');
+  _iqCache = createCache(() => mb.quote(), { ttlMs: 15 * 1000 });
+  return _iqCache;
+}
+
 /* 设置页的接入预设。
  * 这些只是"填表模板"，方便切换服务商时不用记 URL；
  * 是否真能用取决于你的 Key —— 所以设置页有「测试连接」按钮，
@@ -594,6 +605,27 @@ const server = http.createServer(async (req, res) => {
    * tools.call 会把超过 4000 字符的结果截断（那是为喂模型省 token），
    * 而面板需要完整的 sectors 数组做渲染，截断会破坏卡片。
    * 只读、带超时与错误兜底，失败时返回结构化 error 让面板如实显示。 */
+  /* ── 实时指数条 + 盘中分时（P2）──
+   * 无参数。取 market_board.quote()：4 核心指数（上证/深成/创业板/科创50）
+   * 实时点位、涨跌额/幅、开高低收，以及各自当日分时点列 minute[]。
+   * 走 15s SWR 缓存（indexQuoteCache）；refresh=1 触发后台强刷但仍先返回现值。
+   * 诚实口径字段：dataTs(腾讯行情时间戳)/source/isOpen/degraded，
+   * 东财降级时无分时，前端据此不画分时线。只读、失败返回结构化 error。 */
+  if (url === '/api/index_quote' || url.startsWith('/api/index_quote?')) {
+    try {
+      const q = new URL(url, 'http://x').searchParams;
+      if (q.get('refresh') === '1') indexQuoteCache().refresh().catch(() => {});
+      const hit = await indexQuoteCache().get();
+      if (!hit) return sendJson(res, 200, { ok: false, error: '实时指数正在初始化，请稍后刷新' });
+      const v = hit.value;
+      return sendJson(res, 200, Object.assign({ ok: true }, v, {
+        _cache: { stale: hit.stale, cachedAt: hit.cachedAt, ageMs: hit.ageMs },
+      }));
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: String(e.message || e) });
+    }
+  }
+
   if (url === '/api/closescan' || url.startsWith('/api/closescan?')) {
     try {
       const q = new URL(url, 'http://x').searchParams;

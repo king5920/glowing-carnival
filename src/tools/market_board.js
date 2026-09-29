@@ -55,6 +55,7 @@ function fetchIndexTencent() {
               prevClose: num(f[4]),
               open: num(f[5]),
               volume: num(f[6]),                    // 手
+              quoteTs: f[30] || null,               // 行情时间戳 YYYYMMDDHHmmss（腾讯权威时点）
               change: num(f[31]),
               changePct: num(f[32]),
               high: num(f[33]),
@@ -76,6 +77,73 @@ function fetchIndexTencent() {
     req.on('timeout', () => { req.destroy(); reject(new Error('腾讯指数超时')); });
     req.on('error', reject);
   });
+}
+
+/* ─────────────── 盘中分时（腾讯）─────────────── */
+
+/* 实时指数条默认只展示 4 个最常用的核心指数（前 4）。 */
+const QUOTE_INDEXES = INDEXES.slice(0, 4);
+
+/** https GET 文本（分时接口必须走 https，http 会 302 到 https）。 */
+function httpsText(url) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: { 'User-Agent': UA, Referer: 'https://gu.qq.com/' },
+      timeout: 8000,
+    }, res => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('腾讯分时超时')); });
+    req.on('error', reject);
+  });
+}
+
+/**
+ * 取某指数最近一个交易日的分时。
+ * 用 day/query（带 date）而非 minute/query：非交易日也能知道这批分时
+ * 归属哪一天，不会把上周五的分时误当成"今天盘中"。
+ * @returns {{date:string, points:Array<{t:string,price:number,volume:number,amount:number}>}}
+ */
+async function fetchMinute(code) {
+  const url = `https://web.ifzq.gtimg.cn/appstock/app/day/query?code=${code}`;
+  const j = JSON.parse(await httpsText(url));
+  const days = j && j.data && j.data[code] && j.data[code].data;
+  if (!Array.isArray(days) || !days.length) throw new Error('腾讯分时返回空');
+  const d = days[0];                          // 最新一个交易日排在最前
+  const points = (d.data || []).map(parseMinuteLine).filter(x => x && x.price != null);
+  if (!points.length) throw new Error('腾讯分时解析后为空');
+  return { date: d.date, points };
+}
+
+/**
+ * 解析腾讯分时一行 "HHMM 价 量 额" → {t,price,volume,amount}。
+ * 字段缺失时对应位为 null（null≠0）；整行非法返回 null。
+ */
+function parseMinuteLine(line) {
+  if (!line || typeof line !== 'string') return null;
+  const p = line.trim().split(' ').filter(s => s !== '');
+  if (p.length < 2 || !/^\d{4}$/.test(p[0])) return null;
+  const price = num(p[1]);
+  if (price == null) return null;             // 价格非法的点没有意义，整行丢弃
+  return { t: p[0], price, volume: num(p[2]), amount: num(p[3]) };
+}
+
+/**
+ * 由腾讯行情时间戳判断"现在是否处于交易时段"。
+ * quoteTs 形如 20260929161500（收盘后停在 15:00 那次快照）。
+ * 同一交易日 + 工作日 + 当前时间在 09:30–15:00 之间才算盘中。
+ */
+function deriveIsOpen(qts, now = new Date()) {
+  if (!qts || qts.length < 14) return null;
+  const y = +qts.slice(0, 4), mo = +qts.slice(4, 6), da = +qts.slice(6, 8);
+  const sameDay = now.getFullYear() === y && now.getMonth() === mo - 1 && now.getDate() === da;
+  const weekday = now.getDay();
+  const hm = now.getHours() * 60 + now.getMinutes();
+  const inSession = hm >= 570 && hm < 900;    // 09:30（570）– 15:00（900）
+  return !!(sameDay && weekday >= 1 && weekday <= 5 && inSession);
 }
 
 /* ─────────────── 指数：东财备用 ─────────────── */
@@ -140,6 +208,85 @@ async function indexes() {
     health.record('eastmoney.index', false, e.message);
   }
   throw new Error('指数获取失败 —— ' + errs.join('; '));
+}
+
+/**
+ * 实时指数快照 + 盘中分时（供 /api/index_quote）。
+ *
+ * 诚实口径：
+ *  - 腾讯主源：快照(带 quoteTs 权威时点) + 每指数分时点列。
+ *  - 腾讯整源挂 → 东财备用：只有快照、**没有分时**（东财分时是另一套且常被拦），
+ *    必须 degraded 明说，前端就不画分时、只显示点位。
+ *  - null≠0：某指数分时拿不到就标 minuteMissing，不拿空数组伪装。
+ *  - 非交易时段返回末次快照 + 已收盘分时，isOpen=false，不制造"还在动"的假象。
+ */
+async function quote(now = new Date()) {
+  const errs = [];
+
+  // ── 主源：腾讯（快照 + 分时）──
+  let rows = null;
+  for (let i = 0; i < 2; i++) {
+    try { rows = await fetchIndexTencent(); health.record('tencent.quote', true); break; }
+    catch (e) { errs.push('腾讯快照: ' + e.message); if (i === 0) await sleep(300); }
+  }
+
+  if (rows) {
+    const want = new Set(QUOTE_INDEXES.map(x => x.tx));
+    const rows4 = rows.filter(r => want.has(txCode(r.code, r.name)));
+    const indexed = await Promise.all(rows4.map(async r => {
+      const tx = txCode(r.code, r.name);
+      try {
+        const m = await fetchMinute(tx);
+        return Object.assign({}, r, { minuteDate: m.date, minute: m.points, minuteMissing: false });
+      } catch (e) {
+        // 快照在、分时没拿到：保留快照，明确标记，不让一根分时拖垮整个指数条
+        return Object.assign({}, r, { minuteDate: null, minute: [], minuteMissing: true });
+      }
+    }));
+    if (!indexed.length) { /* 落到东财兜底 */ }
+    else {
+      const firstTs = indexed.map(x => x.quoteTs).find(Boolean) || null;
+      return {
+        indexes: indexed,
+        dataTs: firstTs,
+        isOpen: deriveIsOpen(firstTs, now),
+        source: 'tencent',
+        degraded: indexed.some(x => x.minuteMissing)
+          ? '部分指数分时缺失（接口异常），已只显示点位' : null,
+      };
+    }
+  }
+
+  health.record('tencent.quote', false, errs[errs.length - 1] || '腾讯不可用');
+
+  // ── 备用：东财（仅快照，无分时）──
+  try {
+    const emRows = await fetchIndexEastmoney();
+    health.record('eastmoney.index', true);
+    const want = new Set(QUOTE_INDEXES.map(x => (EM_INDEX[x.tx] || '').split('.')[1]));
+    const rows4 = emRows.filter(r => want.has(r.code));
+    return {
+      indexes: rows4.map(r => Object.assign({}, r, { minuteDate: null, minute: [], minuteMissing: true })),
+      dataTs: null,                                   // 东财 ulist 快照不带同款时间戳
+      isOpen: deriveIsOpen(null, now),
+      source: 'eastmoney',
+      degraded: '腾讯指数整源不可用，已降级东财延时快照：无盘中分时，请以实时软件为准',
+    };
+  } catch (e) {
+    errs.push('东财: ' + e.message);
+    health.record('eastmoney.index', false, e.message);
+  }
+
+  const err = new Error('实时指数获取失败 —— ' + errs.join('; '));
+  err.code = 'INDEX_QUOTE_UNAVAILABLE';
+  throw err;
+}
+
+/* 用腾讯内部代码（sh000001 形式）匹配。快照里 code 是纯数字 000001，
+   需要带上市场前缀，故从 INDEXES 反查。 */
+function txCode(code, _name) {
+  const hit = INDEXES.find(x => x.tx.slice(2) === String(code));
+  return hit ? hit.tx : null;
 }
 
 /* ─────────────── 板块：只有东财 ─────────────── */
@@ -295,4 +442,9 @@ function num(v) {
 function mul(v, k) { return v == null ? null : v * k; }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-module.exports = { indexes, sectors, sectorsWithReason, emStatus: em.status };
+module.exports = {
+  indexes, quote,
+  sectors, sectorsWithReason,
+  fetchMinute, parseMinuteLine, deriveIsOpen,
+  emStatus: em.status,
+};
