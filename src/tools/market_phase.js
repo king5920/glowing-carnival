@@ -87,6 +87,41 @@ async function assess(deps, opt = {}) {
   }
   const sentimentSeries = ss.series(history, rsiByDate, 20);
 
+  /* 2.6) 多因子情绪（经前向收益标定）：在旧情绪分之上加一层"被历史验证过"的读数。
+   * 用本函数已取到的日K（barsDay）补历史RSI/当日涨跌，无需新请求；
+   * 前向收益从同一日K序列按日期对齐回填（仅内存计算，不在此写库）。 */
+  let sentimentMulti = null;
+  try {
+    const sm = require('./sentiment_model');
+    const closeByDate = new Map(barsDay.map(b => [b.date, b.close]));
+    /* 组装与 alert_samples 同日期的 daily 行，并用日K增强技术字段；
+     * fwd 由日K序列现算（避免依赖库里是否已回填）。 */
+    const histDaily = (history || []).map(r => Object.assign({}, r, {
+      sh_rsi14: r.sh_rsi14 != null ? r.sh_rsi14
+        : (sh && sh.rsi14 != null ? sh.rsi14 : null),
+      cyb_rsi14: r.cyb_rsi14 != null ? r.cyb_rsi14 : null,
+    }));
+    let enriched = sm.enrichDaily(histDaily, barsDay, null);
+    /* 现算 fwd_d3（日K按交易日对齐），供 calibrate */
+    enriched = enriched.map(r => {
+      const idx = barsDay.findIndex(b => b.date === r.date);
+      if (idx >= 0 && idx + 3 < barsDay.length) {
+        r.fwd_d3 = +((barsDay[idx + 3].close - barsDay[idx].close) / barsDay[idx].close * 100).toFixed(2);
+      }
+      return r;
+    });
+    const calib = sm.calibrate(enriched);
+    /* 当日：优先用今天的实时行（含 limit_down/broken_rate/ladder），past=之前daily */
+    const todayRow = enriched.length ? enriched[enriched.length - 1] : null;
+    if (todayRow && todayRow.date === lastDate(history)) {
+      sentimentMulti = sm.scoreTodayMulti(todayRow, enriched.slice(0, -1), calib);
+    } else {
+      sentimentMulti = { calibrated: calib.calibrated, effective: calib.effective,
+        evidence: calib.topQuartile, note: calib.note, score: null };
+    }
+    sentimentMulti.calibrationNote = calib.note;
+  } catch (e) { sentimentMulti = { error: e.message }; }
+
   /* 3) 综合一句话（大白话，供模型/网页） */
   const phase = market ? market.phase : 'unknown';
   const summary = buildSummary(phase, fear, errors);
@@ -106,6 +141,7 @@ async function assess(deps, opt = {}) {
     } : null,
     fear,                        // {tier, fear, resonance, side, label, ...}
     sentimentScore,              // {score 0-100, label, state, calibrated:false}
+    sentimentMulti,              // 多因子（经前向收益标定）：{score,label,calibrated,effective,evidence,factors,weights}
     sentimentSeries,             // [{date,score,hasRsi}] 近20日情绪曲线
     shTechnical: sh && !sh.error ? {
       close: sh.close, rsi14: sh.rsi14, aboveMa20: sh.aboveMa20, macdCross: sh.macdCross,

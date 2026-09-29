@@ -360,6 +360,15 @@ CREATE TABLE IF NOT EXISTS minute_kline (
 CREATE INDEX IF NOT EXISTS idx_mk_code_time ON minute_kline(code, period, bar_time);
 `);
 
+/* ── 迁移：alert_samples 增加 fwd_d5（多因子标定需要 5 日前向收益）──
+ * 旧库无此列；用 PRAGMA 检查后再 ALTER，保证重复启动幂等。 */
+(function migrateAlertFwd5(){
+  const cols = db.prepare('PRAGMA table_info(alert_samples)').all().map(c => c.name);
+  if (!cols.includes('fwd_d5')) {
+    db.exec('ALTER TABLE alert_samples ADD COLUMN fwd_d5 REAL');
+  }
+})();
+
 /* ── 消息 ── */
 const _insMsg = db.prepare('INSERT INTO messages(role,content) VALUES(?,?)');
 const _recentMsgs = db.prepare(
@@ -740,6 +749,13 @@ function alertSamplesDaily() {
   return [...byDate.values()].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
 }
 
+/* 回填某日(指定slot)的前向收益；upsert 只更新 fwd_d1/d3/d5 */
+const _upAlertFwd = db.prepare(
+  'UPDATE alert_samples SET fwd_d1=@d1,fwd_d3=@d3,fwd_d5=@d5 WHERE date=@date AND slot=@slot');
+function updateAlertFwd(date, slot, d1, d3, d5) {
+  return _upAlertFwd.run({ date, slot, d1, d3, d5 });
+}
+
 /* ── 盘中板块资金快照 ── */
 const _insSecSnap = db.prepare(`
   INSERT INTO sector_flow_snap
@@ -974,7 +990,7 @@ module.exports = {
   recordMerge, mergesFor, allMerges, mergeCountMap,
   saveFundFlow, fundFlowHistory, fundFlowDayCount, fundFlowCodes, voiceVocab,
   addLesson, lessonsFor, recentLessons, allLessons, lessonCount,
-  saveAlertSample, alertSamples, alertSamplesDaily, alertSampleDates,
+  saveAlertSample, alertSamples, alertSamplesDaily, alertSampleDates, updateAlertFwd,
   saveSectorSnap, sectorSnapAt, sectorSnapSlots, sectorSnapDates, sectorSnapHistory,
   saveSectorDaily, sectorDailyDates, sectorDailyAt, sectorDailyFor, sectorDailySince,
   sectorDailyDatesNeedingFwd, updateSectorFwd,

@@ -472,6 +472,22 @@ body.drawer-open{overflow:hidden}
 .ms-detail summary::-webkit-details-marker{display:none}
 .ms-detail summary::after{content:'▾';float:right;transition:transform .2s}
 .ms-detail[open] summary::after{transform:rotate(180deg)}
+/* 多因子标定证据块 */
+.smf-box{margin:10px 12px 4px;padding:10px 11px;border:1px solid rgba(90,150,200,.22);border-radius:8px;background:rgba(40,70,100,.12)}
+.smf-head{display:flex;align-items:center;justify-content:space-between}
+.smf-title{font-size:11px;color:var(--txt);letter-spacing:.5px}
+.smf-badge{font-size:9px;padding:1px 8px;border-radius:10px;letter-spacing:1px}
+.smf-badge.cal{color:#7fe6c4;border:1px solid rgba(46,196,166,.4);background:rgba(46,196,166,.1)}
+.smf-badge.uncal{color:var(--faint);border:1px solid rgba(150,170,200,.3)}
+.smf-ev{margin-top:7px;font-size:10px;color:var(--dim);line-height:1.7}
+.smf-ev b{color:#bcd8f0;font-weight:600}
+.smf-ev-note{margin-left:6px;color:var(--faint)}
+.smf-factors{margin-top:8px;display:flex;flex-direction:column;gap:5px}
+.smf-frow{display:flex;align-items:center;gap:8px;font-size:9px}
+.smf-fname{width:64px;color:var(--dim);flex-shrink:0}
+.smf-ftrack{flex:1;height:4px;border-radius:3px;background:rgba(150,175,215,.14);position:relative;overflow:hidden}
+.smf-ffill{position:absolute;inset:0;border-radius:3px;background:linear-gradient(90deg,#2e8fc4,#46b8e0)}
+.smf-fw{width:34px;text-align:right;color:var(--faint);font-variant-numeric:var(--tnum)}
 /* 抽屉版情绪星球（A 方案详情）：stage 高度约束，读数覆盖层不入 canvas */
 .mpd-stage{position:relative;height:300px;margin:0 -4px}
 .mpd-stage canvas{position:absolute;inset:0;width:100%;height:100%}
@@ -1776,6 +1792,10 @@ body.no-webgl #gl-fallback{display:grid}
   };
 
   const TREND_TXT = { up: '上涨', down: '下跌', range: '震荡' };
+  const FACTOR_LABELS = {
+    limitDown:'跌停分位', brokenRate:'炸板率分位', shRsi:'上证RSI', cybRsi:'创业板RSI',
+    ladder:'连板高度', shDrop:'上证跌幅', sealWeak:'封板资金萎缩',
+  };
   /* 最近一次 /api/market_phase 数据：抽屉打开时直接用，不重复请求 */
   let lastData = null;
   function render(d) {
@@ -1848,6 +1868,29 @@ body.no-webgl #gl-fallback{display:grid}
       h += '<div class="mp-struc" style="font-family:inherit;margin-top:7px">上证 ' + num(tech.close, 0)
         + ' · RSI14 ' + num(tech.rsi14, 1)
         + ' · 价格在MA20' + (tech.aboveMa20 === true ? '上方' : tech.aboveMa20 === false ? '下方' : '附近') + '</div>';
+    }
+    /* 多因子标定证据：历史胜率 + 各因子强度（只放在详情区，主视图不堆） */
+    const mm = d.sentimentMulti;
+    if (mm && mm.score != null && !mm.error) {
+      h += '<div class="smf-box"><div class="smf-head"><span class="smf-title">多因子情绪 · ' + Math.round(mm.score)
+        + ' ' + esc(mm.label) + '</span>'
+        + '<span class="smf-badge ' + (mm.calibrated ? 'cal' : 'uncal') + '">'
+        + (mm.calibrated ? '已标定' : '未标定') + '</span></div>';
+      if (mm.evidence) {
+        h += '<div class="smf-ev">历史高恐慌段 <b>' + mm.evidence.n + '</b> 次，T+3 胜率 <b>'
+          + (mm.evidence.winRate * 100).toFixed(0) + '%</b> · 均值 +' + mm.evidence.avgFwd + '%'
+          + '<span class="smf-ev-note">边缘较薄·非买入指令</span></div>';
+      }
+      const fl = FACTOR_LABELS;
+      const fbars = Object.keys(mm.weights || {})
+        .filter(k => mm.factors[k] != null && mm.weights[k] > 0)
+        .sort((a, b) => mm.weights[b] - mm.weights[a])
+        .map(k => '<div class="smf-frow"><span class="smf-fname">' + esc(fl[k] || k) + '</span>'
+          + '<span class="smf-ftrack"><span class="smf-ffill" style="width:' + Math.round(mm.factors[k] * 100) + '%"></span></span>'
+          + '<span class="smf-fw">w' + (mm.weights[k] >= 0.1 ? mm.weights[k].toFixed(2) : (mm.weights[k] * 100).toFixed(0) + '%') + '</span></div>')
+        .join('');
+      if (fbars) h += '<div class="smf-factors">' + fbars + '</div>';
+      h += '</div>';
     }
     h += '</div></details>';
 
