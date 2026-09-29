@@ -201,12 +201,16 @@ async function fetchSectorFlow(kind = 'industry', maxPages = 12) {
         throw new Error('板块资金流不可用：东财风控，同花顺备胎也失败（' + e2.message + '）');
       }
       const tTotal = thsRows.length;
+      /* THS 列表页不带服务器时间戳：诚实口径是【我们实际抓到这份数据的本地时间】。
+         盖观测时间而非 null——数据是真实的，只是无法证明它是交易所终盘快照
+         （口径差异已在 boardFallback.note 里说明）。 */
+      const fetchTs = new Date().toLocaleTimeString('zh-CN', { hour12: false });
       const rows = thsRows.map(s => Object.assign({
         code: s.code, name: s.name, level: s.level, changePct: s.changePct,
         todayYi: null, d5Yi: null, d10Yi: null, mainPct: null,
         upCount: s.upCount, downCount: s.downCount,
         leader: s.leader, leaderCode: null, leaderPct: s.leaderPct,
-        dataTs: null, kind, source: 'ths.board',
+        dataTs: fetchTs, kind, source: 'ths.board',
       }, {
         total: tTotal, coverage: 1, complete: true,
         boardFallback: {
@@ -398,6 +402,14 @@ async function scan(opts = {}) {
   /* 数据时点：任取一条即可（同批请求时点一致）。
    * 报告里必须带上 —— 否则读者无法判断这是盘中快照还是终盘数据。 */
   const dataTs = sectors.length ? sectors[0].dataTs : null;
+
+  /* 口径提升：fetchSectorFlow 内部降级同花顺时，每行带 boardFallback。
+     sectors 非空（外层旧兜底不触发），必须在此把口径说明提到顶层，
+     否则面板只看到行情、看不到"这是同花顺粗口径"。 */
+  if (!boardFallback) {
+    const fbRow = sectors.find(s => s && s.boardFallback && s.source === 'ths.board');
+    if (fbRow) boardFallback = fbRow.boardFallback;
+  }
 
   /* ══════ 时点校验（用户 2026-09-09 第三优先）══════
    *
