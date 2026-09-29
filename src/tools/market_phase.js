@@ -141,6 +141,64 @@ async function assess(deps, opt = {}) {
       : null;
   } catch (e) { sentimentMulti = { error: e.message }; }
 
+  /* 2.7) 大盘时机总开关：结构阶段 × 情绪温度 → 当前窗口 + 样本外成绩单 */
+  let marketWindow = null;
+  try {
+    const mwin = require('./market_window');
+    const smod = require('./sentiment_model');
+    const chn = require('./chan');
+    /* 复用上面的 enriched（已含 fwd_d1/3/5）；重建以保证本块自洽 */
+    const closeMap = new Map(barsDay.map(b => [b.date, b.close]));
+    const d0 = (history || []).map(r => Object.assign({}, r));
+    let enr = smod.enrichDaily(d0, barsDay, null);
+    enr = enr.map(r => {
+      const b = closeMap.get(r.date);
+      if (r.sh_close == null && b != null) r.sh_close = b;
+      if (r.sh_volume == null && b != null && b.volume != null) r.sh_volume = b.volume;
+      return r;
+    });
+    enr = enr.map(r => {
+      const idx = barsDay.findIndex(b => b.date === r.date);
+      if (idx >= 0) for (const k of [1, 3, 5]) {
+        if (idx + k < barsDay.length)
+          r['fwd_d' + k] = +((barsDay[idx + k].close - barsDay[idx].close) / barsDay[idx].close * 100).toFixed(2);
+      }
+      return r;
+    });
+
+    /* phaseAt/scoreAt 严格只用截至 i 的信息 */
+    const phaseAt = i => {
+      try { return chn.analyzeMarket({ day: barsDay.slice(0, i + 1) }).phase; }
+      catch (e) { return null; }
+    };
+    const scoreAt = i => {
+      try {
+        const train = enr.slice(Math.max(0, i - 90), i);
+        const c = smod.calibrate(train);
+        return smod.weightedScore(smod.factors(enr[i], enr.slice(0, i)), c.weights);
+      } catch (e) { return null; }
+    };
+
+    const report3 = mwin.backtestWindows(enr, { phaseAt, scoreAt }, { minIndex: 40, fwdKey: 'fwd_d3' });
+    const report5 = mwin.backtestWindows(enr, { phaseAt, scoreAt }, { minIndex: 40, fwdKey: 'fwd_d5' });
+
+    /* 当前窗口：用今天的结构阶段 + 今日多因子分（若有） */
+    const curPhase = market ? market.phase : (barsDay.length ? phaseAt(barsDay.length - 1) : null);
+    const curScore = sentimentMulti && sentimentMulti.score != null ? sentimentMulti.score : null;
+    const cur = mwin.windowOf(curPhase, curScore);
+
+    const findRep = (rep, code) => rep.windows.find(w => w.code === code) || null;
+    marketWindow = {
+      window: cur.window, code: cur.code, reason: cur.reason,
+      phase: curPhase, score: curScore,
+      evidence: {
+        d3: findRep(report3, cur.code),
+        d5: findRep(report5, cur.code),
+        allD3: report3.windows,
+      },
+    };
+  } catch (e) { marketWindow = { error: e.message }; }
+
   /* 3) 综合一句话（大白话，供模型/网页） */
   const phase = market ? market.phase : 'unknown';
   const summary = buildSummary(phase, fear, errors);
@@ -161,6 +219,7 @@ async function assess(deps, opt = {}) {
     fear,                        // {tier, fear, resonance, side, label, ...}
     sentimentScore,              // {score 0-100, label, state, calibrated:false}
     sentimentMulti,              // 多因子（经前向收益标定）：{score,label,calibrated,effective,evidence,factors,weights}
+    marketWindow,                // 时机总开关：{window,code,reason,evidence{d3,d5}}
     sentimentSeries,             // [{date,score,hasRsi}] 近20日情绪曲线
     shTechnical: sh && !sh.error ? {
       close: sh.close, rsi14: sh.rsi14, aboveMa20: sh.aboveMa20, macdCross: sh.macdCross,

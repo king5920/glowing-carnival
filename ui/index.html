@@ -472,6 +472,29 @@ body.drawer-open{overflow:hidden}
 .ms-detail summary::-webkit-details-marker{display:none}
 .ms-detail summary::after{content:'▾';float:right;transition:transform .2s}
 .ms-detail[open] summary::after{transform:rotate(180deg)}
+/* 大盘时机总开关 */
+.mwin-box{margin:10px 12px 2px;padding:10px 12px;border-radius:9px;border:1px solid var(--hairline2);background:rgba(40,55,80,.18)}
+.mwin-top{display:flex;align-items:baseline;justify-content:space-between}
+.mwin-lab{font-size:9px;color:var(--faint);letter-spacing:1.5px}
+.mwin-val{font-size:14px;font-weight:700;letter-spacing:1px}
+.mwin-reason{margin-top:5px;font-size:10px;color:var(--dim);line-height:1.6}
+.mwin-ev{margin-top:7px;font-size:10px;color:var(--dim);line-height:1.6}
+.mwin-ev b{font-weight:600}
+.mwin-ev-weak{color:var(--faint)}
+.mwin-foot{margin-top:7px;font-size:9px;color:var(--faint);letter-spacing:.3px}
+.mwin-risk_off{border-color:rgba(242,54,69,.32);background:rgba(120,40,50,.12)}
+.mwin-risk_off .mwin-val{color:#ff8a93}
+.mwin-risk_off .mwin-ev b{color:#ffb3b9}
+.mwin-engage{border-color:rgba(46,196,166,.3);background:rgba(40,90,80,.12)}
+.mwin-engage .mwin-val{color:#5fe6c6}
+.mwin-engage .mwin-ev b{color:#a6f0dc}
+.mwin-hold{border-color:rgba(242,178,62,.3);background:rgba(110,85,40,.12)}
+.mwin-hold .mwin-val{color:#f2c766}
+.mwin-hold .mwin-ev b{color:#f6dc9e}
+.mwin-cap_watch{border-color:rgba(255,159,28,.32);background:rgba(110,75,35,.12)}
+.mwin-cap_watch .mwin-val{color:#ffb866}
+.mwin-cap_watch .mwin-ev b{color:#ffd9a8}
+.mwin-wait .mwin-val{color:var(--dim)}
 /* 多因子标定证据块 */
 .smf-box{margin:10px 12px 4px;padding:10px 11px;border:1px solid rgba(90,150,200,.22);border-radius:8px;background:rgba(40,70,100,.12)}
 .smf-head{display:flex;align-items:center;justify-content:space-between}
@@ -1847,6 +1870,23 @@ body.no-webgl #gl-fallback{display:grid}
     /* 一句话点破结构与情绪的关系 */
     h += '<div class="ms-diverge"><span>◉</span><span>' + divergeText(d, s) + '</span></div>';
     h += '</div>';
+
+    /* ── 大盘时机总开关（结构×情绪 → 窗口 + 样本外成绩单）── */
+    const mw = d.marketWindow;
+    if (mw && !mw.error) {
+      h += '<div class="mwin-box mwin-' + mw.code + '">'
+        + '<div class="mwin-top"><span class="mwin-lab">大盘时机</span>'
+        + '<span class="mwin-val">' + esc(mw.window) + '</span></div>'
+        + '<div class="mwin-reason">' + esc(mw.reason) + '</div>';
+      const e3 = mw.evidence && mw.evidence.d3;
+      if (e3 && e3.n >= 10) {
+        h += '<div class="mwin-ev">样本外近一年同窗口 <b>' + e3.n + '</b> 次，T+3 胜率 <b>'
+          + (e3.winRate * 100).toFixed(0) + '%</b> · 均值 ' + (e3.avgFwd > 0 ? '+' : '') + e3.avgFwd + '%</div>';
+      } else if (e3) {
+        h += '<div class="mwin-ev mwin-ev-weak">样本外样本仅 ' + e3.n + ' 次，胜率不足以采信</div>';
+      }
+      h += '<div class="mwin-foot">窗口随市场体制变化·仅定时机非买入指令</div></div>';
+    }
 
     /* ── 情绪曲线（C）── */
     const series = Array.isArray(d.sentimentSeries) ? d.sentimentSeries : [];

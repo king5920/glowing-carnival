@@ -40,6 +40,7 @@ const SUITES = [
   ['多因子情绪 smodel',    'src/jarvis-sentiment-model.test.js'],
   ['样本外回测 walkfwd',   'src/jarvis-walkforward.test.js'],
   ['大盘缓存 mpcache',     'src/jarvis-mp-cache.test.js'],
+  ['实时指数 indexquote',  'src/jarvis-index-quote.test.js'],
   ['缠论 chan',           'src/jarvis-chan.test.js'],
   ['minkline',            'src/jarvis-minkline.test.js'],
   ['标的池 universe',     'src/jarvis-universe.test.js'],
