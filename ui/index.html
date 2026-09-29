@@ -482,6 +482,10 @@ body.drawer-open{overflow:hidden}
 .smf-ev{margin-top:7px;font-size:10px;color:var(--dim);line-height:1.7}
 .smf-ev b{color:#bcd8f0;font-weight:600}
 .smf-ev-note{margin-left:6px;color:var(--faint)}
+.smf-oos{margin-top:6px;padding:7px 9px;border-radius:6px;border:1px solid rgba(75,184,224,.28);
+  background:rgba(46,143,196,.1);font-size:10px;color:var(--dim);line-height:1.7}
+.smf-oos b{color:#bfe6ff;font-weight:600}
+.smf-oos-lab{display:inline-block;margin-right:6px;font-size:9px;color:#7fc7e8;letter-spacing:.5px}
 .smf-factors{margin-top:8px;display:flex;flex-direction:column;gap:5px}
 .smf-frow{display:flex;align-items:center;gap:8px;font-size:9px}
 .smf-fname{width:64px;color:var(--dim);flex-shrink:0}
@@ -1879,7 +1883,13 @@ body.no-webgl #gl-fallback{display:grid}
       if (mm.evidence) {
         h += '<div class="smf-ev">历史高恐慌段 <b>' + mm.evidence.n + '</b> 次，T+3 胜率 <b>'
           + (mm.evidence.winRate * 100).toFixed(0) + '%</b> · 均值 +' + mm.evidence.avgFwd + '%'
-          + '<span class="smf-ev-note">边缘较薄·非买入指令</span></div>';
+          + '<span class="smf-ev-note">样本内·边缘较薄</span></div>';
+      }
+      if (mm.oos && mm.oos.n > 0) {
+        h += '<div class="smf-oos"><span class="smf-oos-lab">样本外（滚动验证·更可信）</span>'
+          + '分数≥' + mm.oos.signalMin + ' 共 <b>' + mm.oos.n + '</b> 次，T+3 胜率 <b>'
+          + (mm.oos.winRate * 100).toFixed(0) + '%</b> · 均值 ' + (mm.oos.avgFwd > 0 ? '+' : '') + mm.oos.avgFwd + '%'
+          + '<span class="smf-ev-note">非买入指令</span></div>';
       }
       const fl = FACTOR_LABELS;
       const fbars = Object.keys(mm.weights || {})

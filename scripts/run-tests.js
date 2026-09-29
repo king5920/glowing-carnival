@@ -38,6 +38,7 @@ const SUITES = [
   ['fuyao',               'src/jarvis-fuyao.test.js'],
   ['情绪指数 sscore',      'src/jarvis-sentiment-score.test.js'],
   ['多因子情绪 smodel',    'src/jarvis-sentiment-model.test.js'],
+  ['样本外回测 walkfwd',   'src/jarvis-walkforward.test.js'],
   ['大盘缓存 mpcache',     'src/jarvis-mp-cache.test.js'],
   ['缠论 chan',           'src/jarvis-chan.test.js'],
   ['minkline',            'src/jarvis-minkline.test.js'],

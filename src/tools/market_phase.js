@@ -102,6 +102,12 @@ async function assess(deps, opt = {}) {
       cyb_rsi14: r.cyb_rsi14 != null ? r.cyb_rsi14 : null,
     }));
     let enriched = sm.enrichDaily(histDaily, barsDay, null);
+    /* 回填行 sh_close 多为空：用日K按日期补齐（walk-forward 的趋势/收益都要） */
+    enriched = enriched.map(r => {
+      const b = closeByDate.get(r.date);
+      if (r.sh_close == null && b != null) r.sh_close = b;
+      return r;
+    });
     /* 现算 fwd_d3（日K按交易日对齐），供 calibrate */
     enriched = enriched.map(r => {
       const idx = barsDay.findIndex(b => b.date === r.date);
@@ -111,6 +117,12 @@ async function assess(deps, opt = {}) {
       return r;
     });
     const calib = sm.calibrate(enriched);
+    /* 严格样本外：滚动只用过去窗口标定，给出可信的样本外胜率 */
+    let oos = null;
+    try {
+      const wf = require('./walkforward');
+      oos = wf.walkForward(enriched, { trainWindow: 90 });
+    } catch (e) { oos = { error: e.message }; }
     /* 当日：优先用今天的实时行（含 limit_down/broken_rate/ladder），past=之前daily */
     const todayRow = enriched.length ? enriched[enriched.length - 1] : null;
     if (todayRow && todayRow.date === lastDate(history)) {
@@ -120,6 +132,10 @@ async function assess(deps, opt = {}) {
         evidence: calib.topQuartile, note: calib.note, score: null };
     }
     sentimentMulti.calibrationNote = calib.note;
+    sentimentMulti.oos = (oos && !oos.error)
+      ? { n: oos.signal.n, winRate: oos.signal.winRate, avgFwd: oos.signal.avgFwd,
+          signalMin: oos.signalMin, note: oos.note }
+      : null;
   } catch (e) { sentimentMulti = { error: e.message }; }
 
   /* 3) 综合一句话（大白话，供模型/网页） */
