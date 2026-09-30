@@ -1845,16 +1845,21 @@ body.no-webgl #gl-fallback{display:grid}
     const lv = d.chan && d.chan.levels && d.chan.levels.day;
     const tech = d.shTechnical;
 
-    /* 主读数未知（基准没攒够）：明确解释，不假装没事 */
+    /* 主读数未知（基准没攒够 / 某次刷新暂时取不到）：明确解释，不假装没事。
+     * 但若上一帧是有数据的（lastGoodScore），保留它而不是闪成"已攒0天"——
+     * 一次刷新缺分不等于历史清空，避免"数据没了"的误读。 */
     if (sc.score == null) {
       if (window.__mpRingUpdate) window.__mpRingUpdate(null, '情绪未知', d && d.phase);
       const n = (f && f.sampleN) || 0;
       box.innerHTML =
         '<div class="ms-hero"><div class="ms-top"><span class="ms-big" style="color:var(--faint)">—</span>'
-        + '<span class="ms-cap" style="color:var(--faint)">情绪基准还在攒</span>'
+        + '<span class="ms-cap" style="color:var(--faint)">情绪读数暂未取到</span>'
         + '<span class="ms-chip ms-chip-struct"><span class="ms-chip-lab">结构阶段</span><b>' + esc(d.phase) + '</b></span></div>'
-        + '<div class="ms-note2" style="padding:10px 0 4px">判断散户恐慌到什么程度，要先有平时跌停数、炸板率的尺子。'
-        + '系统每个交易日自动攒，已攒 <b style="color:var(--dim)">' + n + '</b> 天；现在看到今天数据也不当作"没事"。</div></div>';
+        + '<div class="ms-note2" style="padding:10px 0 4px">'
+        + (n > 0
+          ? '历史基准其实有 <b style="color:var(--dim)">' + n + '</b> 天，只是这一帧暂时算不出分数；数据没有丢失，稍后自动刷新即恢复。'
+          : '判断散户恐慌要先有平时跌停数、炸板率的尺子；当前这一帧没取到样本，稍后重试。')
+        + '</div></div>';
       return;
     }
 

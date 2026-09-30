@@ -51,9 +51,22 @@ async function assess(deps, opt = {}) {
     }
   }
 
-  /* 2) 情绪快照 + 崩溃冰点 */
+  /* 2) 情绪快照 + 崩溃冰点
+   * 情绪源间歇失败：第一次若抛错或拿不到 sentiment（se），
+   * 短暂退避后重试一次 —— 单次抖动不该让整帧退化成"样本0/情绪未知"。 */
   let snap = null;
-  try { snap = await deps.snapshot(); } catch (e) { errors.push('情绪快照失败:' + e.message); }
+  try { snap = await deps.snapshot(); }
+  catch (e) {
+    errors.push('情绪快照失败:' + e.message);
+    await new Promise(r => setTimeout(r, 1200));
+    try { snap = await deps.snapshot(); errors.push('重试后恢复'); }
+    catch (e2) { errors.push('情绪快照重试仍失败:' + e2.message); }
+  }
+  if (snap && !(snap.sentiment)) {
+    await new Promise(r => setTimeout(r, 1200));
+    try { const s2 = await deps.snapshot(); if (s2 && s2.sentiment) snap = s2; }
+    catch (e) { /* 保留原 snap，下面如实判 unknown */ }
+  }
   const history = (deps.alertSamples ? deps.alertSamples() : []) || [];
   const se = snap && snap.sentiment;
   const sh = snap && snap.indexes && snap.indexes['上证'];
