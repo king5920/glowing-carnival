@@ -43,6 +43,7 @@ const SUITES = [
   ['板块主线 smline',     'src/jarvis-sector-mainline.test.js'],
   ['大盘缓存 mpcache',     'src/jarvis-mp-cache.test.js'],
   ['实时指数 indexquote',  'src/jarvis-index-quote.test.js'],
+  ['音频总线 audiobus',    'src/jarvis-audiobus.test.js'],
   ['缠论 chan',           'src/jarvis-chan.test.js'],
   ['minkline',            'src/jarvis-minkline.test.js'],
   ['标的池 universe',     'src/jarvis-universe.test.js'],

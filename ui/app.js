@@ -132,15 +132,20 @@
       if (vcEl.dataset.mounted === '1') coreSetState('idle');
     }
     if (vcEl.dataset.mounted !== '1') return;
-    // 300ms 内有真实音量流就用它，否则按状态合成（保证 TTS/应答也会动）
+    /* 真实音频总线（TTS播放/麦克风）优先；300ms内服务端mic事件次之；否则按状态合成 */
     const micFresh = (Date.now() - vcMicSeenAt) < 300;
+    let ab = null;
+    try { if (window.AudioBus) ab = window.AudioBus.read(); } catch (_) {}
     let e;
     if (reduceMotion) {
-      // §4 L1 直跳终值：按状态取静态能量，不做 sin 逐帧动画
+      // §4 L1 直跳终值：按状态取静态能量，不做逐帧动画
       e = vcState === 'speak' ? 0.75 : vcState === 'listen' ? 0.42
         : vcState === 'think' ? 0.20 : 0.08;
       if (vcLastE === e) return;
       vcLastE = e;
+    } else if (ab && ab.level > 0.02) {
+      e = ab.level;
+      if (window.VOICECORE.setBands) window.VOICECORE.setBands(ab.bands);
     } else if (micFresh) e = vcMicLevel;
     else if (vcState === 'speak') e = 0.6 + 0.35 * Math.abs(Math.sin(performance.now() / 240));
     else if (vcState === 'listen') e = 0.34 + 0.16 * Math.abs(Math.sin(performance.now() / 420));
@@ -993,6 +998,8 @@
     const a = new Audio(item.url);
     speakQ.cur = a;
     speakQ.playing = true;
+    /* 把 TTS 元素接入真实音频分析（语音核随它的波形起伏）；失败不影响播放 */
+    try { if (window.AudioBus) window.AudioBus.attachTTS(a); } catch (_) {}
     const release = () => { URL.revokeObjectURL(item.url); };
     const next = () => {
       speakQ.playing = false;
