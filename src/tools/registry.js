@@ -867,7 +867,7 @@ tools.register('market_timing', {
     const mk = chan.analyzeMarket({ day: k.bars });
     L.push(`结构定位：缠论「${mk.phase}」（${mk.reason}）— 这是"大盘定时机"的结构背景，未标定仅供观察`);
   } catch (_) { /* 结构取不到不影响顺势判断 */ }
-  L.push('注：本工具是顺势(右侧)总开关；散户崩溃冰点(左侧)请另用 market_phase 查看，两者不可混为一谈。');
+  L.push('注：本工具是顺势(右侧)总开关。跌停家数和炸板率的分位在 market_phase，未标定，给不出入场时机。');
 
   return { text: L.join('\n'), buy: m.buy, confidence: m.confidence, calibrated: m.calibrated,
            sampleDays: days, sentiment: se, checks: m.checks };
@@ -879,8 +879,8 @@ tools.register('market_phase', {
   description: '大盘"现在处在什么生命阶段 + 散户有没有崩溃"的结构化判断（仅上证指数）。'
     + '缠论部分按日K给出六阶段：退潮期/磨底期/筑底期/启动期/主升期/高位震荡期，'
     + '并带走势类型、笔中枢位置、买卖点/背驰数量等证据；'
-    + '崩溃部分给出恐慌冰点（tier: none/watch/normal/extreme/unknown）、左右侧 side 与共振三料。'
-    + '方法论：大盘定买卖时机。缠论画法与崩溃阈值均未标定，转述时必须保留"未标定·仅供观察"，'
+    + '情绪部分只给两列数：跌停家数、炸板率，以及它们在此前定型日里的分位和样本天数。'
+    + '方法论：大盘定买卖时机。缠论画法未标定。这两列数给不出入场时机，'
     + '绝不能说"可以买"，也不对个股给买卖建议。',
   parameters: {
     type: 'object',
@@ -894,7 +894,6 @@ tools.register('market_phase', {
   const kline = require('./stock_kline');
   const db = require('../db');
   const mp = require('./market_phase');
-  const cap = require('./capitulation');
   const r = await mp.assess({
     getBars: (period) => kline.kline('000001', period, period === 'day' ? 240 : 320).then(k => k.bars),
     snapshot: () => sentiment.snapshot(),
@@ -910,15 +909,28 @@ tools.register('market_phase', {
       + `；笔${d.strokeCount} 笔中枢${d.segZoneCount} 买卖点${d.pointCount} 背驰${d.divergenceCount}`);
     if (r.chan.reason) L.push('阶段理由：' + r.chan.reason);
   }
-  const f = r.fear;
-  if (f && f.tier === 'unknown') {
-    L.push(`情绪冰点：基准还在攒（样本 ${f.sampleN || 0}/${cap.MIN_CAL_DAYS} 天），暂不下冰点结论，也不当作安全`);
-  } else if (f) {
-    L.push(`情绪冰点：${f.label}｜共振:${f.resonance ? '是' : '否'}`);
-    if (f.ingredients) L.push('  ' + f.ingredients.map(i => (i.unknown ? '?' : i.hit ? '●' : '○') + i.name).join(' '));
-    if (f.reason) L.push('  ' + f.reason);
+  const t = r.sentimentTape;
+  if (t && Array.isArray(t.rows)) {
+    if (t.intraday) L.push('盘中未定型');
+    t.rows.forEach(row => {
+      if (row.value == null) L.push(`${row.name}：缺失`);
+      else {
+        const shown = row.name === '炸板率' ? (+row.value).toFixed(1) : String(Math.round(row.value));
+        const pct = row.pct == null ? '分位空' : ((row.pct * 100).toFixed(1) + '%');
+        const n = row.n == null ? '样本空' : (row.n + '天');
+        L.push(`${row.name}：${shown}，分位 ${pct}，样本 ${n}`);
+      }
+    });
+    L.push(t.note);
   }
-  if (!r.calibrated) L.push('⚠ 缠论画法与崩溃阈值均未标定，仅供观察，非买入建议');
+  if (!r.calibrated) L.push('⚠ 缠论画法未标定。这两列数给不出入场时机。');
+  if (r.ledger && Array.isArray(r.ledger.items)) {
+    L.push('【标定总账】只复述下面的结论，样本不够或未标定的不要说成已经验证');
+    r.ledger.items.forEach(it => L.push(`· ${it.name}：${it.label}${it.detail ? ' — ' + it.detail : ''}`));
+    const dead = r.ledger.items.filter(it => it.state === 'fail').map(it => it.name);
+    if (dead.length) L.push('样本外无效，转述时不要当成有效边缘：' + dead.join('、'));
+    L.push('选股未纳入标定：尚无选股策略。');
+  }
   if (r.errors && r.errors.length) L.push('（' + r.errors.join('；') + '）');
   return { text: L.join('\n'), ...r };
 });

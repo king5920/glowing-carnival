@@ -348,15 +348,14 @@ test('drawSentimentHeatmap tooltip 是整句中文且含所有 6 个字段', () 
   assert(tip.split(' · ').length === 6, '整句应有 6 段（日期 + 5 项指标），实得 ' + tip.split(' · ').length);
 });
 
-test('drawSentimentHeatmap 极值柱（>=90%）触发斜纹（clip 调用）', () => {
+test('drawSentimentHeatmap 高炸板率不再打斜纹', () => {
   const { cv, calls } = makeCanvas(1200, 80);
-  /* 构造一条 rate=95 的数据 —— 应触发 drawHatch（clip 出现） */
   const d = [{
     date: '2026-09-01', limit_up: 100, limit_down: 2, broken: 95,
     broken_rate: 95, ladder_height: 6, seal_fund_yi: 40,
   }];
   C.drawSentimentHeatmap(cv, d);
-  assert(calls.clip >= 1, '极值柱应有 clip 触发斜纹，实得 ' + calls.clip);
+  assert.strictEqual(calls.clip, 0, '不按高低分档，不应打斜纹，实得 ' + calls.clip);
 });
 
 test('drawSentimentHeatmap 非极值柱（rate=50）不触发斜纹', () => {

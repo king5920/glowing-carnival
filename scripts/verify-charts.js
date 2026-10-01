@@ -635,8 +635,8 @@ async function main() {
   /* ═══ C3-A 断言 ═══ */
   assertChart('情绪温度热力柱', out.heat, {
     minPct: 5,
-    mustHaveText: [/冷静/, /恐慌/],
-    mustHaveGradient: true,
+    mustHaveText: [/柱高＝炸板率/, /不按高低分档/],
+    mustHaveGradient: false,
   });
 
   /* ═══ C3-B 断言 ═══ */

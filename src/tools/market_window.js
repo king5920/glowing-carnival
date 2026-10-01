@@ -48,7 +48,7 @@ function windowOf(phase, score) {
   if (trend === 'down') {
     // 退潮 + 高恐慌：左侧"回补观察"，但只观察（接飞刀风险仍高）
     if (panic) return { window: W.CAP_WATCH, code: 'cap_watch',
-      reason: '退潮期叠加恐慌冰点：左侧反弹可能出现，但下跌结构未改，仅观察不抢跑' };
+      reason: '退潮期且情绪分处于高位：下跌结构未改，仅观察' };
     return { window: W.RISK_OFF, code: 'risk_off',
       reason: soft ? '退潮期且情绪仍在警戒：风险释放未完成，回避为先'
                    : '退潮期：结构向下，风险收益不占优' };

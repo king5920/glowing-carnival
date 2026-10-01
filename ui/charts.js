@@ -305,13 +305,6 @@
       return { hit: function(){ return null; } };
     }
 
-    /* 颜色阶梯：低→中→高 broken_rate，冷静→警戒→恐慌 */
-    const ladder = [
-      { v: 0,    c: '--cy' },   /* 冷静：冷青 */
-      { v: 0.5,  c: '--gd' },   /* 警戒：暖金 */
-      { v: 1,    c: '--rd' },   /* 恐慌：红 */
-    ];
-
     const n = data.length;
     const gap = n > 60 ? 0 : 1;   /* ≤60 根有缝、>60 贴合 */
     const slotW = plotW / n;
@@ -326,16 +319,11 @@
       const x = padLeft + i * slotW;
       const barH = Math.max(2, t * plotH);
       const y = padTop + plotH - barH;
-      const fill = colorLadder(t, ladder);
-      const isExtreme = (rate >= 90 || rate <= 10) && data[i].broken_rate != null;
-      bars.push({ x, y, w: barW, h: barH, d, t, isExtreme });
+      const fill = css('--dim') || '#8ba0b8';
+      bars.push({ x, y, w: barW, h: barH, d, t, isExtreme: false });
 
       ctx.fillStyle = fill;
       ctx.fillRect(x, y, barW, barH);
-      if(isExtreme){
-        /* 极值柱加斜线纹理，色盲备援——不改变主色 */
-        drawHatch(ctx, x, y, barW, barH, 'rgba(255,255,255,.5)');
-      }
     }
 
     /* X 轴稀疏 label：起止 + 中间 1-2 个（若数据足够） */

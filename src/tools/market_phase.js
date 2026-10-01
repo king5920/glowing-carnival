@@ -17,6 +17,8 @@
 const chan = require('./chan');
 const cap = require('./capitulation');
 const ss = require('./sentiment_score');
+const tape = require('./sentiment_tape');
+const clock = require('../clock');
 
 /**
  * 计算当前大盘状态。
@@ -72,6 +74,11 @@ async function assess(deps, opt = {}) {
   const sh = snap && snap.indexes && snap.indexes['上证'];
 
   const fear = cap.evaluate(se, sh, history, market ? { phase: market.phase } : null);
+  const sentimentTape = tape.buildTape(history, {
+    asOf: clock.dateKey(new Date()),
+    live: se ? { limitDown: se.limitDownCount, brokenRate: se.brokenRate } : null,
+    session: clock.tradingSession(),
+  });
 
   /* 2.5) 情绪主读数：0–100 恐慌指数（当日）+ 近20日序列（A+C） */
   const ing = {};
@@ -156,6 +163,7 @@ async function assess(deps, opt = {}) {
 
   /* 2.7) 大盘时机总开关：结构阶段 × 情绪温度 → 当前窗口 + 样本外成绩单 */
   let marketWindow = null;
+  let replayRows = null;
   try {
     const mwin = require('./market_window');
     const smod = require('./sentiment_model');
@@ -178,6 +186,7 @@ async function assess(deps, opt = {}) {
       }
       return r;
     });
+    replayRows = enr;
 
     /* phaseAt/scoreAt 严格只用截至 i 的信息 */
     const phaseAt = i => {
@@ -234,8 +243,8 @@ async function assess(deps, opt = {}) {
         status: 'ok', days: dates.length,
         candidates: cur,
         oos: {
-          d1: { n: bt1.withFwd, winRate: bt1.stats.winRate, reliable: bt1.reliable },
-          d3: { n: bt3.withFwd, winRate: bt3.stats.winRate, reliable: bt3.reliable },
+          d1: { n: bt1.withFwd, winRate: bt1.stats.winRate, avgFwd: bt1.stats.avgFwd, reliable: bt1.reliable },
+          d3: { n: bt3.withFwd, winRate: bt3.stats.winRate, avgFwd: bt3.stats.avgFwd, reliable: bt3.reliable },
           note: bt3.reliable ? bt3.note
             : `板块主线样本外事件不足（T+1 ${bt1.withFwd}/T+3 ${bt3.withFwd}，需≥${sml.MIN_ML_EVENTS}），胜率暂不采信，继续积累交易日`,
         },
@@ -243,9 +252,44 @@ async function assess(deps, opt = {}) {
     }
   } catch (e) { sectorMainline = { error: e.message }; }
 
+  /* 2.9) 标定总账：只给已有样本外数字下三态，不新写打分。选股不进这里。 */
+  let ledger = null;
+  try {
+    const led = require('./calibration_ledger');
+    const phaseCache = new Map();
+    const phaseOn = (row) => {
+      const date = row && row.date;
+      if (!date || !barsDay || !barsDay.length) return null;
+      if (phaseCache.has(date)) return phaseCache.get(date);
+      const idx = barsDay.findIndex(b => b.date === date);
+      let p = null;
+      if (idx >= 0) {
+        try { p = chan.analyzeMarket({ day: barsDay.slice(0, idx + 1) }).phase; }
+        catch (_) { p = null; }
+      }
+      phaseCache.set(date, p);
+      return p;
+    };
+    const fearEval = led.fearForward(replayRows || [], phaseOn);
+    ledger = led.build({
+      sentimentOos: sentimentMulti && !sentimentMulti.error ? sentimentMulti.oos : null,
+      confirmed: sentimentMulti && sentimentMulti.oos && sentimentMulti.oos.confirmed,
+      fearEval,
+      windowStat: marketWindow && marketWindow.evidence ? marketWindow.evidence.d3 : null,
+      windowName: marketWindow && marketWindow.window,
+      sector: sectorMainline && !sectorMainline.error ? sectorMainline.oos : null,
+    });
+  } catch (e) {
+    ledger = {
+      error: e.message, items: [],
+      excluded: [{ id: 'stock_pool', reason: '尚无选股策略，不纳入标定' }],
+      note: '总账本次没算成：' + e.message,
+    };
+  }
+
   /* 3) 综合一句话（大白话，供模型/网页） */
   const phase = market ? market.phase : 'unknown';
-  const summary = buildSummary(phase, fear, errors);
+  const summary = buildSummary(phase, sentimentTape, errors);
 
   return {
     ok: errors.length === 0,
@@ -260,11 +304,13 @@ async function assess(deps, opt = {}) {
       segZoneCount: levels.day && levels.day.segZoneCount,
       calibrated: false,         // 缠论画法待用户持续对图，默认未标定
     } : null,
-    fear,                        // {tier, fear, resonance, side, label, ...}
+    fear,                        // 旧引擎仍供总账计数，页面不转述它的档位
+    sentimentTape,               // 两列数：原值、分位、样本天数
     sentimentScore,              // {score 0-100, label, state, calibrated:false}
     sentimentMulti,              // 多因子（经前向收益标定）：{score,label,calibrated,effective,evidence,factors,weights}
     marketWindow,                // 时机总开关：{window,code,reason,evidence{d3,d5}}
     sectorMainline,              // 板块方向：{candidates,oos{d1,d3,note}}
+    ledger,                      // 标定总账：有效 / 无效 / 样本不够 / 未标定
     sentimentSeries,             // [{date,score,hasRsi}] 近20日情绪曲线
     shTechnical: sh && !sh.error ? {
       close: sh.close, rsi14: sh.rsi14, aboveMa20: sh.aboveMa20, macdCross: sh.macdCross,
@@ -287,15 +333,26 @@ function summarizeLevel(lv) {
   };
 }
 
-function buildSummary(phase, fear, errors) {
-  if (errors.length && phase === 'unknown' && fear.tier === 'unknown') {
+function fmtTapeValue(row) {
+  if (!row || row.value == null) return '缺失';
+  if (row.name === '炸板率') return (+row.value).toFixed(1);
+  return String(Math.round(row.value));
+}
+
+function buildSummary(phase, sentimentTape, errors) {
+  if (errors.length && phase === 'unknown') {
     return '大盘状态无法判断：' + errors.join('；') + '（缺数据不编造）';
   }
-  const parts = [`缠论阶段「${phase}」`];
-  if (fear.tier === 'extreme') parts.push('情绪极端恐慌（左侧·未标定）');
-  else if (fear.tier === 'normal') parts.push('出现恐慌冰点（' + (fear.calibrated ? '' : '未标定·') + '值得关注，非买入建议）');
-  else if (fear.tier === 'watch') parts.push('情绪有恐慌共振但阶段不符，只观察不接飞刀');
-  return parts.join('，') + '。';
+  const rows = (sentimentTape && sentimentTape.rows) || [];
+  const bits = rows.map(r => {
+    if (r.value == null) return r.name + '缺失';
+    const pct = r.pct == null ? '分位空' : ('分位' + (r.pct * 100).toFixed(1) + '%');
+    const n = r.n == null ? '样本空' : ('样本' + r.n + '天');
+    return r.name + fmtTapeValue(r) + '，' + pct + '，' + n;
+  });
+  const intra = sentimentTape && sentimentTape.intraday ? '盘中未定型。' : '';
+  const note = (sentimentTape && sentimentTape.note) || tape.NOTE;
+  return `缠论阶段「${phase}」。${bits.join('；')}。${intra}${note}`;
 }
 
 async function safe(fn) { try { return await fn(); } catch (_) { return null; } }

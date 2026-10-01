@@ -474,6 +474,16 @@ body.drawer-open{overflow:hidden}
 .ms-detail[open] summary::after{transform:rotate(180deg)}
 /* 大盘时机总开关 */
 .mwin-box{margin:10px 12px 2px;padding:10px 12px;border-radius:9px;border:1px solid var(--hairline2);background:rgba(40,55,80,.18)}
+.led-box{margin:8px 12px 4px;padding:8px 10px;border-radius:9px;border:1px solid var(--hairline);background:rgba(20,32,48,.35)}
+.led-h{font-size:10px;letter-spacing:1.2px;color:var(--faint);margin-bottom:4px}
+.led-row{margin:5px 0 0}
+.led-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.led-name{font-size:11px;color:var(--dim)}
+.led-tag{font-size:10px;padding:0 6px;border-radius:8px;border:1px solid var(--hairline);color:var(--faint);flex:none}
+.led-pass{color:var(--cy);border-color:rgba(63,208,255,.45)}
+.led-fail{color:var(--bad);border-color:rgba(255,92,92,.45)}
+.led-detail{font-size:10px;color:var(--faint);line-height:1.45;margin-top:1px}
+.led-foot{margin-top:6px;font-size:10px;color:var(--faint);line-height:1.45}
 .mwin-top{display:flex;align-items:baseline;justify-content:space-between}
 .mwin-lab{font-size:9px;color:var(--faint);letter-spacing:1.5px}
 .mwin-val{font-size:14px;font-weight:700;letter-spacing:1px}
@@ -553,6 +563,11 @@ body.drawer-open{overflow:hidden}
 .mp-phase{font-size:16px;font-weight:800;letter-spacing:2px;line-height:1.2}
 .mp-struc{font-size:10.5px;color:var(--dim);margin-top:5px;line-height:1.5;font-family:var(--num);font-variant-numeric:var(--tnum)}
 .mp-fear{display:flex;align-items:center;gap:7px;margin-top:7px;font-size:11px;font-weight:700}
+.tape{margin:10px 12px 6px}
+.tape table{width:100%;border-collapse:collapse;font-size:12px}
+.tape th,.tape td{padding:4px 6px;text-align:left;font-weight:500;color:var(--dim);border-bottom:1px solid var(--hairline)}
+.tape td{color:var(--txt);font-variant-numeric:tabular-nums}
+.tape-intra,.tape-note{margin-top:6px;font-size:11px;color:var(--faint)}
 .mp-dot{width:7px;height:7px;border-radius:50%;flex:none}
 .mp-ings{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
 .mp-ing{font-size:9px;padding:1px 6px;border-radius:8px;border:1px solid var(--hairline);color:var(--dim);font-family:var(--num)}
@@ -1329,7 +1344,7 @@ body.no-webgl #gl-fallback{display:grid}
           <canvas id="mpRing" aria-hidden="true"></canvas>
           <div class="mp-ring-readout">
             <div class="v" id="mpRingVal">—</div>
-            <div class="u">情绪值 / 100</div>
+            <div class="u">未标定</div>
             <div class="p" id="mpRingPhase">读取中</div>
             <div class="mp-ring-struct" id="mpRingStruct" hidden><i>◇</i><span class="rs-lab">结构阶段</span><b id="mpRingStructVal">—</b></div>
           </div>
@@ -1342,10 +1357,7 @@ body.no-webgl #gl-fallback{display:grid}
         <div id="mpHeatTitle"><span>情绪温度 · 60 日炸板率</span><span id="mpHeatTime"></span></div>
         <canvas id="mpHeatCanvas"></canvas>
         <div class="mp-heat-legend">
-          <span class="mhl-key">冷静</span>
-          <span class="mhl-grad"></span>
-          <span class="mhl-key">恐慌</span>
-          <span class="mhl-note">斜纹＝极值</span>
+          <span class="mhl-note">柱高＝炸板率。不按高低分档。</span>
         </div>
       </div>
       <!-- §5 大盘 K 线图（C3-C）：缠论阶段 + 情绪温度之上再给一段价格历史脉络。
@@ -1817,21 +1829,36 @@ body.no-webgl #gl-fallback{display:grid}
   const timeEl = document.getElementById('mpTime');
   if (!box) return;
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const LED_CLS = { pass: 'led-pass', fail: 'led-fail', short: 'led-short', open: 'led-open' };
+  function ledgerHtml(d) {
+    const led = d && d.ledger;
+    if (!led || !Array.isArray(led.items) || !led.items.length) return '';
+    return '<div class="led-box"><div class="led-h">标定总账</div>'
+      + led.items.map(it => '<div class="led-row"><div class="led-top"><span class="led-name">' + esc(it.name) + '</span>'
+        + '<span class="led-tag ' + (LED_CLS[it.state] || '') + '">' + esc(it.label) + '</span></div>'
+        + '<div class="led-detail">' + esc(it.detail || '') + '</div></div>').join('')
+      + '<div class="led-foot">选股未纳入：尚无选股策略。有效和无效都不是买入指令。</div></div>';
+  }
 
-  const PHASE_CLS = { 退潮期: 'tim-neg', 磨底期: 'tim-def', 筑底期: 'tim-mid', 启动期: 'tim-pos', 主升期: 'tim-pos', 高位震荡期: 'tim-mid' };
-  const FEAR_STYLE = {
-    extreme: { c: '#ff5b5b', t: '极端恐慌 · 左侧' },
-    normal:  { c: '#ff9f1c', t: '恐慌冰点 · 值得关注' },
-    watch:   { c: '#c792ea', t: '恐慌共振 · 只观察' },
-    none:    { c: 'var(--dim)', t: '无崩溃共振' },
-    unknown: { c: 'var(--faint)', t: '冰点无法判断' },
-  };
+  function tapeHtml(d) {
+    const t = d && d.sentimentTape;
+    const rows = t && Array.isArray(t.rows) ? t.rows : [
+      { name: '跌停家数', value: null, pct: null, n: null },
+      { name: '炸板率', value: null, pct: null, n: null },
+    ];
+    const body = rows.map(r => {
+      const v = r.value == null ? '—' : (r.name === '炸板率' ? (+r.value).toFixed(1) : String(Math.round(r.value)));
+      const p = r.pct == null ? '—' : (r.pct * 100).toFixed(1) + '%';
+      const n = r.n == null ? '—' : String(r.n);
+      return '<tr><td>' + esc(r.name) + '</td><td>' + v + '</td><td>' + p + '</td><td>' + n + '</td></tr>';
+    }).join('');
+    const intra = t && t.intraday ? '<div class="tape-intra">盘中未定型</div>' : '';
+    const note = (t && t.note) || '未标定。这两列数给不出入场时机。';
+    return '<div class="tape"><table><tr><th>名称</th><th>当日原值</th><th>分位</th><th>样本天数</th></tr>'
+      + body + '</table>' + intra + '<div class="tape-note">' + esc(note) + '</div></div>';
+  }
 
   const TREND_TXT = { up: '上涨', down: '下跌', range: '震荡' };
-  const FACTOR_LABELS = {
-    limitDown:'跌停分位', brokenRate:'炸板率分位', shRsi:'上证RSI', cybRsi:'创业板RSI',
-    ladder:'连板高度', shDrop:'上证跌幅', sealWeak:'封板资金萎缩',
-  };
   /* 最近一次 /api/market_phase 数据：抽屉打开时直接用，不重复请求 */
   let lastData = null;
   function render(d) {
@@ -1840,48 +1867,12 @@ body.no-webgl #gl-fallback{display:grid}
       return;
     }
 
-    const sc = d.sentimentScore || {};
-    const f = d.fear;
     const lv = d.chan && d.chan.levels && d.chan.levels.day;
     const tech = d.shTechnical;
+    if (window.__mpRingUpdate) window.__mpRingUpdate(null, '未标定', d.phase);
 
-    /* 主读数未知（基准没攒够 / 某次刷新暂时取不到）：明确解释，不假装没事。
-     * 但若上一帧是有数据的（lastGoodScore），保留它而不是闪成"已攒0天"——
-     * 一次刷新缺分不等于历史清空，避免"数据没了"的误读。 */
-    if (sc.score == null) {
-      if (window.__mpRingUpdate) window.__mpRingUpdate(null, '情绪未知', d && d.phase);
-      const n = (f && f.sampleN) || 0;
-      box.innerHTML =
-        '<div class="ms-hero"><div class="ms-top"><span class="ms-big" style="color:var(--faint)">—</span>'
-        + '<span class="ms-cap" style="color:var(--faint)">情绪读数暂未取到</span>'
-        + '<span class="ms-chip ms-chip-struct"><span class="ms-chip-lab">结构阶段</span><b>' + esc(d.phase) + '</b></span></div>'
-        + '<div class="ms-note2" style="padding:10px 0 4px">'
-        + (n > 0
-          ? '历史基准其实有 <b style="color:var(--dim)">' + n + '</b> 天，只是这一帧暂时算不出分数；数据没有丢失，稍后自动刷新即恢复。'
-          : '判断散户恐慌要先有平时跌停数、炸板率的尺子；当前这一帧没取到样本，稍后重试。')
-        + '</div></div>';
-      return;
-    }
-
-    const s = sc.score;
-    if (window.__mpRingUpdate) window.__mpRingUpdate(s, sc.label, d.phase);
-    const col = s >= 70 ? 'var(--panic,#f23645)' : s >= 40 ? 'var(--mid,#f2b23e)' : 'var(--calm,#2ec4a6)';
-
-    let h = '';
-    /* ── 主读数：大字 + 标签 + 结构芯片 ── */
-    h += '<div class="ms-hero"><div class="ms-top">'
-      + '<span class="ms-big" style="color:' + col + '">' + s + '<small>/100</small></span>'
-      + '<span class="ms-chip ms-chip-struct"><span class="ms-chip-lab">结构阶段</span><b>' + esc(d.phase) + '</b></span></div>'
-      + '<div class="ms-cap" style="color:' + col + '">' + esc(sc.label) + '</div>';
-
-    /* 能量条 */
-    h += '<div class="ms-track"><span class="ms-fillgrad" style="clip-path:inset(0 ' + (100 - s) + '% 0 0)"></span>'
-      + '<span class="ms-knob" style="left:' + s + '%"></span></div>'
-      + '<div class="ms-scale"><span>0 平静</span><span>警戒</span><span>100 恐慌</span></div>';
-
-    /* 一句话点破结构与情绪的关系 */
-    h += '<div class="ms-diverge"><span>◉</span><span>' + divergeText(d, s) + '</span></div>';
-    h += '</div>';
+    let h = tapeHtml(d);
+    h += '<div class="ms-note2">结构阶段 ' + esc(d.phase || '未知') + '</div>';
 
     /* ── 大盘时机总开关（结构×情绪 → 窗口 + 样本外成绩单）── */
     const mw = d.marketWindow;
@@ -1899,16 +1890,10 @@ body.no-webgl #gl-fallback{display:grid}
       }
       h += '<div class="mwin-foot">窗口随市场体制变化·仅定时机非买入指令</div></div>';
     }
+    h += ledgerHtml(d);
 
-    /* ── 情绪曲线（C）── */
-    const series = Array.isArray(d.sentimentSeries) ? d.sentimentSeries : [];
-    if (series.length) {
-      h += '<div class="ms-wavewrap"><div class="wlab">情绪趋势 · 近 ' + series.length + ' 日（越高越恐慌）</div>'
-        + '<canvas id="msWave"></canvas></div>';
-    }
-
-    /* ── 详情折叠：笔/中枢/三料/技术 旧细节不丢 ── */
-    h += '<details class="ms-detail"><summary>结构与三料详情</summary><div class="ms-detbody">';
+    /* ── 详情折叠：结构，不含分档 ── */
+    h += '<details class="ms-detail"><summary>结构详情</summary><div class="ms-detbody">';
     if (lv) {
       const posTxt = { above: '运行在中枢上方', below: '已跌到中枢下方', inside: '在中枢里来回' }[lv.pricePos] || '位置待定';
       h += '<div class="mp-struc" style="font-family:inherit">' + esc(TREND_TXT[lv.trend] || '趋势待定') + ' · ' + posTxt
@@ -1916,53 +1901,10 @@ body.no-webgl #gl-fallback{display:grid}
         + ' · 买卖点 ' + lv.pointCount + ' · 背驰 ' + lv.divergenceCount + '</div>';
     }
     if (d.chan && d.chan.reason) h += '<div class="mp-struc" style="font-family:inherit;color:var(--faint);margin-top:5px">' + esc(d.chan.reason) + '</div>';
-    if (f && Array.isArray(f.ingredients)) {
-      h += '<div class="mp-ings" style="margin-top:8px">' + f.ingredients.map(i =>
-        '<span class="mp-ing ' + (i.unknown ? 'unk' : i.hit ? 'hit' : '') + '" title="' + esc(i.detail || '') + '">'
-        + (i.hit ? '●' : '○') + ' ' + esc(i.name) + '</span>').join('') + '</div>';
-    }
-    if (f && f.oversold && f.oversold.detail) h += '<div class="mp-struc" style="font-family:inherit;margin-top:6px">超跌参考：' + esc(f.oversold.detail) + '</div>';
     if (tech && tech.rsi14 != null) {
       h += '<div class="mp-struc" style="font-family:inherit;margin-top:7px">上证 ' + num(tech.close, 0)
         + ' · RSI14 ' + num(tech.rsi14, 1)
         + ' · 价格在MA20' + (tech.aboveMa20 === true ? '上方' : tech.aboveMa20 === false ? '下方' : '附近') + '</div>';
-    }
-    /* 多因子标定证据：历史胜率 + 各因子强度（只放在详情区，主视图不堆） */
-    const mm = d.sentimentMulti;
-    if (mm && mm.score != null && !mm.error) {
-      h += '<div class="smf-box"><div class="smf-head"><span class="smf-title">多因子情绪 · ' + Math.round(mm.score)
-        + ' ' + esc(mm.label) + '</span>'
-        + '<span class="smf-badge ' + (mm.calibrated ? 'cal' : 'uncal') + '">'
-        + (mm.calibrated ? '已标定' : '未标定') + '</span></div>';
-      if (mm.evidence) {
-        h += '<div class="smf-ev">历史高恐慌段 <b>' + mm.evidence.n + '</b> 次，T+3 胜率 <b>'
-          + (mm.evidence.winRate * 100).toFixed(0) + '%</b> · 均值 +' + mm.evidence.avgFwd + '%'
-          + '<span class="smf-ev-note">样本内·边缘较薄</span></div>';
-      }
-      if (mm.oos && mm.oos.n > 0) {
-        h += '<div class="smf-oos"><span class="smf-oos-lab">样本外（滚动验证·更可信）</span>'
-          + '分数≥' + mm.oos.signalMin + ' 共 <b>' + mm.oos.n + '</b> 次，T+3 胜率 <b>'
-          + (mm.oos.winRate * 100).toFixed(0) + '%</b> · 均值 ' + (mm.oos.avgFwd > 0 ? '+' : '') + mm.oos.avgFwd + '%'
-          + '<span class="smf-ev-note">非买入指令</span>';
-        if (mm.oos.confirmed && mm.oos.confirmed.length) {
-          h += '<div class="smf-confirm">跨窗稳健过滤：' + mm.oos.confirmed.map(c =>
-            esc(c.group) + '（' + c.n + '次·胜率' + (c.winRate * 100).toFixed(0) + '%·均值+' + c.avgFwd + '%）').join('、')
-            + '<span class="smf-ev-note">仅近一年环境·边缘薄</span></div>';
-        } else {
-          h += '<div class="smf-confirm smf-confirm-none">无跨窗稳健过滤器，维持原观察口径</div>';
-        }
-        h += '</div>';
-      }
-      const fl = FACTOR_LABELS;
-      const fbars = Object.keys(mm.weights || {})
-        .filter(k => mm.factors[k] != null && mm.weights[k] > 0)
-        .sort((a, b) => mm.weights[b] - mm.weights[a])
-        .map(k => '<div class="smf-frow"><span class="smf-fname">' + esc(fl[k] || k) + '</span>'
-          + '<span class="smf-ftrack"><span class="smf-ffill" style="width:' + Math.round(mm.factors[k] * 100) + '%"></span></span>'
-          + '<span class="smf-fw">w' + (mm.weights[k] >= 0.1 ? mm.weights[k].toFixed(2) : (mm.weights[k] * 100).toFixed(0) + '%') + '</span></div>')
-        .join('');
-      if (fbars) h += '<div class="smf-factors">' + fbars + '</div>';
-      h += '</div>';
     }
 
     /* 板块方向：主线候选 + 样本外状态（方法论后半句） */
@@ -1982,51 +1924,7 @@ body.no-webgl #gl-fallback{display:grid}
     }
     h += '</div></details>';
 
-    h += '<div class="ms-note2">情绪恐慌指数为分位合成（跌停/炸板率/RSI），权重未标定·仅供观察；"值得关注"不是"可以买"，非买入建议。</div>';
-
     box.innerHTML = h;
-
-    /* 画曲线 */
-    const wave = document.getElementById('msWave');
-    if (wave) drawWave(wave, series);
-  }
-
-  /* 结构与情绪关系的一句话：把两个维度读成一句结论 */
-  function divergeText(d, s) {
-    const phase = d.phase || '';
-    if (s >= 70) return '<b>恐慌冰点：</b>散户情绪崩溃，列入反向关注（非买入建议），结合结构阶段「' + esc(phase) + '」观察。';
-    if (s >= 40) return '<b>情绪警戒：</b>恐慌在累积但还没到冰点，先观察，不急于出手。';
-    // 平静
-    if (/退潮|磨底/.test(phase)) return '<b>结构「' + esc(phase) + '」、但情绪平静：</b>散户没恐慌，更像弱反弹/震荡而非恐慌底，不急于出手，继续等冰点或主线确认。';
-    return '<b>情绪平静：</b>结构「' + esc(phase) + '」，散户不恐慌；按结构信号走，别把平静当安全。';
-  }
-
-  /* 情绪曲线绘制（平滑折线+面积+今日点） */
-  function drawWave(cv, series) {
-    const dpr = window.devicePixelRatio || 1;
-    const w = cv.clientWidth, hgt = cv.clientHeight;
-    cv.width = w * dpr; cv.height = hgt * dpr;
-    const x = cv.getContext('2d'); x.scale(dpr, dpr);
-    const vals = series.map(p => p.score).filter(v => v != null);
-    if (!vals.length) return;
-    const min = Math.min(...vals), max = Math.max(...vals);
-    const idx = series.map((p, i) => p.score == null ? null : i).filter(v => v != null);
-    const xx = i => 8 + i / (series.length - 1) * (w - 16);
-    const yy = v => hgt - 8 - (v - min) / (max - min || 1) * (hgt - 18);
-    // 50参考线
-    x.strokeStyle = 'rgba(150,175,215,.16)'; x.setLineDash([4, 5]); x.lineWidth = 1;
-    x.beginPath(); x.moveTo(8, hgt / 2); x.lineTo(w - 8, hgt / 2); x.stroke(); x.setLineDash([]);
-    const pts = series.map((p, i) => p.score == null ? null : [xx(i), yy(p.score)]).filter(Boolean);
-    const g = x.createLinearGradient(0, 0, 0, hgt);
-    g.addColorStop(0, 'rgba(46,196,166,.32)'); g.addColorStop(1, 'rgba(0,0,0,0)');
-    x.beginPath();
-    pts.forEach((p, i) => i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1]));
-    x.lineTo(pts[pts.length - 1][0], hgt - 4); x.lineTo(pts[0][0], hgt - 4); x.closePath();
-    x.fillStyle = g; x.fill();
-    x.beginPath(); pts.forEach((p, i) => i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1]));
-    x.strokeStyle = '#2ec4a6'; x.lineWidth = 1.8; x.lineJoin = 'round'; x.stroke();
-    const last = pts[pts.length - 1];
-    x.beginPath(); x.arc(last[0], last[1], 3.5, 0, 7); x.fillStyle = '#eef3fa'; x.fill();
   }
   function num(v, d) { return (v == null || isNaN(v)) ? '—' : (+v).toFixed(d == null ? 1 : d); }
 
@@ -2058,42 +1956,14 @@ body.no-webgl #gl-fallback{display:grid}
     const num2 = (v, dd) => (v == null || isNaN(v)) ? '—' : (+v).toFixed(dd == null ? 1 : dd);
 
     function renderPlanetDrawer(d) {
-      const sc = (d && d.sentimentScore) || {};
-      const s = sc.score;
       const lv = d && d.chan && d.chan.levels && d.chan.levels.day;
       const tech = d && d.shTechnical;
-      const f = d && d.fear;
       let h = '';
 
-      /* 星球舞台：读数覆盖层独立于 canvas， canvas 只负责 3D */
-      h += '<div class="mpd-stage"><canvas id="mpdPlanet"></canvas>'
-        + '<span class="mpd-zl" style="left:18px;top:22px">冰点</span>'
-        + '<span class="mpd-zl" style="right:18px;top:22px">亢奋</span></div>'
-        + '<div class="mpd-hero"><div class="mpd-tags">'
+      h += tapeHtml(d);
+      h += '<div class="mpd-hero"><div class="mpd-tags">'
         + '<span class="mpd-tag mpd-tag-struct"><span class="mpd-taglab">结构阶段</span>' + esc(d && d.phase || '待标定') + '</span>'
-        + (s != null ? '<span class="mpd-tag mpd-tag-emo"><span class="mpd-taglab">情绪</span><b>' + Math.round(s) + '</b><span class="mpd-tagstate">' + esc(sc.label || '') + '</span></span>' : '')
-        + '</div>'
-        + '<div class="mpd-hint">表面越平静越冷 = 情绪越低迷 · 越沸腾越暖 = 越亢奋</div></div>';
-
-      if (s == null) {
-        const n = (f && f.sampleN) || 0;
-        h += '<div class="ms-note2" style="margin-top:10px">情绪基准还在攒，已攒 <b>' + n + '</b> 天；星球当前按低活动静态显示。</div>';
-      }
-
-      /* 恐慌三料 chips（金色语义 = 风控结论） */
-      if (f && Array.isArray(f.ingredients) && f.ingredients.length) {
-        h += '<div class="mpd-chips">' + f.ingredients.map(i =>
-          '<span class="mp-ing ' + (i.unknown ? 'unk' : i.hit ? 'hit' : '') + '" title="' + esc(i.detail || '') + '">'
-          + (i.hit ? '●' : '○') + ' ' + esc(i.name) + '</span>').join('') + '</div>';
-      }
-
-      /* 潮汐曲线：近 14 日情绪 */
-      const series = Array.isArray(d && d.sentimentSeries) ? d.sentimentSeries.slice(-14) : [];
-      if (series.length) {
-        h += '<div class="drw-sec" style="margin-top:14px"><div class="mpd-tide">'
-          + '<div class="wlab">情绪潮汐 · 近 ' + series.length + ' 日（越高越恐慌）</div>'
-          + '<canvas id="mpdWave"></canvas></div></div>';
-      }
+        + '</div></div>';
 
       /* 四宫格：结构与技术硬指标 */
       h += '<div class="drw-grid" style="margin-top:6px">';
@@ -2104,16 +1974,13 @@ body.no-webgl #gl-fallback{display:grid}
       h += '<div class="drw-kv"><span class="k">上证收盘</span><span class="v">' + (tech ? num2(tech.close, 0) : '—') + '</span></div>';
       h += '<div class="drw-kv"><span class="k">RSI14</span><span class="v">' + (tech ? num2(tech.rsi14, 1) : '—') + '</span></div>';
       h += '</div>';
-
-      h += '<div class="ms-note2">情绪恐慌指数为分位合成（跌停/炸板率/RSI），权重未标定·仅供观察；非买入建议。</div>';
       return h;
     }
 
     function mountPlanetDrawer(bodyEl, d) {
       const pcv = bodyEl.querySelector('#mpdPlanet');
       if (pcv && window.MPlanet) {
-        const sc = (d && d.sentimentScore) || {};
-        window.MPlanet.mount(pcv, sc.score);
+        window.MPlanet.mount(pcv, null);
       }
       const wcv = bodyEl.querySelector('#mpdWave');
       if (wcv) {

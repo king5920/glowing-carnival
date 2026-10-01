@@ -710,8 +710,7 @@ async function runChanPhase() {
       kind: 'market_phase', severity: 'low',
       text: `大盘缠论阶段「${r.phase}」`
         + (r.chan ? `（${(r.chan.levels.day || {}).trend || '?'}走势，笔${r.chan.strokeCount}/笔中枢${r.chan.segZoneCount}/买卖点${(r.chan.levels.day || {}).pointCount}/背驰${(r.chan.levels.day || {}).divergenceCount}）` : '')
-        + '｜崩溃:' + (r.fear ? r.fear.label : '未知')
-        + '（未标定·仅供观察）',
+        + '｜' + ((r.sentimentTape && r.sentimentTape.note) || '未标定。这两列数给不出入场时机。'),
       data: { phase: r.phase, fear: r.fear ? r.fear.tier : null },
     }];
     return {
@@ -726,41 +725,11 @@ async function runChanPhase() {
 }
 
 /**
- * 散户崩溃冰点（盘中每 20 分钟）。
- * 与 runMarketAlert 的顺势信号相反，这是左侧/反向，独立成项不混入"买入窗口"。
- * 只有 normal/extreme 才算有内容；none/watch/unknown 静默让位。
- * 未标定前恒 worthReporting:false（extreme 也只上网页，绝不主动推送）。
+ * 盘中情绪不再按档位播报。
+ * 两列数在网页上，这里不把某一档说成可以动手。
  */
 async function runFearScan() {
-  try {
-    const sentiment = require('./tools/sentiment');
-    const kline = require('./tools/stock_kline');
-    const dbm = require('./db');
-    const mp = require('./tools/market_phase');
-    const r = await mp.assess({
-      getBars: () => kline.kline('000001', 'day', 240).then(k => k.bars),
-      snapshot: () => sentiment.snapshot(),
-      alertSamples: () => dbm.alertSamplesDaily(),
-    }, { withMinute: false });
-    const f = r.fear;
-    const fired = f && (f.tier === 'normal' || f.tier === 'extreme');
-    if (!fired) {
-      // 无冰点：跑完让位，不占这一拍、不产生播报（但请求已顺带完成采样底座）
-      return { ok: true, didSomething: false, tier: f ? f.tier : 'unknown', findings: [], worthReporting: false };
-    }
-    return {
-      ok: true, didSomething: true, tier: f.tier, side: f.side,
-      findings: [{
-        kind: 'capitulation', severity: f.tier === 'extreme' ? 'high' : 'medium',
-        text: `${f.label}：${f.reason}`,
-        data: { tier: f.tier, side: f.side, resonance: f.resonance, calibrated: f.calibrated },
-      }],
-      summary: f.label,
-      worthReporting: false,     // 恒 false：未标定，极端恐慌也先只上网页
-    };
-  } catch (e) {
-    return { ok: false, error: e.message, findings: [], worthReporting: false, didSomething: false };
-  }
+  return { ok: true, didSomething: false, findings: [], worthReporting: false };
 }
 
 /**

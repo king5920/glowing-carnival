@@ -104,7 +104,18 @@ test('assess：极端恐慌快照 → fear.tier=extreme/side=left', async () => 
   const r = await mp.assess(deps);
   assert.strictEqual(r.fear.tier, 'extreme');
   assert.strictEqual(r.fear.side, 'left');
-  assert(/极端恐慌|左侧/.test(r.summary));
+  assert(/给不出入场时机/.test(r.summary));
+  assert(!/冰点|值得关注|共振|可以买/.test(r.summary));
+  assert(r.sentimentTape && r.sentimentTape.rows.length === 2);
+});
+
+test('assess：带标定总账，且不把选股算进策略', async () => {
+  const r = await mp.assess(calmDeps());
+  assert(r.ledger && Array.isArray(r.ledger.items) && r.ledger.items.length >= 6);
+  assert.ok(r.ledger.items.every(it => it.id !== 'stock_pool' && it.id !== 'stock_signal'));
+  assert(/尚无选股策略/.test(JSON.stringify(r.ledger.excluded)));
+  assert.strictEqual(r.ledger.items.find(it => it.id === 'display_score').label, '未标定');
+  assert.strictEqual(r.ledger.items.find(it => it.id === 'chan').label, '未标定');
 });
 
 test('措辞红线：summary/label 绝不出现"可以买"，且未标定时保留观察字样', async () => {
